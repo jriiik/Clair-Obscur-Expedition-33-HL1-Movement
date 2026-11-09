@@ -1,0 +1,27 @@
+# Build and packaging output
+build/
+dist/
+*.zip
+
+# Editors and operating systems
+.vs/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Never commit anything taken from the game or a player's PC:
+# UE4SS logs and dumps, extracted game files, save games.
+UE4SS.log
+*.log
+CXXHeaderDump/
+UHTHeaderDump/
+ObjectDump*.txt
+*.usmap
+*.uasset
+*.uexp
+*.ubulk
+*.pak
+*.utoc
+*.ucas
+*.sav
