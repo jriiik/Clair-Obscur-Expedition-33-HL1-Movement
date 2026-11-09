@@ -8,11 +8,19 @@
 -- Unreal brakes a character that gets no input. The mod turns braking friction off,
 -- sets the plain braking values to almost zero, and adds back whatever braking is
 -- left, so only the Half-Life friction applies.
+--
+-- When the mod hands the movement back, every value goes back to the last one the
+-- game set (see overrides.lua), including the walking speed. The mod doesn't ask
+-- ALS to work out its walking speed again: that would lose a speed the game set
+-- for the area. (ALS's request flag is also a uint8, which UE4SS sets to 0 when
+-- given a Lua true.)
 
 local physics = require("hl1movement.physics")
 local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
 local input = require("hl1movement.input")
+local guard = require("hl1movement.guard")
+local journal = require("hl1movement.journal")
 local Overrides = require("hl1movement.overrides")
 
 local movement = {}
@@ -32,8 +40,8 @@ local st = {
     cmcName = nil,
     worldGravity = nil,
     nextRefresh = 0,
-    maxWalkSaved = false,
     curve = nil, -- the movement curve the mod took out, to put back
+    curveName = nil,
     curveBroken = false,
     limiter = nil, -- the game's speed limiter component, if paused; false: none found
     jump = { latched = false },
@@ -76,6 +84,11 @@ local function takeCurve(cmc)
         local curve = movementSettings.MovementCurve
         if ue.valid(curve) then
             st.curve = curve
+            local curveName = ue.fullName(curve)
+            if curveName ~= st.curveName then
+                st.curveName = curveName
+                journal.note("curve", st.cmcName, "", curveName)
+            end
             movementSettings.MovementCurve = nil
         end
     end)
@@ -89,6 +102,8 @@ end
 local function putCurveBack()
     local curve = st.curve
     st.curve = nil
+    st.curveName = nil
+    journal.forget("curve", st.cmcName, "")
     if not curve or not ue.valid(st.cmc) or ue.fullName(st.cmc) ~= st.cmcName then
         return
     end
@@ -100,8 +115,10 @@ local function putCurveBack()
     end)
 end
 
--- The character has a component that seems to cap its speed at the normal running
--- speed. It is paused while the mod runs, so bunny hopping can build speed.
+-- The character has a component that caps its speed at the movement component's
+-- maximum speed. It is paused while the mod runs, so bunny hopping can build
+-- speed. (The huge MaxWalkSpeed already keeps it from acting; this is in case it
+-- uses another limit.)
 local function findLimiter(pawn)
     local component = ue.find("/Script/Engine.ActorComponent")
     if not component then
@@ -119,26 +136,46 @@ local function findLimiter(pawn)
     return nil
 end
 
+-- Called at every refresh: the game may start the component again.
 local function pauseLimiter(pawn)
-    if st.limiter ~= nil then
+    local limiter = st.limiter
+    if limiter == false then
         return
     end
-    local limiter = findLimiter(pawn)
-    if not limiter then
-        st.limiter = false
-        log.debug("No %s found on the character", LIMITER_CLASS)
+    if limiter == nil then
+        local component = findLimiter(pawn)
+        if not component then
+            st.limiter = false
+            log.debug("No %s found on the character", LIMITER_CLASS)
+            return
+        end
+        local ok, enabled = ue.call(component, "IsComponentTickEnabled")
+        limiter = { obj = component, fullName = ue.fullName(component), wasEnabled = ok and enabled == true }
+        st.limiter = limiter
+        journal.note("tick", limiter.fullName, "", limiter.wasEnabled)
+        component:SetComponentTickEnabled(false)
+        log.debug("Paused the game's speed limiter (%s)", LIMITER_CLASS)
         return
     end
-    local ok, enabled = ue.call(limiter, "IsComponentTickEnabled")
-    st.limiter = { obj = limiter, fullName = ue.fullName(limiter), wasEnabled = ok and enabled == true }
-    limiter:SetComponentTickEnabled(false)
-    log.debug("Paused the game's speed limiter (%s)", LIMITER_CLASS)
+    if ue.valid(limiter.obj) and ue.fullName(limiter.obj) == limiter.fullName then
+        local ok, enabled = ue.call(limiter.obj, "IsComponentTickEnabled")
+        if ok and enabled == true then
+            -- The game started it again, so it is on when the mod hands back.
+            limiter.wasEnabled = true
+            journal.note("tick", limiter.fullName, "", true)
+            limiter.obj:SetComponentTickEnabled(false)
+        end
+    end
 end
 
 local function resumeLimiter()
     local limiter = st.limiter
     st.limiter = nil
-    if limiter and limiter.wasEnabled and ue.valid(limiter.obj) and ue.fullName(limiter.obj) == limiter.fullName then
+    if not limiter then
+        return
+    end
+    journal.forget("tick", limiter.fullName, "")
+    if limiter.wasEnabled and ue.valid(limiter.obj) and ue.fullName(limiter.obj) == limiter.fullName then
         pcall(function()
             limiter.obj:SetComponentTickEnabled(true)
         end)
@@ -173,7 +210,6 @@ function movement.apply(pawn, cmc, cfg, P, now)
         st.cmcName = ue.fullName(cmc)
         st.worldGravity = measureGravity(cmc)
         st.nextRefresh = 0
-        st.maxWalkSaved = false
         st.jump.latched = false
         st.lastMode = nil
         st.emptyInputFrames = 0
@@ -182,19 +218,16 @@ function movement.apply(pawn, cmc, cfg, P, now)
         end
         log.debug("Movement taken over")
     end
-    -- ALS sets the walking speed itself whenever the gait changes, so this is set
-    -- every frame. The high value stops the game from capping your speed.
-    if st.maxWalkSaved then
-        cmc.MaxWalkSpeed = SPEED_LIMIT
-    else
-        st.maxWalkSaved = overrides:set(cmc, "MaxWalkSpeed", SPEED_LIMIT)
-    end
+    -- ALS sets the walking speed itself whenever the gait changes, and the game
+    -- sets it for some areas, so this is set every frame. The high value stops the
+    -- game from capping your speed.
+    overrides:set(cmc, "MaxWalkSpeed", SPEED_LIMIT)
     takeCurve(cmc)
     if now >= st.nextRefresh then
         st.nextRefresh = now + REFRESH
         applyValues(pawn, cmc, P)
         if cfg.DisableSpeedLimiter then
-            pauseLimiter(pawn)
+            guard.run("pausing the speed limiter", pauseLimiter, pawn)
         end
     end
 end
@@ -242,8 +275,13 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
     end
 
     local nx, ny, nz, jumped = physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, doJump, P, dt)
+    local bx, by, bz = 0, 0, 0
     if jumped then
         cmc:SetMovementMode(FALLING, 0)
+        -- Leaving the ground adds the velocity of a moving platform the character
+        -- stood on (while walking, Velocity is relative to it). Keep that.
+        local after = cmc.Velocity
+        bx, by, bz = after.X - vx, after.Y - vy, after.Z - vz
     end
     st.lastMode = jumped and FALLING or mode
     st.lastSpeed = horizontal(nx, ny)
@@ -258,7 +296,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
             nx, ny = nx * scale, ny * scale
         end
     end
-    cmc.Velocity = { X = nx, Y = ny, Z = nz }
+    cmc.Velocity = { X = nx + bx, Y = ny + by, Z = nz + bz }
 end
 
 --- Gives the movement back to the game and puts back everything the mod changed.
@@ -269,12 +307,6 @@ function movement.release()
     overrides:restore()
     putCurveBack()
     resumeLimiter()
-    if ue.valid(st.cmc) and ue.fullName(st.cmc) == st.cmcName then
-        -- Makes ALS set its own walking speed again.
-        pcall(function()
-            st.cmc.bRequestMovementSettingsChange = true
-        end)
-    end
     st.active = false
     st.cmc = nil
     st.cmcName = nil

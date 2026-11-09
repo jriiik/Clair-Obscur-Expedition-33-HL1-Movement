@@ -32,8 +32,8 @@ return {
     AirSpeedCap = 30,       -- the air strafing limit; keep it low, it is what makes air strafing work
     Friction = 4,           -- sv_friction
     StopSpeed = 100,        -- sv_stopspeed
-    Gravity = 800,          -- sv_gravity
-    JumpHeight = 45,        -- Half-Life's jump is 45 units high
+    Gravity = 800,          -- sv_gravity; as in Half-Life, less gravity also means higher jumps
+    JumpHeight = 45,        -- how high a jump goes at Gravity 800 (Half-Life's is 45 units)
     BhopCap = 0,            -- 0: no speed limit. 1.7: like later Half-Life updates,
                             -- which slow you down when you jump above 1.7 x MaxSpeed
     MaxVelocity = 2000,     -- sv_maxvelocity

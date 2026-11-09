@@ -96,3 +96,11 @@ t.test("physics parameters are scaled to centimetres", function()
     t.near(P.jumpSpeed, math.sqrt(2 * 1600 * 90), 1e-9)
     t.eq(P.maxVelocity, 4000)
 end)
+
+t.test("like in Half-Life, less gravity jumps higher", function()
+    local P = settings.physics(settings.load({ Gravity = 400 }, KEYS))
+    local apex = P.jumpSpeed ^ 2 / (2 * P.gravity) / P.unitScale
+    t.near(apex, 90, 1e-9, "twice the height at half the gravity")
+    local normal = settings.physics(settings.load(nil, KEYS))
+    t.near(normal.jumpSpeed ^ 2 / (2 * normal.gravity) / normal.unitScale, 45, 1e-9, "45 units at 800")
+end)

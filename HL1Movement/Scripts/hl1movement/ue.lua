@@ -65,8 +65,12 @@ function ue.same(a, b)
     return x ~= nil and x == ue.address(b)
 end
 
---- Short class name, for example "BP_jRPG_Character_World_C".
+--- Short class name, for example "BP_jRPG_Character_World_C". Checks first that
+--- obj is valid: UE4SS's GetClass on a null object crashes the game.
 function ue.className(obj)
+    if not ue.valid(obj) then
+        return nil
+    end
     local ok, name = pcall(function()
         return obj:GetClass():GetFName():ToString()
     end)
@@ -76,9 +80,13 @@ function ue.className(obj)
     return nil
 end
 
---- Full name with the object's path. Used to check that an object at a remembered
---- address is still the same object before changing it back.
+--- Full name: the class name, a space and the object's path, for example
+--- "SkeletalMeshComponent /Game/Maps/Town.Town:PersistentLevel.Hero_C_12.Mesh".
+--- Used to check that an object at a remembered address is still the same object.
 function ue.fullName(obj)
+    if not ue.valid(obj) then
+        return nil
+    end
     local ok, name = pcall(function()
         return obj:GetFullName()
     end)
@@ -170,6 +178,19 @@ function ue.find(path)
 end
 
 local keys = {}
+
+--- The object with this full name (see ue.fullName), if it still exists.
+function ue.findByFullName(fullName)
+    local path = type(fullName) == "string" and fullName:match("^%S+ (.+)$")
+    if not path then
+        return nil
+    end
+    local ok, obj = pcall(StaticFindObject, path)
+    if ok and ue.valid(obj) and ue.fullName(obj) == fullName then
+        return obj
+    end
+    return nil
+end
 
 --- An Unreal FKey for input checks, for example ue.fkey("SpaceBar").
 function ue.fkey(name)

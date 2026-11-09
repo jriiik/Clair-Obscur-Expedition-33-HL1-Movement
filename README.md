@@ -16,8 +16,10 @@ by holding the jump key.
   height as Half-Life, scaled to the game's world.
 - **Bunny hopping**: hold the jump key and you jump again the moment you land,
   without losing speed. Steer in the air (air strafing) to build up speed.
-- It **steps aside on its own** in battles, dialogue, cutscenes, menus,
-  climbing and on the world map, so the game works normally there.
+- It **steps aside on its own** in battles and on the world map. When the game
+  shows another camera (dialogue, cutscenes, sneaking, aiming), first person
+  switches off. When the game locks your movement or moves the character itself
+  (dialogue, cutscenes, climbing, ledge grabs), the game's own movement comes back.
 - Everything can be turned on and off in the game with one key.
 
 ## What you need
@@ -30,7 +32,8 @@ by holding the jump key.
 
 Back up your saves before trying mods. They are in
 `%LOCALAPPDATA%\Sandfall\Saved\SaveGames` (paste that into the File Explorer
-address bar). Steam Cloud keeps only one copy, so it isn't a backup.
+address bar; for Game Pass see [Other versions](#other-versions-of-the-game)).
+Steam Cloud keeps only one copy, so it isn't a backup.
 
 ## Installing
 
@@ -43,21 +46,25 @@ only added files.
    usually `C:\Program Files (x86)\Steam\steamapps\common\Expedition 33\Sandfall\Binaries\Win64`.
 2. **Install UE4SS.** Go to the UE4SS download page,
    <https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest>, and
-   download the file named `UE4SS_v3.0.1-....zip` (not the one starting with
-   `zDEV`). Unzip it into the `Win64` folder from step 1. You should now have
+   download the file whose name starts with `UE4SS_v` (in November 2026 it was
+   `UE4SS_v3.0.1-1218-g560411f1.zip`). Not the files starting with `zDEV`,
+   `zCustomGameConfigs` or `zMapGenBP`, and not *Source code*. Double-click the
+   downloaded file, select everything inside it (`dwmapi.dll` and the `ue4ss`
+   folder) and copy it into the `Win64` folder from step 1. You should now have
    `Win64\dwmapi.dll` and a `Win64\ue4ss` folder. Only download UE4SS from that
    GitHub page; other sites that look official are not.
 3. **Install this mod.** On this mod's GitHub page, click the green **Code**
-   button, then **Download ZIP**. Open the ZIP and copy the `HL1Movement` folder
-   into `Win64\ue4ss\Mods`. You should end up with
+   button, then **Download ZIP**. Double-click the ZIP, open the
+   `Clair-Obscur-Expedition-33-HL1-Movement-main` folder inside it, and copy the
+   `HL1Movement` folder into `Win64\ue4ss\Mods`. You should end up with
    `Win64\ue4ss\Mods\HL1Movement\Scripts\main.lua` and
    `Win64\ue4ss\Mods\HL1Movement\enabled.txt`.
 4. **Start the game from Steam** as usual and load a save. After a second the view
    switches to first person.
 
 To check that it loaded, open `Win64\ue4ss\UE4SS.log` in a text editor. It should
-have a line `[HL1Movement] Version 0.1.0 loaded`, and after loading a save a line
-`[HL1Movement] Running every frame from ...`.
+have a line containing `[HL1Movement] Version 0.1.0 loaded`, and after loading a
+save one containing `[HL1Movement] Running every frame from`.
 
 ## Controls
 
@@ -70,7 +77,8 @@ have a line `[HL1Movement] Version 0.1.0 loaded`, and after loading a save a lin
 | W A S D, mouse | Move and look, as usual |
 | **Space** (held) | Jump, and keep hopping every time you land |
 
-A controller works too: the left stick moves and A jumps.
+A controller works too: the left stick moves and A jumps. On many laptops the F
+keys only work while you hold the **Fn** key.
 
 ### How to bunny hop and air strafe
 
@@ -97,6 +105,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
 | `JumpKeys` | `{ "SpaceBar", "Gamepad_FaceButton_Bottom" }` | Add `"MouseScrollDown"` to hop with the mouse wheel |
 | `MaxSpeed`, `Accelerate`, `AirAccelerate`, `Friction`, `Gravity` | Half-Life's values | The same as Half-Life's `sv_` console variables |
+| `JumpHeight` | `45` | How high a jump goes at `Gravity` 800; as in Half-Life, less gravity jumps higher |
 | `UnitScale` | `2.5` | Centimetres per Half-Life unit; higher makes everything faster and higher |
 | `BhopCap` | `0` | `1.7` copies later Half-Life updates, which slow you down above 1.7 × max speed |
 
@@ -104,12 +113,21 @@ New hotkeys only take effect after restarting the game.
 
 ## When the mod steps aside
 
-It hands control back to the game, and puts back everything it changed, when:
+Both the camera and the movement go back to the game, with everything the mod
+changed, when:
 
-- a battle starts (it comes back afterwards);
-- the game shows another camera: dialogue, cutscenes, sneaking or aiming;
-- the game locks your movement, for example in menus, dialogue or climbing;
+- a battle starts (they come back afterwards);
 - you are on the world map (Esquie and the world map aren't supported yet).
+
+Otherwise each part steps aside on its own:
+
+- **First person** switches off while the game shows another camera: dialogue,
+  cutscenes, sneaking or aiming.
+- **The game's own movement** comes back while the game locks your movement or
+  moves the character itself: dialogue, cutscenes, climbing, ledge grabs.
+
+So you stay in first person while you climb, and you may keep the Half-Life
+movement while aiming. While the game is paused, nothing changes.
 
 ## Uninstalling
 
@@ -135,18 +153,21 @@ checks the game's own files. It isn't needed to uninstall either.
 
 ## Troubleshooting
 
-- **Nothing happens.** Check `Win64\ue4ss\UE4SS.log` for lines starting with
-  `[HL1Movement]`. If there are none, the mod isn't installed in the right folder.
-  If the log has no UE4SS lines at all, UE4SS isn't installed in the right folder.
+- **Nothing happens.** Open `Win64\ue4ss\UE4SS.log` and search (Ctrl+F) for
+  `HL1Movement`. If it isn't there, the mod isn't installed in the right folder.
+  If there is no `UE4SS.log` at all, or the times in it are from before you
+  started the game, UE4SS didn't load: check step 2.
 - **The game crashes at start** after installing UE4SS. Make sure you use an
   experimental build from the page above, and that you don't have two copies of
   UE4SS from different mods.
-- **The camera stays in third person.** Press F6. If the log says
-  `The first-person camera doesn't seem to work`, please report it.
+- **The camera stays in third person.** If first person doesn't take effect, the
+  mod switches it off by itself after two seconds, so that your character isn't
+  left invisible, and the log says `First person doesn't work here`. Please
+  report it. Press F6 twice to try again.
 - **Steam Deck or Linux**: add this launch option in Steam (right-click the game,
   *Properties*, *Launch options*): `WINEDLLOVERRIDES="dwmapi=n,b" %command%`.
-- **A key does nothing.** Another mod may use it. Change the keys in `config.lua`
-  and restart the game.
+- **A key does nothing.** On a laptop, hold **Fn** with it. Another mod may use
+  it too: change the keys in `config.lua` and restart the game.
 
 ## Reporting problems
 
@@ -155,7 +176,9 @@ This version hasn't been tested in the game, so reports help a lot.
 
 1. Play until the problem happens, then press **F8**. This adds a status report to
    the log.
-2. Quit the game and open `Win64\ue4ss\UE4SS.log`.
+2. Quit the game (or let it crash), then copy `Win64\ue4ss\UE4SS.log` somewhere
+   else **before you start the game again**: UE4SS starts a new, empty log every
+   time the game starts.
 3. Open an issue on this GitHub page, describe what you saw, and attach the log.
    Check it first for anything private: it can contain folder names from your PC.
 
@@ -169,15 +192,19 @@ This version hasn't been tested in the game, so reports help a lot.
 - In third person (F6) with the mod's movement, the character's animations can
   look wrong, because the game doesn't see your input.
 - In first person the game's camera effects, such as depth of field and camera
-  shake, don't apply.
+  shake, don't apply. If the game sets brightness or colours on its own camera,
+  the picture can look a little different too.
 
 ## Other versions of the game
 
 The mod itself works the same in every version; only the folders differ.
 - **GOG**: the folder is also `Sandfall\Binaries\Win64`; the game file there is
   `SandFallGOG-Win64-Shipping.exe`.
-- **Xbox / Game Pass for PC**: the folder is `Sandfall\Binaries\WinGDK` instead of
-  `Win64`.
+- **Xbox / Game Pass for PC**: use `Sandfall\Binaries\WinGDK` wherever these steps
+  say `Win64`. To find it, open the Xbox app, choose *Manage* for the game, then
+  *Files* and *Browse*, and open `Content\Sandfall\Binaries\WinGDK`. The saves are
+  in `%LOCALAPPDATA%\Packages\KeplerInteractive.Expedition33_ymj30pw7xe604\SystemAppData\wgs`;
+  back up that whole folder, with the game closed.
 - **Epic**: not checked yet.
 
 ## How it works
@@ -195,7 +222,10 @@ and before it moves your character:
   which looks out of the character's eyes, and hides the body
   (`hl1movement/camera.lua`).
 
-Everything it changes is remembered and put back when it steps aside.
+Everything it changes is remembered and put back when it steps aside. If the
+game sets a value of its own in the meantime, such as a new walking speed, that
+is the one put back. If UE4SS restarts its mods while the game runs, the new copy
+of the mod first puts back what the old one changed.
 
 ## Development
 

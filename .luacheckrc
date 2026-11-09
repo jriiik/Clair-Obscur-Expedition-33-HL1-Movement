@@ -23,6 +23,7 @@ files["tests/"] = {
         "FindFirstOf",
         "FName",
         "Key",
+        "ModRef",
         "TEST_ROOT",
         "print",
         "dofile",

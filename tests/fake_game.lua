@@ -3,8 +3,10 @@
 --
 -- Objects behave like UE4SS's: unknown names give an invalid object, writes to
 -- unknown names are ignored, struct properties read as views and are written from
--- tables, game functions check how many parameters they get, and using an object
--- after it was destroyed raises an error (in the real game that would crash).
+-- tables, reading a field a struct doesn't have raises an error, uint8 properties
+-- take integers (a Lua boolean becomes 0), game functions check how many
+-- parameters they get, and using an object after it was destroyed raises an error
+-- (in the real game that would crash).
 -- The fake character movement follows Unreal's closely enough (input acceleration,
 -- braking, curve-driven ground values, gravity, landing) to check that the mod's
 -- speeds survive it.
@@ -14,6 +16,7 @@ local fake = {}
 local realDofile = dofile
 local data = setmetatable({}, { __mode = "k" })
 local nextAddress = 0x10000
+local byPath = {} -- path -> object, for StaticFindObject
 
 -- UE4SS gives Lua full userdata. Pure Lua can't make one, but a closed file
 -- handle is one, and debug.setmetatable gives it the behaviour wanted.
@@ -122,8 +125,8 @@ local function structView(s)
                     return "UScriptStruct"
                 end
             end
-            if key == "__fields" then
-                return nil
+            if key == "__fields" or not s.__fields[key] then
+                error("[handle_unreal_property_value]: Was unable to retrieve property '" .. tostring(key) .. "'", 2)
             end
             return s[key]
         end,
@@ -243,6 +246,18 @@ objectMeta.__index = function(self, key)
     return INVALID
 end
 
+-- UE4SS writes a uint8 property with lua_tointeger, which gives 0 for anything
+-- that isn't a whole number, true and false included.
+local function toByte(value)
+    local n
+    if type(value) == "number" then
+        n = math.tointeger(value)
+    elseif type(value) == "string" then
+        n = math.tointeger(tonumber(value) or 0)
+    end
+    return (n or 0) & 0xFF
+end
+
 objectMeta.__newindex = function(self, key, value)
     local d = live(self, key)
     if d.props[key] == nil and not d.declared[key] then
@@ -250,6 +265,9 @@ objectMeta.__newindex = function(self, key, value)
         return
     end
     d.writes[key] = (d.writes[key] or 0) + 1
+    if d.bytes[key] then
+        value = toByte(value)
+    end
     local current = d.props[key]
     if type(current) == "table" and getmetatable(current) == nil and not current.__array then
         if type(value) ~= "table" then
@@ -274,15 +292,22 @@ function fake.object(spec)
     for _, name in ipairs(spec.declared or {}) do
         declared[name] = true
     end
-    local name = spec.name or spec.className
+    local bytes = {}
+    for _, name in ipairs(spec.bytes or {}) do
+        bytes[name] = true
+    end
+    local name = spec.name or string.format("%s_%X", spec.className, nextAddress)
+    local path = spec.path or ("/Game/Levels/Fake.Fake:PersistentLevel." .. name)
+    byPath[path] = obj
     data[obj] = {
         className = spec.className,
         name = name,
-        path = spec.path or ("/Game/Levels/Fake.Fake:PersistentLevel." .. name),
+        path = path,
         chain = spec.chain or { spec.className },
         typeName = spec.typeName,
         props = spec.props or {},
         declared = declared,
+        bytes = bytes,
         methods = spec.methods or {},
         world = spec.world,
         alive = true,
@@ -333,6 +358,11 @@ function fake.breakOnRead(obj, key)
     data[obj].breakOnRead[key] = true
 end
 
+--- Replaces one of the object's game functions, for example to make it fail.
+function fake.method(obj, name, fn)
+    data[obj].methods[name] = fn
+end
+
 -- A game function: checks the parameter count, like UE4SS does.
 local function ufunction(name, count, impl)
     return function(self, ...)
@@ -373,10 +403,12 @@ end
 
 function fake.newGame(options)
     options = options or {}
+    byPath = {}
     local g = {
         options = options,
         hooks = {},
         keybinds = {},
+        shared = {}, -- UE4SS's shared variables, which outlive a restart of the mods
         functions = { [RESTART] = true },
         log = {},
         keys = {},
@@ -399,6 +431,7 @@ function fake.newGame(options)
         engineAccelerated = false,
         time = 0,
         tickPath = CONTROLLER .. ":ReceiveTick",
+        characterTickPath = CHARACTER .. ":ReceiveTick",
         jumpPath = CHARACTER .. ":JumpAction",
     }
 
@@ -428,8 +461,23 @@ function fake.newGame(options)
         fn()
     end
     _G.StaticFindObject = function(path)
-        return g.statics[path] or INVALID
+        local found = g.statics[path] or byPath[path]
+        if found and data[found].alive then
+            return found
+        end
+        return INVALID
     end
+    _G.ModRef = {
+        SetSharedVariable = function(_, name, value)
+            assert(type(name) == "string")
+            assert(value == nil or type(value) == "string" or type(value) == "number" or type(value) == "boolean",
+                "shared variables take only nil, booleans, numbers, strings and objects")
+            g.shared[name] = value
+        end,
+        GetSharedVariable = function(_, name)
+            return g.shared[name]
+        end,
+    }
     _G.FindFirstOf = function(name)
         if name == "PlayerController" then
             return g.pc
@@ -486,7 +534,7 @@ function fake.newGame(options)
             end),
             ClientSetCameraMode = ufunction("ClientSetCameraMode", 1, function(_, name)
                 g.cameraStyle = assert(fake.nameOf(name), "ClientSetCameraMode needs an FName")
-                if not options.cameraStyleNotReflected then
+                if options.cameraStyleReflected then
                     fake.props(g.pcm).CameraStyle = name
                 end
             end),
@@ -501,7 +549,7 @@ function fake.newGame(options)
         chain = { "CameraModifier_CameraShake", "CameraModifier", "Object" }, props = { Alpha = 1 } })
     g.pcm = fake.object({ className = "BP_PlayerCameraManager_C", world = world,
         chain = { "BP_PlayerCameraManager_C", "ExtendedPlayerCameraManager", "PlayerCameraManager", "Actor", "Object" },
-        props = { CameraStyle = not options.cameraStyleNotReflected and fake.FName("Default") or nil,
+        props = { CameraStyle = options.cameraStyleReflected and fake.FName("Default") or nil,
             DefaultFOV = 90, ViewPitchMin = -60, ViewPitchMax = 40,
             bAlwaysApplyModifiers = false, ModifierList = fake.array({ g.limiterModifier, g.shakeModifier }) },
         methods = {
@@ -513,6 +561,10 @@ function fake.newGame(options)
             end),
         } })
     fake.set(g.pc, "PlayerCameraManager", g.pcm)
+
+    -- ALS's movement curve, an asset all characters share
+    g.curve = fake.object({ className = "CurveVector", name = "C_ALS_Movement_Normal",
+        path = "/Game/ALS/Curves/C_ALS_Movement_Normal.C_ALS_Movement_Normal" })
 
     -- The character, its parts and its movement component
     function g.buildCharacter()
@@ -601,13 +653,14 @@ function fake.newGame(options)
                     g.limiterTicking = value
                 end),
             } })
-        c.curve = fake.object({ className = "CurveVector", name = "C_ALS_Movement_Normal",
-            path = "/Game/ALS/Curves/C_ALS_Movement_Normal.C_ALS_Movement_Normal" })
+        c.curve = g.curve
 
         local movementSettings = fake.struct({ WalkSpeed = 175, RunSpeed = 375, SprintSpeed = 650,
             MovementCurve = c.curve, RotationRateCurve = false })
         movementSettings.__locked = options.curveLocked
         c.cmc = fake.object({ className = "ALSCharacterMovementComponent", name = "CharMoveComp", world = world,
+            path = string.format("/Game/Levels/Fake.Fake:PersistentLevel.Character_%X.CharMoveComp", nextAddress),
+            bytes = { "bRequestMovementSettingsChange" },
             chain = { "ALSCharacterMovementComponent", "CharacterMovementComponent", "PawnMovementComponent",
                 "NavMovementComponent", "MovementComponent", "ActorComponent", "Object" },
             props = {
@@ -627,13 +680,22 @@ function fake.newGame(options)
                 JumpZVelocity = 450,
                 AirControl = 0.35,
                 MaxStepHeight = 45,
-                bRequestMovementSettingsChange = false,
+                bRequestMovementSettingsChange = 0, -- a uint8 in ALS
                 CurrentMovementSettings = movementSettings,
             },
             methods = {
                 SetMovementMode = ufunction("SetMovementMode", 2, function(_, mode, custom)
                     assert(math.type(mode) == "integer" and math.type(custom) == "integer")
-                    fake.props(c.cmc).MovementMode = mode
+                    local p = fake.props(c.cmc)
+                    local was = p.MovementMode
+                    p.MovementMode = mode
+                    -- Leaving a moving platform adds its velocity (while walking,
+                    -- Velocity is relative to it).
+                    local platform = g.baseVelocity
+                    if mode == 3 and (was == 1 or was == 2) and platform then
+                        local v = p.Velocity
+                        v.X, v.Y, v.Z = v.X + platform.X, v.Y + platform.Y, v.Z + platform.Z
+                    end
                 end),
                 GetMaxBrakingDeceleration = ufunction("GetMaxBrakingDeceleration", 0, function()
                     local p = fake.props(c.cmc)
@@ -728,12 +790,23 @@ function fake.newGame(options)
     --- Loads a save: the game's classes now exist and the controller takes over
     --- the character.
     function g.loadSave()
-        g.functions[g.tickPath] = true
+        if not options.noControllerTick then
+            g.functions[g.tickPath] = true
+        end
+        g.functions[g.characterTickPath] = true
         g.functions[g.jumpPath] = true
         local restart = g.hooks[RESTART]
         if restart then
             restart(fake.param(g.pc), fake.param(g.pawn))
         end
+    end
+
+    --- UE4SS restarting its mods: the old copy's hooks and keys are dropped without
+    --- warning, and main.lua is loaded again.
+    function g.restartMods(root)
+        g.hooks = {}
+        g.keybinds = {}
+        fake.loadMod(root)
     end
 
     --- Presses a hotkey, then runs one frame (hotkey actions run on the next frame).
@@ -745,10 +818,10 @@ function fake.newGame(options)
 
     --- The camera style in use, whichever way it was set.
     function g.style()
-        if options.cameraStyleNotReflected then
-            return g.cameraStyle
+        if options.cameraStyleReflected then
+            return fake.nameOf(fake.props(g.pcm).CameraStyle)
         end
-        return fake.nameOf(fake.props(g.pcm).CameraStyle)
+        return g.cameraStyle
     end
 
     function g.speed()
@@ -850,19 +923,33 @@ function fake.newGame(options)
             v.Z = 0
         end
         -- ALS sets the walking speed for its gait when asked to.
-        if p.bRequestMovementSettingsChange then
+        if p.bRequestMovementSettingsChange ~= 0 then
             p.MaxWalkSpeed = 375
-            p.bRequestMovementSettingsChange = false
+            p.bRequestMovementSettingsChange = 0
         end
     end
 
-    function g.updateCamera()
+    -- The camera manager's update at the end of the frame. With g.cameraSpeed set
+    -- (cm/s), the camera moves to its new place at that speed, like a slow blend.
+    function g.updateCamera(dt)
         local pos = g.position
+        local target
         if g.style() == "FirstPerson" and not options.cameraStyleIgnored then
-            g.cameraLocation = { X = pos.X, Y = pos.Y, Z = pos.Z + fake.props(g.pawn).BaseEyeHeight }
+            target = { X = pos.X, Y = pos.Y, Z = pos.Z + fake.props(g.pawn).BaseEyeHeight }
         else
-            g.cameraLocation = { X = pos.X - 300, Y = pos.Y, Z = pos.Z + 150 }
+            target = { X = pos.X - 300, Y = pos.Y, Z = pos.Z + 150 }
         end
+        if g.cameraSpeed then
+            local c = g.cameraLocation
+            local dx, dy, dz = target.X - c.X, target.Y - c.Y, target.Z - c.Z
+            local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+            local step = g.cameraSpeed * dt
+            if distance > step then
+                target = { X = c.X + dx / distance * step, Y = c.Y + dy / distance * step,
+                    Z = c.Z + dz / distance * step }
+            end
+        end
+        g.cameraLocation = target
     end
 
     --- One frame: input, the controller's tick (where the mod runs), the character's
@@ -902,8 +989,13 @@ function fake.newGame(options)
         end
         if not g.paused then
             g.moveTick(dt)
+            -- The character ticks after its movement component.
+            local characterTick = g.hooks[g.characterTickPath]
+            if characterTick then
+                characterTick(fake.param(g.pawn), fake.param(dt))
+            end
+            g.updateCamera(dt) -- Unreal doesn't update the camera while the game is paused
         end
-        g.updateCamera()
         g.justPressed = {}
         g.time = g.time + dt
     end

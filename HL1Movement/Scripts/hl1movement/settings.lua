@@ -247,6 +247,10 @@ function settings.load(user, keyTable)
     return cfg, warnings
 end
 
+-- Half-Life's default sv_gravity. Its jump speed is fixed (the speed that reaches
+-- 45 units at this gravity), so with less gravity you jump higher, as in Half-Life.
+local HALF_LIFE_GRAVITY = 800
+
 --- Physics parameters in centimetres, from the Half-Life values in the settings.
 function settings.physics(cfg)
     local s = cfg.UnitScale
@@ -262,7 +266,7 @@ function settings.physics(cfg)
         stopSpeed = cfg.StopSpeed * s,
         minSpeed = 0.1 * s,
         gravity = gravity,
-        jumpSpeed = physics.jumpSpeed(gravity, cfg.JumpHeight * s),
+        jumpSpeed = physics.jumpSpeed(HALF_LIFE_GRAVITY * s, cfg.JumpHeight * s),
         bhopCap = cfg.BhopCap,
         maxVelocity = cfg.MaxVelocity * s,
     }

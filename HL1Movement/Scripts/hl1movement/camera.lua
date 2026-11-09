@@ -6,18 +6,28 @@
 -- pitch limits, and hides the character's own body from the player's view.
 -- Everything it changes is put back when first person switches off.
 --
--- The camera manager's CameraStyle field may not be visible to UE4SS (in older
--- engine versions it isn't). Then the style is set through the player
+-- The camera manager's CameraStyle field isn't visible to UE4SS in Unreal 5.4 (it
+-- isn't a reflected property). Then the style is set through the player
 -- controller's ClientSetCameraMode function instead, and put back to "Default".
+--
+-- Whether first person really took effect is checked every frame until the
+-- camera is seen at the character's eyes. If it stays away for GIVE_UP_TIME, the
+-- mod gives up and shows the game's camera and the character again, instead of
+-- leaving an invisible character in third person. Time paused doesn't count, and
+-- a camera that is clearly getting closer (a blend from another camera) gets more.
 
 local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
+local guard = require("hl1movement.guard")
+local journal = require("hl1movement.journal")
 local Overrides = require("hl1movement.overrides")
 
 local camera = {}
 
 local EYE_FACTOR = 0.78 -- "auto" eye height, as a share of the capsule's half height
 local REFRESH = 0.5 -- seconds between re-checks of the FOV, pitch limits and body
+local MAX_EYE_DISTANCE = 50 -- cm between the camera and the eyes that still counts as first person
+local GIVE_UP_TIME = 2 -- seconds of the camera not being at the eyes before giving up
 local PRIMITIVE = "/Script/Engine.PrimitiveComponent"
 
 local overrides = Overrides.new()
@@ -25,12 +35,19 @@ local hidden = {} -- address -> { obj, fullName, how, was }
 local st = {
     active = false,
     pawnAddr = nil,
+    pcmAddr = nil,
     nextRefresh = 0,
     frames = 0,
-    checked = false,
+    confirmed = false, -- the camera has been seen at the eyes since first person started
+    failingSince = nil, -- when the checks started failing
+    failingDistance = nil, -- the distance then
+    lastDistance = nil, -- cm between the camera and the eyes at the last check
+    unavailable = nil, -- why first person was given up, until camera.retry()
+    unavailablePcm = nil,
     hasTargetRotation = false,
     styleSetter = nil, -- { pc, fullName } when the style was set with ClientSetCameraMode
     styleFailed = false,
+    styleRoute = nil,
 }
 
 function camera.isActive()
@@ -82,6 +99,7 @@ local function useFirstPersonStyle(pc, pcm, refresh)
         st.styleRoute = "ClientSetCameraMode"
         if not st.styleSetter then
             st.styleSetter = { pc = pc, fullName = ue.fullName(pc) }
+            journal.note("style", st.styleSetter.fullName, "", "Default")
         end
     end
 end
@@ -89,7 +107,11 @@ end
 local function putStyleBack()
     local setter = st.styleSetter
     st.styleSetter = nil
-    if setter and ue.valid(setter.pc) and ue.fullName(setter.pc) == setter.fullName then
+    if not setter then
+        return
+    end
+    journal.forget("style", setter.fullName, "")
+    if ue.valid(setter.pc) and ue.fullName(setter.pc) == setter.fullName then
         setStyleWithFunction(setter.pc, "Default")
     end
 end
@@ -136,10 +158,61 @@ local function collect(component, out, depth)
     end
 end
 
+local function hidePart(entry)
+    local part = entry.obj
+    if entry.how == "owner" then
+        if ue.get(part, "bOwnerNoSee") ~= true then
+            part:SetOwnerNoSee(true)
+        end
+    elseif ue.get(part, "bHiddenInGame") ~= true then
+        part:SetHiddenInGame(true, false)
+    end
+end
+
+-- Shows a part the way it was before (if it is still the same part) and forgets it.
+local function showPart(entry)
+    journal.forget("hide", entry.fullName, entry.how)
+    local part = entry.obj
+    if ue.valid(part) and ue.fullName(part) == entry.fullName then
+        pcall(function()
+            if entry.how == "owner" then
+                part:SetOwnerNoSee(entry.was)
+            else
+                part:SetHiddenInGame(entry.was, false)
+            end
+        end)
+    end
+end
+
+local function hideOne(part, address, primitive, pawnAddr)
+    local entry = hidden[address]
+    if entry and entry.fullName ~= ue.fullName(part) then
+        -- A new part where an old, now destroyed one used to be.
+        journal.forget("hide", entry.fullName, entry.how)
+        hidden[address] = nil
+        entry = nil
+    end
+    if entry then
+        hidePart(entry) -- hide it again if the game showed it
+        return
+    end
+    if not part:IsA(primitive) then
+        return
+    end
+    local ok, owner = ue.call(part, "GetOwner")
+    local how = (ok and ownedByPawn(owner, pawnAddr)) and "owner" or "hidden"
+    entry = { obj = part, fullName = ue.fullName(part), how = how,
+        was = ue.get(part, how == "owner" and "bOwnerNoSee" or "bHiddenInGame") == true }
+    hidden[address] = entry
+    journal.note("hide", entry.fullName, how, entry.was)
+    hidePart(entry)
+end
+
 -- Hides everything visible that is attached to the character: its meshes and those
 -- of attached actors, such as the swappable body, face, hair and gear. Parts the
 -- character owns get "owner no see", which hides them only from the player's own
 -- view; other parts are hidden in game. Lights are separate components and stay on.
+-- Parts that are no longer attached (dropped, or detached by the game) are shown.
 local function hideBody(pawn)
     local primitive = ue.find(PRIMITIVE)
     if not primitive then
@@ -148,50 +221,28 @@ local function hideBody(pawn)
     local parts = {}
     collect(ue.get(pawn, "RootComponent"), parts, 0)
     local pawnAddr = ue.address(pawn)
+    local seen = {}
     for _, part in ipairs(parts) do
         local address = ue.address(part)
-        local entry = address and hidden[address]
-        if entry and entry.fullName ~= ue.fullName(part) then
-            entry = nil -- a new part where an old, now destroyed one used to be
+        if address then
+            seen[address] = true
+            local ok, err = pcall(hideOne, part, address, primitive, pawnAddr)
+            if not ok then
+                guard.report("hiding " .. tostring(ue.className(part)), err)
+            end
         end
-        if entry then
-            -- already hidden: hide it again if the game showed it
-            if entry.how == "owner" then
-                if ue.get(part, "bOwnerNoSee") ~= true then
-                    part:SetOwnerNoSee(true)
-                end
-            elseif ue.get(part, "bHiddenInGame") ~= true then
-                part:SetHiddenInGame(true, false)
-            end
-        elseif address and part:IsA(primitive) then
-            local ok, owner = ue.call(part, "GetOwner")
-            if ok and ownedByPawn(owner, pawnAddr) then
-                hidden[address] = { obj = part, fullName = ue.fullName(part), how = "owner",
-                    was = ue.get(part, "bOwnerNoSee") == true }
-                part:SetOwnerNoSee(true)
-            else
-                hidden[address] = { obj = part, fullName = ue.fullName(part), how = "hidden",
-                    was = ue.get(part, "bHiddenInGame") == true }
-                part:SetHiddenInGame(true, false)
-            end
+    end
+    for address, entry in pairs(hidden) do
+        if not seen[address] then
+            showPart(entry)
+            hidden[address] = nil
         end
     end
 end
 
 local function showBody()
     for _, entry in pairs(hidden) do
-        local part = entry.obj
-        if ue.valid(part) and ue.fullName(part) == entry.fullName then
-            if entry.how == "owner" then
-                pcall(function()
-                    part:SetOwnerNoSee(entry.was)
-                end)
-            else
-                pcall(function()
-                    part:SetHiddenInGame(entry.was, false)
-                end)
-            end
-        end
+        showPart(entry)
     end
     hidden = {}
 end
@@ -209,39 +260,94 @@ local function widenPitch(pcm, limit)
     end
 end
 
--- The camera position is from the end of the last frame, and the character hasn't
--- moved since, so in first person the camera should sit at the character's eyes.
-local function checkView(pcm, pawn)
+-- The distance in cm between the camera and the character's eyes, or nil if it
+-- can't be told. The camera position is from the end of the last frame, and the
+-- character hasn't moved since, so in first person the two should match.
+local function eyeDistance(pcm, pawn)
     local okCamera, cameraAt = ue.call(pcm, "GetCameraLocation")
     local okPawn, pawnAt = ue.call(pawn, "K2_GetActorLocation")
     local eye = ue.number(pawn, "BaseEyeHeight")
     if not (okCamera and okPawn and eye and type(cameraAt) == "table" and type(pawnAt) == "table") then
-        return
+        return nil
     end
     local dx = cameraAt.X - pawnAt.X
     local dy = cameraAt.Y - pawnAt.Y
     local dz = cameraAt.Z - (pawnAt.Z + eye)
-    local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if distance > 50 then
-        log.once("camera-style", "The first-person camera doesn't seem to work: the camera is %.0f cm "
-            .. "from the character's eyes. Camera manager class: %s. Please report this with UE4SS.log.",
-            distance, tostring(ue.className(pcm)))
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function giveUp(pcm, cfg)
+    local reason
+    if st.styleFailed then
+        reason = "the camera style could not be switched"
     else
-        log.debug("First-person camera check passed (camera %.1f cm from the eyes)", distance)
+        reason = string.format("the camera stayed %.0f cm away from the character's eyes", st.lastDistance or 0)
+    end
+    log.warn("First person doesn't work here: %s (camera manager: %s). The game's camera and your character "
+        .. "are back. %s, and please report UE4SS.log.", reason, tostring(ue.className(pcm)),
+        cfg.CameraKey and ("Press " .. cfg.CameraKey .. " twice to try again") or "Reload the settings to try again")
+    camera.release()
+    st.unavailable = reason
+    st.unavailablePcm = ue.address(pcm)
+end
+
+-- Checks every frame until the camera is seen at the eyes, then at each refresh.
+-- While the game is paused the camera isn't updated, so nothing is checked.
+local function judgeView(pcm, pawn, cfg, now, refresh, paused)
+    if paused then
+        st.failingSince = nil
+        return
+    end
+    if st.frames < 2 or (st.confirmed and not st.failingSince and not refresh) then
+        return
+    end
+    local ok, distance = guard.run("checking the view", eyeDistance, pcm, pawn)
+    if not ok or (distance == nil and not st.styleFailed) then
+        return
+    end
+    st.lastDistance = distance
+    if distance and distance <= MAX_EYE_DISTANCE and not st.styleFailed then
+        if not st.confirmed then
+            log.debug("First person is working (camera %.1f cm from the eyes)", distance)
+        end
+        st.confirmed = true
+        st.failingSince = nil
+        return
+    end
+    if not st.failingSince then
+        st.failingSince, st.failingDistance = now, distance
+    elseif now - st.failingSince >= GIVE_UP_TIME then
+        if distance and st.failingDistance and distance < st.failingDistance * 0.75 then
+            -- Still on its way to the eyes (a blend from another camera): wait longer.
+            st.failingSince, st.failingDistance = now, distance
+        else
+            giveUp(pcm, cfg)
+        end
     end
 end
 
 --- Turns first person on, or keeps it on. Called every frame while it should be on.
-function camera.apply(pc, pawn, pcm, cfg, now)
+--- paused: whether the game is paused (the camera isn't updated then).
+function camera.apply(pc, pawn, pcm, cfg, now, paused)
+    local pcmAddr = ue.address(pcm)
+    if st.unavailable then
+        if pcmAddr == st.unavailablePcm then
+            return
+        end
+        st.unavailable = nil -- a new camera manager: try again
+    end
     local pawnAddr = ue.address(pawn)
-    if st.active and st.pawnAddr ~= pawnAddr then
+    if st.active and (st.pawnAddr ~= pawnAddr or st.pcmAddr ~= pcmAddr) then
         camera.release()
     end
     if not st.active then
         st.active = true
         st.pawnAddr = pawnAddr
+        st.pcmAddr = pcmAddr
         st.frames = 0
-        st.checked = false
+        st.confirmed = false
+        st.failingSince = nil
+        st.lastDistance = nil
         st.nextRefresh = 0
         st.hasTargetRotation = ue.typeOf(ue.get(pawn, "TargetRotation")) == "UScriptStruct"
         log.debug("First-person camera applied")
@@ -250,6 +356,7 @@ function camera.apply(pc, pawn, pcm, cfg, now)
 
     local refresh = now >= st.nextRefresh
     useFirstPersonStyle(pc, pcm, refresh)
+    -- Set every frame, in case the game sets its own (Unreal resets the eye height).
     local eye = eyeHeight(pawn, cfg)
     if eye then
         local current = ue.number(pawn, "BaseEyeHeight")
@@ -257,18 +364,24 @@ function camera.apply(pc, pawn, pcm, cfg, now)
             overrides:set(pawn, "BaseEyeHeight", eye)
         end
     end
+    local fov = ue.number(pcm, "DefaultFOV")
+    if fov == nil or math.abs(fov - cfg.FieldOfView) > 0.01 then
+        overrides:set(pcm, "DefaultFOV", cfg.FieldOfView)
+    end
     if refresh then
         st.nextRefresh = now + REFRESH
-        overrides:set(pcm, "DefaultFOV", cfg.FieldOfView)
-        widenPitch(pcm, cfg.PitchLimit)
+        guard.run("widening the pitch limits", widenPitch, pcm, cfg.PitchLimit)
         if cfg.HideBody then
-            hideBody(pawn)
+            guard.run("hiding the body", hideBody, pawn)
         end
     end
-    if not st.checked and st.frames >= 10 then
-        st.checked = true
-        checkView(pcm, pawn)
-    end
+    judgeView(pcm, pawn, cfg, now, refresh, paused)
+end
+
+--- Lets first person start again after it was given up (camera key, reload).
+function camera.retry()
+    st.unavailable = nil
+    st.unavailablePcm = nil
 end
 
 --- Turns the character to face where the camera looks (yaw only), so that the
@@ -288,7 +401,18 @@ function camera.status()
     for _ in pairs(hidden) do
         count = count + 1
     end
-    return { active = st.active, styleRoute = st.styleRoute or "not set yet", hiddenParts = count }
+    local state
+    if st.unavailable then
+        state = "given up: " .. st.unavailable
+    elseif not st.active then
+        state = "off"
+    elseif st.confirmed then
+        state = "working"
+    else
+        state = "checking"
+    end
+    return { active = st.active, state = state, styleRoute = st.styleRoute or "not set yet", hiddenParts = count,
+        lastDistance = st.lastDistance }
 end
 
 --- Turns first person off and puts back everything it changed.
@@ -304,6 +428,7 @@ function camera.release()
     end
     st.active = false
     st.pawnAddr = nil
+    st.pcmAddr = nil
 end
 
 return camera

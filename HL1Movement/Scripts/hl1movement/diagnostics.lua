@@ -3,6 +3,8 @@
 
 local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
+local guard = require("hl1movement.guard")
+local journal = require("hl1movement.journal")
 local input = require("hl1movement.input")
 local camera = require("hl1movement.camera")
 local movement = require("hl1movement.movement")
@@ -19,15 +21,16 @@ local function show(value)
     elseif t == "boolean" or t == "nil" or t == "string" then
         return tostring(value)
     elseif t == "table" or t == "UScriptStruct" then
-        local ok, text = pcall(function()
-            if value.X ~= nil then
-                return string.format("(X=%.1f Y=%.1f Z=%.1f)", value.X, value.Y, value.Z)
-            elseif value.Yaw ~= nil then
-                return string.format("(Pitch=%.1f Yaw=%.1f Roll=%.1f)", value.Pitch, value.Yaw, value.Roll)
-            end
-            return t
-        end)
-        return ok and text or t
+        -- One field at a time: in UE4SS, reading a field a struct doesn't have raises an error.
+        local x, y, z = ue.number(value, "X"), ue.number(value, "Y"), ue.number(value, "Z")
+        if x and y and z then
+            return string.format("(X=%.1f Y=%.1f Z=%.1f)", x, y, z)
+        end
+        local pitch, yaw, roll = ue.number(value, "Pitch"), ue.number(value, "Yaw"), ue.number(value, "Roll")
+        if pitch and yaw and roll then
+            return string.format("(Pitch=%.1f Yaw=%.1f Roll=%.1f)", pitch, yaw, roll)
+        end
+        return t
     elseif t == "FName" then
         local ok, text = pcall(function()
             return value:ToString()
@@ -64,13 +67,24 @@ function diagnostics.report(env)
     line("Mod: enabled=%s camera wanted=%s camera active=%s movement active=%s frames=%d errors=%d",
         tostring(mod.enabled), tostring(mod.cameraOn), tostring(camera.isActive()), tostring(movement.isActive()),
         mod.frames, mod.errors)
-    line("Frame hook: %s", mod.tickHook or ("not registered yet (" .. tostring(mod.hookError) .. ")"))
+    line("Frame hook: %s%s", mod.tickHook or ("not registered yet (" .. tostring(mod.hookError) .. ")"),
+        mod.lateHook and " (runs after the character's movement, so the movement is off)" or "")
     line("Jump hook: %s", mod.jumpHook or "not registered")
+    local failed = guard.status()
+    if #failed == 0 then
+        line("Errors: none")
+    end
+    for _, step in ipairs(failed) do
+        line("Errors in %s: %d%s, last: %s", step.name, step.total, step.off and " (turned off)" or "",
+            tostring(step.lastError))
+    end
+    line("Game values the mod has changed and will put back: %d", journal.size())
     local jump = input.status()
     line("Jump input: mode=%s, key seen=%s, game presses=%d, game held=%s, game repeats=%s", cfg.JumpInput,
         tostring(jump.keysSeen), jump.gamePresses, tostring(jump.gameHeld), tostring(jump.repeats))
     local cameraStatus = camera.status()
-    line("Camera: style set through %s, hidden parts=%d", cameraStatus.styleRoute, cameraStatus.hiddenParts)
+    line("Camera: %s, style set through %s, hidden parts=%d, camera to eyes=%s cm", cameraStatus.state,
+        cameraStatus.styleRoute, cameraStatus.hiddenParts, show(cameraStatus.lastDistance))
     local moveStatus = movement.status()
     line("Movement: world gravity=%s, curve taken out=%s, curve failed=%s, speed limiter=%s",
         show(moveStatus.worldGravity), tostring(moveStatus.curveTaken), tostring(moveStatus.curveBroken),
@@ -94,6 +108,10 @@ function diagnostics.report(env)
         result("Controller", pc, "IsMoveInputIgnored")
         result("Controller", pc, "GetControlRotation")
         result("Controller", pc, "GetViewTarget")
+        local dialogue = ue.object(pc, "BP_DialogueSystemComponent")
+        if dialogue then
+            result("Dialogue", dialogue, "IsInDialogue")
+        end
 
         local pawn = ue.object(pc, "Pawn")
         if not pawn then
@@ -102,10 +120,11 @@ function diagnostics.report(env)
             line("Character: %s", show(pawn))
             line("  class = %s, supported = %s", tostring(ue.className(pawn)), tostring(mod.pawnAllowed))
             for _, name in ipairs({ "bIsWorldMapPawn", "BaseEyeHeight", "JumpMaxHoldTime", "JumpMaxCount",
-                "RollAnimationThreshold", "TargetRotation", "RootComponent" }) do
+                "JumpCurrentCount", "RollAnimationThreshold", "TargetRotation", "RootComponent" }) do
                 field("Character", pawn, name)
             end
             result("Character", pawn, "CanAddMovementInput")
+            result("Character", pawn, "CanJump")
             result("Character", pawn, "IsPlayingRootMotion")
             result("Character", pawn, "K2_GetActorLocation")
             result("Character", pawn, "GetPendingMovementInputVector")
@@ -114,10 +133,12 @@ function diagnostics.report(env)
                 result("Capsule", capsule, "GetScaledCapsuleHalfHeight")
                 result("Capsule", capsule, "GetScaledCapsuleRadius")
             end
-            local mainCamera = ue.object(pawn, "MainCamera")
-            line("  MainCamera = %s", show(mainCamera))
-            if mainCamera then
-                result("MainCamera", mainCamera, "IsActive")
+            for _, name in ipairs({ "MainCamera", "Main_CineCamera" }) do
+                local component = ue.object(pawn, name)
+                line("  %s = %s", name, show(component))
+                if component then
+                    result(name, component, "IsActive")
+                end
             end
             local componentClass = ue.find("/Script/Engine.ActorComponent")
             if componentClass then
@@ -168,8 +189,12 @@ function diagnostics.report(env)
             result("Camera", pcm, "GetCameraLocation")
             result("Camera", pcm, "GetFOVAngle")
             for i, modifier in ipairs(ue.list(ue.get(pcm, "ModifierList"))) do
-                line("  modifier %d: %s, PitchMin=%s, PitchMax=%s", i, tostring(ue.className(modifier)),
-                    show(ue.get(modifier, "PitchMin")), show(ue.get(modifier, "PitchMax")))
+                if ue.valid(modifier) then
+                    line("  modifier %d: %s, PitchMin=%s, PitchMax=%s", i, tostring(ue.className(modifier)),
+                        show(ue.get(modifier, "PitchMin")), show(ue.get(modifier, "PitchMax")))
+                else
+                    line("  modifier %d: (none)", i)
+                end
             end
         end
 
