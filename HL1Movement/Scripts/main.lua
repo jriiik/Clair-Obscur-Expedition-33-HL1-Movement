@@ -210,7 +210,7 @@ local function onFrame(pc, dt)
     if canMove then
         movement.apply(pawn, cmc, cfg, P, mod.now)
         if not isPaused(pc) and ask(pawn, "IsPlayingRootMotion") ~= true then
-            movement.step(pc, pawn, cmc, cfg, P, dt, yaw)
+            movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames)
         end
     else
         movement.release()
@@ -280,8 +280,10 @@ local function onTick(context, deltaSeconds)
     safeFrame(obj, ue.unwrap(deltaSeconds))
 end
 
+-- The game's jump event comes during input handling, before this frame's tick,
+-- so it belongs to the next frame number.
 local function onGameJump(_, pressed)
-    input.onGameJump(ue.unwrap(pressed) == true)
+    input.onGameJump(ue.unwrap(pressed) == true, mod.frames + 1)
 end
 
 local function tryHook(paths, callback)

@@ -67,8 +67,8 @@ function diagnostics.report(env)
     line("Frame hook: %s", mod.tickHook or ("not registered yet (" .. tostring(mod.hookError) .. ")"))
     line("Jump hook: %s", mod.jumpHook or "not registered")
     local jump = input.status()
-    line("Jump input: mode=%s, key seen=%s, game presses=%d, game held=%s", cfg.JumpInput,
-        tostring(jump.keysSeen), jump.gamePresses, tostring(jump.gameHeld))
+    line("Jump input: mode=%s, key seen=%s, game presses=%d, game held=%s, game repeats=%s", cfg.JumpInput,
+        tostring(jump.keysSeen), jump.gamePresses, tostring(jump.gameHeld), tostring(jump.repeats))
     local cameraStatus = camera.status()
     line("Camera: style set through %s, hidden parts=%d", cameraStatus.styleRoute, cameraStatus.hiddenParts)
     local moveStatus = movement.status()

@@ -12,6 +12,8 @@ local input = {}
 local jump = {
     gameHeld = false, -- from the game's jump event (the JumpAction hook)
     gamePresses = 0,
+    lastPressFrame = nil, -- frame of the game's latest press event
+    repeats = false, -- the game sends its press every frame while the key is held
     keysSeen = false, -- reading a jump key has worked at least once
 }
 
@@ -66,27 +68,43 @@ function input.moveAxes(pc, cfg)
     return forward, right
 end
 
---- Called from the hook on the game's jump input, with true on press and false
---- on release.
-function input.onGameJump(pressed)
-    jump.gameHeld = pressed
+--- Called from the hook on the game's jump input. Depending on how the game's
+--- input is set up, it comes as true on press and false on release, or as true
+--- on every frame while the key is held (with no release at all).
+function input.onGameJump(pressed, frame)
     if pressed then
-        jump.gamePresses = jump.gamePresses + 1
+        local last = jump.lastPressFrame
+        if last and frame - last == 1 and jump.gameHeld then
+            jump.repeats = true
+        end
+        if not last or frame - last > 1 or not jump.gameHeld then
+            jump.gamePresses = jump.gamePresses + 1
+        end
+        jump.lastPressFrame = frame
     end
+    jump.gameHeld = pressed
+end
+
+local function gameHeld(frame)
+    if jump.repeats then
+        return jump.lastPressFrame ~= nil and frame - jump.lastPressFrame <= 1
+    end
+    return jump.gameHeld
 end
 
 --- Forgets the game's jump state, for example when the character changes.
 function input.reset()
     jump.gameHeld = false
+    jump.lastPressFrame = nil
 end
 
 --- Whether jump is held this frame. JumpInput "keys" reads JumpKeys, "game" uses
 --- the game's jump event, and "auto" reads the keys once that has been seen to
 --- work, and also accepts the game's event until then.
-function input.jumpHeld(pc, cfg)
+function input.jumpHeld(pc, cfg, frame)
     local mode = cfg.JumpInput
     if mode == "game" then
-        return jump.gameHeld
+        return gameHeld(frame)
     end
     local keys = anyPressed(pc, cfg.JumpKeys)
     if keys then
@@ -100,12 +118,13 @@ function input.jumpHeld(pc, cfg)
             .. "so the game's jump event is used instead. If holding jump doesn't keep you hopping, "
             .. "set JumpKeys in config.lua to your jump key.", table.concat(cfg.JumpKeys, ", "))
     end
-    return keys or jump.gameHeld
+    return keys or gameHeld(frame)
 end
 
 --- The jump input state, for the diagnostics report.
 function input.status()
-    return { gameHeld = jump.gameHeld, gamePresses = jump.gamePresses, keysSeen = jump.keysSeen }
+    return { gameHeld = jump.gameHeld, gamePresses = jump.gamePresses, keysSeen = jump.keysSeen,
+        repeats = jump.repeats }
 end
 
 return input

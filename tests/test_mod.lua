@@ -8,6 +8,7 @@ local F5, F6, F7, F8 = 0x74, 0x75, 0x76, 0x77
 local SCALE = 2.5
 local MAX_SPEED = 320 * SCALE
 local JUMP_SPEED = math.sqrt(2 * 800 * SCALE * 45 * SCALE)
+local TAKEN_BRAKING = 1 -- what the mod leaves of the braking deceleration (cm/s²)
 
 local function start(config, options)
     local g = fake.newGame(options)
@@ -178,8 +179,8 @@ t.test("movement takes over the game's values", function()
     local p = fake.props(g.cmc)
     t.eq(p.bUseSeparateBrakingFriction, true)
     t.eq(p.BrakingFriction, 0)
-    t.eq(p.BrakingDecelerationWalking, 0)
-    t.eq(p.BrakingDecelerationFalling, 0)
+    t.eq(p.BrakingDecelerationWalking, TAKEN_BRAKING)
+    t.eq(p.BrakingDecelerationFalling, TAKEN_BRAKING)
     t.eq(p.CurrentMovementSettings.MovementCurve, nil, "movement curve taken out")
     t.eq(p.MaxWalkSpeed, 100000)
     t.near(p.GravityScale, 800 * SCALE / 980, 1e-9)
@@ -296,7 +297,7 @@ t.test("battle gives the camera and the movement back", function()
     g.inBattle = false
     g.frame()
     t.eq(styleOf(g), "FirstPerson", "back after the battle")
-    t.eq(p.BrakingDecelerationWalking, 0)
+    t.eq(p.BrakingDecelerationWalking, TAKEN_BRAKING)
     noErrors(g)
 end)
 
@@ -305,7 +306,7 @@ t.test("dialogue cameras: first person steps aside, movement stays", function()
     g.mainCameraActive = false
     g.frame()
     t.eq(styleOf(g), "Default")
-    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, 0)
+    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, TAKEN_BRAKING)
     g.mainCameraActive = true
     g.frame()
     t.eq(styleOf(g), "FirstPerson")
@@ -355,7 +356,7 @@ t.test("F6 switches first person off and keeps the movement", function()
     g.frame()
     t.eq(styleOf(g), "Default")
     t.eq(fake.props(g.c.mesh).bOwnerNoSee, false)
-    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, 0)
+    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, TAKEN_BRAKING)
     g.press(F6)
     g.frame()
     t.eq(styleOf(g), "FirstPerson")
@@ -394,7 +395,7 @@ t.test("a new character: the old one is never touched once it's gone", function(
     g.frames(SETTLE_FRAMES)
     noErrors(g)
     t.eq(fake.props(g.c.mesh).bOwnerNoSee, true, "new character set up")
-    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, 0)
+    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, TAKEN_BRAKING)
 end)
 
 t.test("a new character while the old one still exists: the old one is put back", function()
@@ -405,7 +406,7 @@ t.test("a new character while the old one still exists: the old one is put back"
     t.eq(fake.props(old.cmc).BrakingDecelerationWalking, 2048)
     t.eq(fake.props(old.mesh).bOwnerNoSee, false)
     g.frames(SETTLE_FRAMES)
-    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, 0)
+    t.eq(fake.props(g.cmc).BrakingDecelerationWalking, TAKEN_BRAKING)
     noErrors(g)
 end)
 
@@ -474,6 +475,22 @@ t.test("root motion pauses the mod's movement", function()
     t.truthy(fake.writes(g.cmc).Velocity > writes)
 end)
 
+t.test("a game jump event that repeats every frame and never releases", function()
+    local g = running({ JumpInput = "game" }, { jumpEventEveryFrame = true })
+    g.keys.SpaceBar = true
+    g.frame()
+    t.eq(g.mode(), 3, "jumped")
+    local landings = g.landings
+    g.frames(120)
+    t.truthy(g.landings - landings >= 2, "kept hopping while held")
+    g.keys.SpaceBar = false
+    g.frames(60) -- lands and stays down
+    local after = g.landings
+    g.frames(60)
+    t.eq(g.landings, after, "no more hops after letting go")
+    t.eq(g.mode(), 1)
+end)
+
 t.test("JumpInput = game uses only the game's jump event", function()
     local g = running({ JumpInput = "game" })
     g.keys.SpaceBar = true
@@ -501,7 +518,7 @@ t.test("a new level: nothing old is touched, the new one is set up after a momen
     t.falsy(fake.writes(c.cmc).BrakingDecelerationWalking)
     g.frames(SETTLE_FRAMES)
     t.eq(styleOf(g), "FirstPerson")
-    t.eq(fake.props(c.cmc).BrakingDecelerationWalking, 0)
+    t.eq(fake.props(c.cmc).BrakingDecelerationWalking, TAKEN_BRAKING)
     noErrors(g)
 end)
 

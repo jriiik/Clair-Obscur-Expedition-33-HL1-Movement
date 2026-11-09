@@ -46,25 +46,39 @@ local function styleField(pcm)
     return nil
 end
 
+local names = {}
+
+local function styleName(name)
+    names[name] = names[name] or FName(name)
+    return names[name]
+end
+
 local function setStyleWithFunction(pc, name)
-    local ok, err = ue.call(pc, "ClientSetCameraMode", FName(name))
-    if not ok and not st.styleFailed then
-        st.styleFailed = true
-        log.warn("Could not switch the camera style: %s", tostring(err))
+    local ok, err = ue.call(pc, "ClientSetCameraMode", styleName(name))
+    st.styleFailed = not ok
+    if not ok then
+        log.once("camera-style-set", "Could not switch the camera style: %s", tostring(err))
     end
     return ok
 end
 
--- Switches the camera manager to the FirstPerson style. Called every frame; the
--- function route can't read the style back, so it is set again at each refresh.
+-- Switches the camera manager to the FirstPerson style. Called every frame.
 local function useFirstPersonStyle(pc, pcm, refresh)
     local current = styleField(pcm)
     if current then
         st.styleRoute = "CameraStyle field"
         if current:ToString() ~= "FirstPerson" then
-            overrides:set(pcm, "CameraStyle", FName("FirstPerson"))
+            overrides:set(pcm, "CameraStyle", styleName("FirstPerson"))
         end
-    elseif refresh and setStyleWithFunction(pc, "FirstPerson") then
+        return
+    end
+    -- The field isn't visible to UE4SS (as in Expedition 33), so the controller
+    -- sets it. That can't be read back, so it is set every frame: it only stores
+    -- a name. After a failure it is only tried again at each refresh.
+    if st.styleFailed and not refresh then
+        return
+    end
+    if setStyleWithFunction(pc, "FirstPerson") then
         st.styleRoute = "ClientSetCameraMode"
         if not st.styleSetter then
             st.styleSetter = { pc = pc, fullName = ue.fullName(pc) }

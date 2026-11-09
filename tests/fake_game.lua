@@ -877,11 +877,20 @@ function fake.newGame(options)
             g.pending.Y = g.pending.Y + math.sin(yaw) * f + math.cos(yaw) * r
         end
         local jumpDown = g.keys.SpaceBar == true
-        if jumpDown ~= (g.jumpWasDown == true) then
+        local jumpHook = g.hooks[g.jumpPath]
+        if options.jumpEventEveryFrame then
+            -- An input setup that sends the press every frame while held, and no release.
+            if jumpDown and jumpHook then
+                jumpHook(fake.param(g.pawn), fake.param(true))
+            end
+            if jumpDown and not g.jumpWasDown then
+                g.pressedJump = true
+            end
             g.jumpWasDown = jumpDown
-            local hook = g.hooks[g.jumpPath]
-            if hook then
-                hook(fake.param(g.pawn), fake.param(jumpDown))
+        elseif jumpDown ~= (g.jumpWasDown == true) then
+            g.jumpWasDown = jumpDown
+            if jumpHook then
+                jumpHook(fake.param(g.pawn), fake.param(jumpDown))
             end
             if jumpDown then
                 g.pressedJump = true

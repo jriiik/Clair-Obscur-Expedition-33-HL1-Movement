@@ -45,16 +45,17 @@ A UE4SS Lua mod that gives Clair Obscur: Expedition 33 a first-person camera and
   - consumes the character's movement input (`ConsumeMovementInputVector`), so Unreal doesn't accelerate on its own;
   - works out the Half-Life velocity from the current `Velocity` and writes it back;
   - jumps with `SetMovementMode(3, 0)` plus Z velocity;
-  - cancels braking: `bUseSeparateBrakingFriction = true` and `BrakingFriction = 0`, which also beats ALS's raised `BrakingFrictionFactor` after landing; `BrakingDecelerationWalking/Falling = 0`; takes out ALS's `CurrentMovementSettings.MovementCurve` every frame (the curve drives ground acceleration, braking and friction); and as a fallback adds back `GetMaxBrakingDeceleration() * dt`;
+  - cancels braking: `bUseSeparateBrakingFriction = true` and `BrakingFriction = 0`, which also beats ALS's raised `BrakingFrictionFactor` after landing; `BrakingDecelerationWalking/Falling = 1`, not 0, because ALS's anim instance divides by `GetMaxBrakingDeceleration()`; takes out ALS's `CurrentMovementSettings.MovementCurve` every frame (the curve drives ground acceleration, braking and friction); and adds back `GetMaxBrakingDeceleration() * dt`;
   - sets `MaxWalkSpeed` huge every frame, because ALS rewrites it;
   - pauses the tick of `BP_VelocityControllerComponent_C`, which seems to cap speed;
   - sets gravity through `GravityScale`, and sets `JumpZVelocity` and `JumpMaxHoldTime` so the game's own first jump matches the mod's.
 - **Camera.**
   - Use the engine's `FirstPerson` camera style: the view from `GetActorEyesViewPoint`, which is the location plus `BaseEyeHeight`, with the control rotation and `DefaultFOV`, and no camera modifiers.
-  - `CameraStyle` is not a UPROPERTY in UE 4.x. If UE4SS can't see it, use `PlayerController:ClientSetCameraMode` and restore "Default".
+  - `CameraStyle` is not a UPROPERTY, and E33's reflection data confirms it is missing there. So the mod calls `PlayerController:ClientSetCameraMode(FName)` every frame (it can't read the style back) and restores "Default". Reading and writing the field is kept for engines that reflect it.
   - Widen `ViewPitchMin/Max` and the rotation-limiter modifiers' `PitchMin/Max`.
   - Eye height is 0.78 × the capsule's half height, re-applied because the engine resets it.
-  - Hide the body by walking `AttachChildren` from the root: `SetOwnerNoSee` on primitives owned by the character, `SetHiddenInGame` on others. Lights are left alone.
+  - Hide the body by walking `AttachChildren` from the root: `SetOwnerNoSee` on primitives owned by the character, `SetHiddenInGame` on others. Lights are left alone. In UE 5.4.4 a ChildActorComponent's actor gets no Owner, so the swappable skin and face meshes probably take the `SetHiddenInGame` route.
+- **Jump input.** Keys are polled with `IsInputKeyDown`/`WasInputKeyJustPressed`; the game's `JumpAction(bool)` hook is the fallback. That event may arrive as true then false, or, with Enhanced Input `Triggered` bindings, as true every frame with no release. `input.lua` detects the repeating form from frame numbers.
 - **When the mod acts.**
   - Only for `BP_jRPG_Character_World_C`, and not when `bIsWorldMapPawn` is set.
   - Off in battle (`IsInBattle`, `IsInBattleBeginTransition`).
@@ -68,8 +69,9 @@ A UE4SS Lua mod that gives Clair Obscur: Expedition 33 a first-person camera and
 
 - UE 5.4.4. The exe is `Sandfall\Binaries\Win64\SandFall-Win64-Shipping.exe`. There is no anti-cheat, no VAC and no Denuvo. The last patch was 1.5.6 (June 2026).
 - The character is `/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C`, built on ALS-Community (`ALSV4_CPP`), with `ALSCharacterMovementComponent` (Sandfall's fork). The controller is `BP_jRPG_Controller_World_C`, also used in battle. Battles take place in the same world, with separate combatant actors. The world map uses other characters.
+- E33's dump of `APlayerCameraManager` has no `CameraStyle` property (an 8-byte gap where UE 5.4.4 keeps it). `APlayerController` has the UFunctions `Camera`, `ServerCamera` and `ClientSetCameraMode`.
 - Still unknown:
-  - which camera manager class is live, and whether `CameraStyle` is visible to UE4SS;
+  - which camera manager class is live (probably `BP_PlayerCameraManager_C`), and whether `ClientSetCameraMode("FirstPerson")` takes effect;
   - whether keyboard polling works in exploration;
   - what the speed-limiter component does;
   - whether landing rolls use root motion;

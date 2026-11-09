@@ -6,8 +6,8 @@
 -- collisions, stairs, slopes, landing and gravity (with gravity set to Half-Life's).
 --
 -- Unreal brakes a character that gets no input. The mod turns braking friction off,
--- sets the plain braking values to zero, and adds back whatever braking is left, so
--- only the Half-Life friction applies.
+-- sets the plain braking values to almost zero, and adds back whatever braking is
+-- left, so only the Half-Life friction applies.
 
 local physics = require("hl1movement.physics")
 local ue = require("hl1movement.ue")
@@ -20,6 +20,9 @@ local movement = {}
 local WALKING, NAVWALKING, FALLING = 1, 2, 3
 local REFRESH = 0.5 -- seconds between re-applying the values below
 local SPEED_LIMIT = 100000 -- cm/s, high enough that the game never caps your speed
+-- cm/s² of braking left in place instead of 0: ALS's animation code divides by the
+-- braking deceleration, and the mod adds this tiny amount back every frame anyway.
+local TINY_BRAKING = 1
 local LIMITER_CLASS = "BP_VelocityControllerComponent_C"
 
 local overrides = Overrides.new()
@@ -147,8 +150,8 @@ local function applyValues(pawn, cmc, P)
     -- friction, whatever braking factor the game sets on landing.
     overrides:set(cmc, "bUseSeparateBrakingFriction", true)
     overrides:set(cmc, "BrakingFriction", 0)
-    overrides:set(cmc, "BrakingDecelerationWalking", 0)
-    overrides:set(cmc, "BrakingDecelerationFalling", 0)
+    overrides:set(cmc, "BrakingDecelerationWalking", TINY_BRAKING)
+    overrides:set(cmc, "BrakingDecelerationFalling", TINY_BRAKING)
     overrides:set(cmc, "MaxWalkSpeedCrouched", SPEED_LIMIT)
     -- The game's own jump (on the first press) gets the same height as the mod's.
     overrides:set(cmc, "JumpZVelocity", P.jumpSpeed)
@@ -196,8 +199,9 @@ function movement.apply(pawn, cmc, cfg, P, now)
     end
 end
 
---- One frame of Half-Life movement. yaw is the camera's yaw in degrees.
-function movement.step(pc, pawn, cmc, cfg, P, dt, yaw)
+--- One frame of Half-Life movement. yaw is the camera's yaw in degrees; frame is
+--- main.lua's frame counter.
+function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
     local mode = cmc.MovementMode
     local onGround = mode == WALKING or mode == NAVWALKING
 
@@ -225,7 +229,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw)
         wx, wy, wishSpeed = physics.wishFromVector(px * P.inputSpeed, py * P.inputSpeed, P.maxSpeed)
     end
 
-    local doJump = physics.wantJump(st.jump, input.jumpHeld(pc, cfg), onGround, cfg.AutoHop)
+    local doJump = physics.wantJump(st.jump, input.jumpHeld(pc, cfg, frame), onGround, cfg.AutoHop)
 
     local velocity = cmc.Velocity
     local vx, vy, vz = velocity.X, velocity.Y, velocity.Z
