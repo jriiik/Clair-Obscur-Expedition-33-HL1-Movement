@@ -1,2 +1,226 @@
-# Clair-Obscur-Expedition-33-HL1-Movement
-A mod for the game Clair Obscur: Expedition 33 with the Half-Life 1 movement.
+# Half-Life movement for Clair Obscur: Expedition 33
+
+A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
+Half-Life 1's movement: fast, slippery running, air strafing and bunny hopping
+by holding the jump key.
+
+> **Status: version 0.1, not tested in the game yet.** It was written from
+> research into how the game works and is tested only against a stand-in for the
+> game. Expect problems on the first try. See [Reporting problems](#reporting-problems).
+
+## What it does
+
+- **First-person camera** while you walk around. Your own character is hidden so
+  it doesn't block the view, and you can look straight up and down.
+- **Half-Life 1 movement**: the same acceleration, friction, gravity and jump
+  height as Half-Life, scaled to the game's world.
+- **Bunny hopping**: hold the jump key and you jump again the moment you land,
+  without losing speed. Steer in the air (air strafing) to build up speed.
+- It **steps aside on its own** in battles, dialogue, cutscenes, menus,
+  climbing and on the world map, so the game works normally there.
+- Everything can be turned on and off in the game with one key.
+
+## What you need
+
+- Clair Obscur: Expedition 33 for Windows. These steps are for the **Steam**
+  version; see [Other versions](#other-versions-of-the-game).
+- **UE4SS**, a free mod loader for Unreal Engine games. You need an
+  **experimental** build, because the game uses Unreal Engine 5.4 and the older
+  "stable" UE4SS 3.0.1 from 2024 doesn't support it.
+
+Back up your saves before trying mods. They are in
+`%LOCALAPPDATA%\Sandfall\Saved\SaveGames` (paste that into the File Explorer
+address bar). Steam Cloud keeps only one copy, so it isn't a backup.
+
+## Installing
+
+Everything goes into the game's folder. Nothing of the game is replaced; these are
+only added files.
+
+1. **Find the game's folder.** In Steam, right-click Clair Obscur: Expedition 33,
+   choose *Manage*, then *Browse local files*. Open `Sandfall`, then `Binaries`,
+   then `Win64`. This folder holds `SandFall-Win64-Shipping.exe`. The full path is
+   usually `C:\Program Files (x86)\Steam\steamapps\common\Expedition 33\Sandfall\Binaries\Win64`.
+2. **Install UE4SS.** Go to the UE4SS download page,
+   <https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest>, and
+   download the file named `UE4SS_v3.0.1-....zip` (not the one starting with
+   `zDEV`). Unzip it into the `Win64` folder from step 1. You should now have
+   `Win64\dwmapi.dll` and a `Win64\ue4ss` folder. Only download UE4SS from that
+   GitHub page; other sites that look official are not.
+3. **Install this mod.** On this mod's GitHub page, click the green **Code**
+   button, then **Download ZIP**. Open the ZIP and copy the `HL1Movement` folder
+   into `Win64\ue4ss\Mods`. You should end up with
+   `Win64\ue4ss\Mods\HL1Movement\Scripts\main.lua` and
+   `Win64\ue4ss\Mods\HL1Movement\enabled.txt`.
+4. **Start the game from Steam** as usual and load a save. After a second the view
+   switches to first person.
+
+To check that it loaded, open `Win64\ue4ss\UE4SS.log` in a text editor. It should
+have a line `[HL1Movement] Version 0.1.0 loaded`, and after loading a save a line
+`[HL1Movement] Running every frame from ...`.
+
+## Controls
+
+| Key | What it does |
+| --- | --- |
+| **F5** | Turns the mod on and off |
+| **F6** | Switches between first and third person (the movement stays) |
+| **F7** | Loads the settings file again |
+| **F8** | Writes a status report to `UE4SS.log` |
+| W A S D, mouse | Move and look, as usual |
+| **Space** (held) | Jump, and keep hopping every time you land |
+
+A controller works too: the left stick moves and A jumps.
+
+### How to bunny hop and air strafe
+
+1. Run forward and **hold Space**. You keep hopping and lose no speed when you land.
+2. While in the air, **let go of W**, hold **A or D**, and turn the mouse smoothly in
+   the same direction (left with A, right with D). This is air strafing: it
+   gains speed.
+3. Switch between A and D as you turn left and right. The faster you turn, the
+   more speed you gain, up to a point.
+
+Without air strafing you keep the speed you had, but don't gain any.
+
+## Settings
+
+Settings are in `Win64\ue4ss\Mods\HL1Movement\Scripts\config.lua`. Open it with a
+text editor (Notepad works), change a value, save, and press **F7** in the game.
+Each setting has a short explanation next to it. The most useful ones:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `FieldOfView` | `100` | How wide the first-person view is, in degrees |
+| `FirstPerson` | `true` | `false` keeps the game's own camera |
+| `Movement` | `true` | `false` keeps the game's own movement |
+| `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
+| `JumpKeys` | `{ "SpaceBar", "Gamepad_FaceButton_Bottom" }` | Add `"MouseScrollDown"` to hop with the mouse wheel |
+| `MaxSpeed`, `Accelerate`, `AirAccelerate`, `Friction`, `Gravity` | Half-Life's values | The same as Half-Life's `sv_` console variables |
+| `UnitScale` | `2.5` | Centimetres per Half-Life unit; higher makes everything faster and higher |
+| `BhopCap` | `0` | `1.7` copies later Half-Life updates, which slow you down above 1.7 × max speed |
+
+New hotkeys only take effect after restarting the game.
+
+## When the mod steps aside
+
+It hands control back to the game, and puts back everything it changed, when:
+
+- a battle starts (it comes back afterwards);
+- the game shows another camera: dialogue, cutscenes, sneaking or aiming;
+- the game locks your movement, for example in menus, dialogue or climbing;
+- you are on the world map (Esquie and the world map aren't supported yet).
+
+## Uninstalling
+
+- To remove this mod, delete the `Win64\ue4ss\Mods\HL1Movement` folder.
+- To remove UE4SS and all its mods, delete `Win64\dwmapi.dll` and the `Win64\ue4ss`
+  folder.
+
+Steam's *Verify integrity of game files* doesn't remove mods, because it only
+checks the game's own files. It isn't needed to uninstall either.
+
+## Is it safe?
+
+- **No ban risk.** The game is single-player only and has no anti-cheat: no VAC and
+  nothing else. Keep UE4SS in this game's folder only, though. Never copy it into
+  a game that has anti-cheat, such as Counter-Strike or Half-Life's multiplayer.
+- **Saves**: the mod doesn't touch your saves. Moving fast can take you places the
+  game wasn't built for, though. You could get stuck, fall out of the world or
+  skip a story trigger. Keep regular saves, and press **F5** to get the game's own
+  movement back if something goes wrong.
+- **Achievements** are not known to be blocked by mods, but that isn't guaranteed.
+- **Antivirus** programs sometimes flag UE4SS by mistake, because it injects
+  itself into the game.
+
+## Troubleshooting
+
+- **Nothing happens.** Check `Win64\ue4ss\UE4SS.log` for lines starting with
+  `[HL1Movement]`. If there are none, the mod isn't installed in the right folder.
+  If the log has no UE4SS lines at all, UE4SS isn't installed in the right folder.
+- **The game crashes at start** after installing UE4SS. Make sure you use an
+  experimental build from the page above, and that you don't have two copies of
+  UE4SS from different mods.
+- **The camera stays in third person.** Press F6. If the log says
+  `The first-person camera doesn't seem to work`, please report it.
+- **Steam Deck or Linux**: add this launch option in Steam (right-click the game,
+  *Properties*, *Launch options*): `WINEDLLOVERRIDES="dwmapi=n,b" %command%`.
+- **A key does nothing.** Another mod may use it. Change the keys in `config.lua`
+  and restart the game.
+
+## Reporting problems
+
+This version hasn't been tested in the game, so reports help a lot.
+[docs/TESTING.md](docs/TESTING.md) has a short list of things to try.
+
+1. Play until the problem happens, then press **F8**. This adds a status report to
+   the log.
+2. Quit the game and open `Win64\ue4ss\UE4SS.log`.
+3. Open an issue on this GitHub page, describe what you saw, and attach the log.
+   Check it first for anything private: it can contain folder names from your PC.
+
+## Known limitations
+
+- Not tested in the game yet (see the top).
+- No crouch jumping, ducking, swimming or ladders the way Half-Life does them.
+- Half-Life's extra friction near ledge edges isn't copied.
+- While the mod moves you, the game's automatic ledge climbing may not trigger.
+  Press F5 to climb, then F5 again.
+- In third person (F6) with the mod's movement, the character's animations can
+  look wrong, because the game doesn't see your input.
+- In first person the game's camera effects, such as depth of field and camera
+  shake, don't apply.
+
+## Other versions of the game
+
+The mod itself works the same in every version; only the folders differ.
+- **GOG**: the folder is also `Sandfall\Binaries\Win64`; the game file there is
+  `SandFallGOG-Win64-Shipping.exe`.
+- **Xbox / Game Pass for PC**: the folder is `Sandfall\Binaries\WinGDK` instead of
+  `Win64`.
+- **Epic**: not checked yet.
+
+## How it works
+
+UE4SS loads `HL1Movement\Scripts\main.lua` when the game starts. Every frame, the
+mod runs from the player controller's update, after the game reads your input
+and before it moves your character:
+
+- It takes the movement input away from the game and works out the new velocity
+  with Half-Life's rules (`hl1movement/physics.lua`). It then hands that velocity
+  to Unreal's character movement, which still handles walls, stairs, slopes and
+  gravity. Unreal's own acceleration and braking are switched off or cancelled
+  out (`hl1movement/movement.lua`).
+- It switches Unreal's camera manager to its built-in `FirstPerson` camera style,
+  which looks out of the character's eyes, and hides the body
+  (`hl1movement/camera.lua`).
+
+Everything it changes is remembered and put back when it steps aside.
+
+## Development
+
+The tests run with plain Lua 5.4, against a stand-in for UE4SS and the game in
+`tests/fake_game.lua`:
+
+```
+lua5.4 tests/run.lua
+luacheck .
+```
+
+GitHub Actions runs both on every push and offers the mod folder as a download
+(an "artifact") on each run's page.
+
+## Credits and legal
+
+This is a fan-made mod. It is not affiliated with or endorsed by Sandfall
+Interactive, Kepler Interactive or Valve. Clair Obscur: Expedition 33 belongs to
+Sandfall Interactive; Half-Life is a trademark of Valve Corporation.
+
+The movement is an independent implementation of the publicly documented movement
+model Half-Life inherited from Quake. The mod contains no code or files from
+Half-Life, from the Half-Life SDK or from Clair Obscur: Expedition 33.
+
+UE4SS is a separate project (<https://github.com/UE4SS-RE/RE-UE4SS>) and is not
+included here.
+
+Released under the [MIT License](LICENSE).

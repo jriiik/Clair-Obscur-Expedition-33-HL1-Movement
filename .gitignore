@@ -1,6 +1,7 @@
 # Build and packaging output
 build/
 dist/
+package/
 *.zip
 
 # Editors and operating systems

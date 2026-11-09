@@ -1,0 +1,38 @@
+name: Test and package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.4 and luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 lua-check
+
+      - name: Check the code
+        run: luacheck .
+
+      - name: Run the tests
+        run: lua5.4 tests/run.lua
+
+      - name: Put the mod folder together
+        run: |
+          mkdir -p package
+          cp -r HL1Movement package/
+          cp README.md LICENSE package/HL1Movement/
+
+      - name: Upload the mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: HL1Movement
+          path: package/
