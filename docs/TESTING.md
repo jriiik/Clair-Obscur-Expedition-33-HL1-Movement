@@ -62,7 +62,11 @@ Write down what happens for each one. "Nothing happened" is useful too.
    - If you can aim or sneak, try that too.
 8. **Things that move you.** If you find a moving platform, a grapple point, a
    rope or anything else that throws or pulls the character, try it. On a moving
-   platform, hold Space without moving: you should stay on the same spot of it.
+   platform, hold Space without moving: do you stay on the same spot of it, fall
+   behind or move ahead? Then let go and press **F8** while standing on it (the
+   report then shows the platform's speed as the game reports it). If you fell
+   behind, press **F5** and try the game's own jump there: does it fall behind
+   too? Press **F5** again afterwards.
 9. **Report.** Press **F8**, then quit the game from its menu.
 
 ## What to send back

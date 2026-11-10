@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.4"
+local VERSION = "0.2.5"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -303,7 +303,9 @@ local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused, fram
     state("Half-Life movement", "on", function()
         return string.format("on (movement mode %s, %s)", tostring(mode), MODE_NAMES[mode] or "unknown")
     end)
-    if not paused and ask(pawn, "IsPlayingRootMotion") ~= true then
+    if paused then
+        movement.hold(mod.frames)
+    elseif ask(pawn, "IsPlayingRootMotion") ~= true then
         movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames, frameDt)
     end
 end

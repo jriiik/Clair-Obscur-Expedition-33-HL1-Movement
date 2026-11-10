@@ -198,7 +198,8 @@ function diagnostics.report(env)
             line("Character: %s", show(pawn))
             line("  class = %s, supported = %s", tostring(ue.className(pawn)), tostring(mod.pawnAllowed))
             for _, name in ipairs({ "bIsWorldMapPawn", "BaseEyeHeight", "bFindCameraComponentWhenViewTarget",
-                "JumpMaxHoldTime", "JumpMaxCount", "JumpCurrentCount", "TargetRotation", "RootComponent" }) do
+                "JumpMaxHoldTime", "JumpMaxCount", "JumpCurrentCount", "TargetRotation", "RootComponent",
+                "IsAttachedToMovingPlatform" }) do
                 field("Character", pawn, name)
             end
             line("  ALS: %s", values(pawn, { "Gait", "DesiredGait", "RotationMode", "MovementState", "MovementAction",
@@ -342,6 +343,7 @@ function diagnostics.report(env)
                 result("Movement", cmc, "GetGravityZ")
                 result("Movement", cmc, "GetCurrentAcceleration")
                 result("Movement", cmc, "GetImpartedMovementBaseVelocity")
+                result("Movement", cmc, "GetMovementBase") -- what Unreal carries the character with
                 local movementSettings = ue.get(cmc, "CurrentMovementSettings")
                 if ue.typeOf(movementSettings) == "UScriptStruct" then
                     for _, name in ipairs({ "WalkSpeed", "RunSpeed", "SprintSpeed", "MovementCurve" }) do

@@ -505,7 +505,7 @@ local function hopLine(hop, landing, P)
     local u = P.unitScale
     local time = math.max(hop.time, 1e-6)
     local gain = (landing - hop.takeoff) / u
-    if math.abs(gain) < 0.5 then
+    if math.abs(gain) <= 0.5 then
         gain = 0 -- not "-0"
     end
     local keys = {}
@@ -642,7 +642,8 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     end
     st.lastMode = jumped and FALLING or mode
     -- Over the ground at a jump (with the platform's velocity) and in the air, as a
-    -- landing reads it; relative to the platform on it.
+    -- landing reads it; relative to the platform on it. With bStayBasedInAir, relative
+    -- to it at a jump and in the air too: the platform goes on carrying the character.
     st.lastSpeed = horizontal(nx + bx, ny + by)
     if jumped then
         stats.hops = stats.hops + 1
@@ -690,6 +691,18 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     -- and where the character was before this frame's move.
     st.written = { x = nx + bx, y = ny + by, mode = jumped and FALLING or mode, jumped = jumped, at = at,
         dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0 }
+end
+
+--- A paused frame. Unreal doesn't move the character while the game is paused, so a
+--- landing the mod hasn't handled yet is handled after the pause, and a hop goes on.
+--- But on the frame the game pauses from the controller's own input, the character's
+--- update still runs once, with the game's input: so what the mod wrote before isn't
+--- checked after the pause (no speed cut, no input leak).
+function movement.hold(frame)
+    if st.lastStepFrame == frame - 1 then
+        st.lastStepFrame = frame
+        st.written = nil
+    end
 end
 
 --- Gives the movement back to the game and puts back everything the mod changed.

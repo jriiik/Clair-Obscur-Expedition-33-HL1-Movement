@@ -981,6 +981,9 @@ function fake.newGame(options)
                 GetCurrentAcceleration = ufunction("GetCurrentAcceleration", 0, function()
                     return copyVector(g.lastAcceleration)
                 end),
+                GetMovementBase = ufunction("GetMovementBase", 0, function()
+                    return nil -- the fake models a platform by its velocity only
+                end),
                 GetImpartedMovementBaseVelocity = ufunction("GetImpartedMovementBaseVelocity", 0, function()
                     -- The platform's velocity, while the character is based on it: on the
                     -- ground, and in the air with bStayBasedInAir.
@@ -1015,6 +1018,7 @@ function fake.newGame(options)
                 BP_CameraControllerComponent = c.cameraController,
                 BP_VelocityControllerComponent = not options.noLimiterProperty and c.limiter or nil,
                 Controller = g.pc,
+                IsAttachedToMovingPlatform = false, -- the game's own flag (it scales cloth then)
             },
             methods = {
                 ConsumeMovementInputVector = ufunction("ConsumeMovementInputVector", 0, function()

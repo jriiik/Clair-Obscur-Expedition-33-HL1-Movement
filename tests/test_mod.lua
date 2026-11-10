@@ -123,7 +123,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.2.4 loaded")
+    t.contains(g.log, "Version 0.2.5 loaded")
     for _, code in ipairs({ F5, F6, F7, F8 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
     end
@@ -200,7 +200,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.2.4 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.5 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -1307,7 +1307,10 @@ t.test("hopping on a moving platform doesn't add its speed again at every hop", 
         end
         g.keys.SpaceBar = false
         t.eq(landings, 6, "hopped")
-        if not stay then
+        if stay then
+            t.contains(g.log, "take-off 0 u/s, landing 0 u/s (+0)", "with bStayBasedInAir, the hop lines are relative "
+                .. "to the platform, which still carries the character")
+        else
             t.contains(g.log, "take-off 80 u/s, landing 80 u/s (+0)", "the hop lines count the platform's velocity")
         end
         local drift = g.position.X - startX - 200 * frames / 60
@@ -1329,6 +1332,118 @@ t.test("hopping on a moving platform doesn't add its speed again at every hop", 
     g.frame() -- the mod's first frame on the ground, with Half-Life friction
     t.truthy(g.speed() > 150, string.format("landing on still ground keeps the platform's velocity (%.0f cm/s)",
         g.speed()))
+    noErrors(g)
+end)
+
+-- A pause the game starts from the controller's own input: the mod's frame hook
+-- already sees it, but the world's tick had started unpaused, so the character's
+-- movement still runs once, with the game's input.
+local function pauseFromInput(g)
+    g.paused = true
+    g.frame()
+    g.moveTick(1 / 60)
+end
+
+t.test("a pause around a landing on a moving platform doesn't add its speed", function()
+    -- fromInput: the game pauses from the controller's input on the landing frame;
+    -- otherwise the whole frame after the landing (the mod's first on the ground) is paused.
+    for _, fromInput in ipairs({ false, true }) do
+        local g = running()
+        g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+        g.frames(3)
+        local startX, moved, landings, lastMode, paused = g.position.X, 0, 0, g.mode(), false
+        g.keys.SpaceBar = true
+        while landings < 6 and moved < 600 do
+            local v = fake.props(g.cmc).Velocity
+            local landsNow = g.mode() == 3 and g.position.Z + (v.Z + g.cmc:GetGravityZ() / 60) / 60 <= 0
+            if not paused and landings == 2 and (fromInput and landsNow or not fromInput and lastMode == 1) then
+                paused = true
+                if fromInput then
+                    pauseFromInput(g)
+                    moved = moved + 1
+                else
+                    g.paused = true
+                    g.frame()
+                end
+                g.frames(9)
+                g.paused = false
+            else
+                g.frame()
+                moved = moved + 1
+            end
+            if lastMode == 3 and g.mode() == 1 then
+                landings = landings + 1
+            end
+            lastMode = g.mode()
+        end
+        g.keys.SpaceBar = false
+        t.truthy(paused, "paused")
+        local drift = g.position.X - startX - 200 * moved / 60
+        t.near(drift, 0, 5, string.format("%s: the character stays on its spot",
+            fromInput and "paused from the controller's input" or "paused"))
+        noErrors(g)
+    end
+end)
+
+t.test("a pause the game starts from the controller's input isn't an input leak or a speed cut", function()
+    local g = running()
+    runTo(g, MAX_SPEED)
+    pauseFromInput(g) -- W still held: the game's input moves the character once
+    g.frames(9)
+    g.paused = false
+    g.frames(3)
+    t.absent(g.log, "movement input still reaches", "no input leak")
+    -- A wall that stops that last move halfway: Unreal sets the velocity from the
+    -- distance moved, which isn't a cut.
+    g.keys.W = false
+    g.frames(2)
+    g.paused = true
+    g.frame()
+    g.moveShare = 0.5
+    g.moveTick(1 / 60)
+    g.moveShare = nil
+    g.frames(9)
+    g.paused = false
+    g.frame()
+    t.absent(g.log, "The game cut the speed")
+    t.truthy(g.speed() < MAX_SPEED * 0.6, string.format("the wall's slowdown stays (%.0f cm/s)", g.speed()))
+    noErrors(g)
+end)
+
+t.test("a pause after root motion doesn't bring back the movement's state from before it", function()
+    local g = running()
+    g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+    g.frames(3)
+    g.keys.SpaceBar = true
+    g.frame()
+    g.keys.SpaceBar = false
+    t.eq(g.mode(), 3, "jumped")
+    -- The game plays root motion (a landing roll, say), which sets the character down
+    -- on the platform, standing still on it; then the game pauses.
+    g.rootMotion = true
+    g.frame()
+    local p = fake.props(g.cmc)
+    p.MovementMode = 1
+    p.Velocity.X, p.Velocity.Y, p.Velocity.Z = 0, 0, 0
+    g.position.Z = 0
+    g.rootMotion = false
+    g.paused = true
+    g.frames(5)
+    g.paused = false
+    g.frame()
+    t.near(g.speed(), 0, 1, "no landing is left over from before the root motion")
+    noErrors(g)
+end)
+
+t.test("F8 on a moving platform reports what docs/TESTING.md asks for there", function()
+    local g = running()
+    g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+    g.frames(3)
+    g.press(F8)
+    t.contains(g.log, "Movement:GetImpartedMovementBaseVelocity() = (X=200.0 Y=0.0 Z=0.0)")
+    t.contains(g.log, "Movement.bStayBasedInAir = false")
+    t.contains(g.log, "Character.IsAttachedToMovingPlatform = false")
+    t.contains(g.log, "Movement:GetMovementBase() = ")
     noErrors(g)
 end)
 
@@ -1724,7 +1839,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.2.4 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.5 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")
