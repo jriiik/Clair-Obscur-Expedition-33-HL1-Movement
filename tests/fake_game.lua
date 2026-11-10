@@ -646,7 +646,10 @@ function fake.newGame(options)
         chain = { "BP_PlayerCameraManager_C", "ExtendedPlayerCameraManager", "PlayerCameraManager", "Actor", "Object" },
         props = { CameraStyle = options.cameraStyleReflected and fake.FName("Default") or nil,
             DefaultFOV = 90, ViewPitchMin = -60, ViewPitchMax = 40,
-            bAlwaysApplyModifiers = false, ModifierList = fake.array({ g.limiterModifier, g.shakeModifier }) },
+            bAlwaysApplyModifiers = false, ModifierList = fake.array({ g.limiterModifier, g.shakeModifier }),
+            -- While the camera manager blends to a new view target, that one is the
+            -- pending view target (see g.blendTo); the game's view target is in g.viewTarget.
+            ViewTarget = fake.struct({ Target = INVALID }), PendingViewTarget = fake.struct({ Target = INVALID }) },
         methods = {
             GetCameraLocation = ufunction("GetCameraLocation", 0, function()
                 return copyVector(g.cameraLocation)
@@ -895,6 +898,7 @@ function fake.newGame(options)
                 JumpZVelocity = 450,
                 AirControl = 0.35,
                 MaxStepHeight = 45,
+                bStayBasedInAir = options.stayBasedInAir == true,
                 bRequestMovementSettingsChange = 0, -- a uint8 in ALS
                 CurrentMovementSettings = movementSettings,
             },
@@ -905,10 +909,11 @@ function fake.newGame(options)
                     local was = p.MovementMode
                     p.MovementMode = mode
                     -- Leaving a moving platform adds its velocity (while walking,
-                    -- Velocity is relative to it).
+                    -- Velocity is relative to it), unless the character stays based on
+                    -- it in the air.
                     local platform = g.baseVelocity
                     local v = p.Velocity
-                    if mode == 3 and (was == 1 or was == 2) and platform then
+                    if mode == 3 and (was == 1 or was == 2) and platform and not p.bStayBasedInAir then
                         v.X, v.Y, v.Z = v.X + platform.X, v.Y + platform.Y, v.Z + platform.Z
                     end
                     -- Listeners of the movement mode change, such as the game's speed limiter.
@@ -1008,7 +1013,8 @@ function fake.newGame(options)
                 end),
                 GetMainCamera = not options.noGetMainCamera and ufunction("GetMainCamera", 1, function(_, out)
                     assert(type(out) == "table", "an out parameter needs a table")
-                    out.MainCamera_0 = c.cineCamera
+                    -- UE4SS fills it under the parameter's own name (SDK dumps show MainCamera_0).
+                    out.MainCamera = c.cineCamera
                 end) or nil,
                 K2_GetComponentsByClass = ufunction("K2_GetComponentsByClass", 1, function(_, class)
                     local result = {}
@@ -1175,7 +1181,13 @@ function fake.newGame(options)
             v.Z = v.Z + g.cmc:GetGravityZ() * dt
         end
         local pos = g.position
-        pos.X, pos.Y, pos.Z = pos.X + v.X * dt, pos.Y + v.Y * dt, pos.Z + v.Z * dt
+        local share = g.moveShare or 1
+        pos.X, pos.Y, pos.Z = pos.X + v.X * dt * share, pos.Y + v.Y * dt * share, pos.Z + v.Z * dt
+        if share < 1 then
+            -- Something in the way stopped the move part of the way (a wall hit head
+            -- on, a step too high): Unreal works the velocity out from the distance moved.
+            v.X, v.Y = v.X * share, v.Y * share
+        end
         if mode == 3 and pos.Z <= 0 then
             pos.Z, v.Z = 0, 0
             p.MovementMode = 1

@@ -41,7 +41,7 @@ return {
     MaxVelocity = 2000,     -- sv_maxvelocity
     UnitScale = 2.5,        -- centimetres per Half-Life unit; higher makes everything faster and jumps higher
     PhysicsRate = 100,      -- Half-Life updates per second, whatever the frame rate (Half-Life at fps_max 100);
-                            -- 0: one update per frame
+                            -- up to 250; 0: one update per frame
     KeepSpeed = true,       -- undo the game cutting your speed (its speed limit), so hops keep their speed
 
     -- Input, as Unreal key names: W, A, S, D, Up, Down, Left, Right, SpaceBar,

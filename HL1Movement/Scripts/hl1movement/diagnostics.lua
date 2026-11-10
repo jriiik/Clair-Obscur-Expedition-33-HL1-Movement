@@ -127,9 +127,12 @@ function diagnostics.report(env)
     line("Keys seen held so far: %s", #seen > 0 and table.concat(seen, ", ") or "none")
 
     local cameraStatus = camera.status()
-    line("First person: %s with %s (style set through %s), hidden parts=%d, camera to eyes=%s cm%s",
-        cameraStatus.state, cameraStatus.methodName, cameraStatus.styleRoute, cameraStatus.hiddenParts,
-        show(cameraStatus.lastDistance), mod.cameraBlock and (", waiting because: " .. mod.cameraBlock) or "")
+    local waitingFor = mod.cameraBlock or cameraStatus.waiting
+    line("First person: %s with %s%s, hidden parts=%d, camera to eyes=%s cm%s",
+        cameraStatus.state, cameraStatus.methodName,
+        cameraStatus.method == "engine" and (" (style set through " .. cameraStatus.styleRoute .. ")") or "",
+        cameraStatus.hiddenParts, show(cameraStatus.lastDistance),
+        waitingFor and (", waiting because: " .. waitingFor) or "")
     if cameraStatus.moved then
         line("  game camera at the eyes: %s, put back on its arm by the game %d times", cameraStatus.moved,
             cameraStatus.reattached)
@@ -144,9 +147,9 @@ function diagnostics.report(env)
         tostring(seenView.cinematic), tostring(seenView.findCamera))
 
     local moveStatus = movement.status()
-    line("Movement: world gravity=%s, curve taken out=%s, curve failed=%s, speed limiter=%s",
-        show(moveStatus.worldGravity), tostring(moveStatus.curveTaken), tostring(moveStatus.curveBroken),
-        moveStatus.limiter)
+    line("Movement: world gravity=%s, curve taken out=%s, curve failed=%s, speed limiter=%s, stays based in the "
+        .. "air=%s", show(moveStatus.worldGravity), tostring(moveStatus.curveTaken), tostring(moveStatus.curveBroken),
+        moveStatus.limiter, tostring(moveStatus.stayBasedInAir))
     local counts = moveStatus.counts
     line("  GetMaxSpeed() after setting MaxWalkSpeed: %s; the game's own MaxWalkSpeed: %s; hops logged: %d",
         show(moveStatus.maxSpeed), show(moveStatus.gameMaxWalkSpeed), moveStatus.hops)
@@ -157,15 +160,11 @@ function diagnostics.report(env)
         .. "updates per second %s", P.maxSpeed, P.jumpSpeed, P.gravity, P.airSpeedCap, P.unitScale,
         P.rate > 0 and tostring(P.rate) or "one per frame")
 
+    -- Only the controller the frame hook got: searching the game's objects while it
+    -- loads a save can crash it.
     local pc = env.pc
     if not ue.valid(pc) then
-        local ok, found = pcall(FindFirstOf, "PlayerController")
-        if ok and ue.valid(found) then
-            pc = found
-        end
-    end
-    if not ue.valid(pc) then
-        line("No player controller found. Load a save and try again.")
+        line("No player controller yet. Load a save, then press the report key again.")
     else
         line("Controller: %s", show(pc))
         line("  class = %s", tostring(ue.className(pc)))
@@ -288,6 +287,13 @@ function diagnostics.report(env)
                     line("       cine camera: FocusMethod=%s, %s", show(ue.get(focus, "FocusMethod")),
                         values(component, { "CurrentFocalLength", "CurrentAperture",
                             "bOverride_CustomNearClippingPlane", "CustomNearClippingPlane" }))
+                    -- The lens limits the focal length, and so the field of view.
+                    local lens, filmback = ue.get(component, "LensSettings"), ue.get(component, "Filmback")
+                    line("       lens: %s; filmback: %s",
+                        ue.typeOf(lens) == "UScriptStruct" and values(lens, { "MinFocalLength", "MaxFocalLength",
+                            "SqueezeFactor" }) or "?",
+                        ue.typeOf(filmback) == "UScriptStruct" and values(filmback, { "SensorWidth", "SensorHeight" })
+                            or "?")
                 end
             end
             line("  Spring arms on the character:")
@@ -324,8 +330,10 @@ function diagnostics.report(env)
                     "MaxWalkSpeed", "MaxAcceleration", "GroundFriction", "BrakingDecelerationWalking",
                     "BrakingDecelerationFalling", "BrakingFrictionFactor", "bUseSeparateBrakingFriction",
                     "BrakingFriction", "FallingLateralFriction", "GravityScale", "JumpZVelocity", "AirControl",
-                    "MaxStepHeight", "bRequestMovementSettingsChange", "AllowedGait", "bForceUseNavMeshWalking",
-                    "bForcePositionOnNavMesh", "CustomDefaultMovementMode", "bUseMovementSettingsWhenFlying" }) do
+                    "MaxStepHeight", "bStayBasedInAir", "bMaintainHorizontalGroundVelocity", "MaxSimulationTimeStep",
+                    "MaxSimulationIterations", "bRequestMovementSettingsChange", "AllowedGait",
+                    "bForceUseNavMeshWalking", "bForcePositionOnNavMesh", "CustomDefaultMovementMode",
+                    "bUseMovementSettingsWhenFlying" }) do
                     field("Movement", cmc, name)
                 end
                 result("Movement", cmc, "GetMaxBrakingDeceleration")

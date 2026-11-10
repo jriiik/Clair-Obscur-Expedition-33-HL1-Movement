@@ -93,9 +93,22 @@ local function scan(pawn, cfg)
     st.cameras = cameras
 
     -- The game's own answer to "which is the main camera", through an out parameter.
+    -- UE4SS fills the table under the parameter's name, MainCamera. (SDK dumps call
+    -- it MainCamera_0: the dumper renames parameters named like a member.) Any
+    -- other object in the table is taken too, in case a game update renames it.
     local out = {}
     local ok, err = ue.call(pawn, "GetMainCamera", out)
-    st.mainCamera = ok and ue.valid(out.MainCamera_0) and out.MainCamera_0 or nil
+    local main = out.MainCamera
+    if not ue.valid(main) then
+        main = nil
+        for _, value in pairs(out) do
+            if ue.valid(value) then
+                main = value
+                break
+            end
+        end
+    end
+    st.mainCamera = ok and main or nil
     st.mainCameraError = not ok and tostring(err) or nil
 
     local exploration = {}
@@ -141,7 +154,9 @@ function view.update(pc, pawn, cfg, now)
         st.pawnAddr = pawnAddr
     end
     if now >= st.nextScan or pickChanged() then
-        st.nextScan = now + RESCAN
+        -- After the first scan, the next one comes half a period early, so that the
+        -- scans fall between the camera's refreshes instead of on the same frames.
+        st.nextScan = now + (st.nextScan == 0 and RESCAN / 2 or RESCAN)
         scan(pawn, cfg)
     end
     if now >= st.nextAsk then

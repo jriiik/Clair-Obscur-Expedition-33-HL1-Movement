@@ -4,12 +4,13 @@ A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
 Half-Life 1's movement: fast, slippery running, air strafing and bunny hopping
 by holding the jump key.
 
-> **Status: version 0.2, early testing.** In the first test, first person never
+> **Status: version 0.2.1, early testing.** In the first test, first person never
 > started and air strafing gained no speed. 0.2 fixes the most likely causes:
 > first person now follows the camera the game really shows, with a second way to
 > get to the eyes if the first doesn't work, and the Half-Life movement runs 100
 > times a second whatever the frame rate. If the game cuts your speed, the mod
-> undoes it and notes it in `UE4SS.log`. It hasn't been tested in the game yet:
+> undoes it and notes it in `UE4SS.log`. 0.2.1 fixes what a code review of 0.2
+> found. It hasn't been tested in the game yet:
 > see [docs/TESTING.md](docs/TESTING.md) and [Reporting problems](#reporting-problems).
 
 ## What it does
@@ -114,7 +115,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `JumpHeight` | `45` | How high a jump goes at `Gravity` 800; as in Half-Life, less gravity jumps higher |
 | `UnitScale` | `2.5` | Centimetres per Half-Life unit; higher makes everything faster and higher |
 | `BhopCap` | `0` | `1.7` copies later Half-Life updates, which slow you down above 1.7 × max speed |
-| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`; `0` updates once per frame |
+| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`, up to `250`; `0` updates once per frame |
 | `KeepSpeed` | `true` | Undoes the game cutting your speed (its own speed limit); `false` lets the game's cuts stand |
 | `ForwardKeys` and so on | `{ "W" }` … | The movement keys; add `"Up"`, `"Down"`, `"Left"`, `"Right"` for the arrow keys |
 
@@ -188,7 +189,7 @@ This version hasn't been tested in the game yet, so reports help a lot.
 [docs/TESTING.md](docs/TESTING.md) has a short list of things to try.
 
 1. Play until the problem happens, then press **F8**. This adds a status report to
-   the log.
+   the log (while the game is loading, a few seconds later).
 2. Quit the game (or let it crash), then copy `Win64\ue4ss\UE4SS.log` somewhere
    else **before you start the game again**: UE4SS starts a new, empty log every
    time the game starts.

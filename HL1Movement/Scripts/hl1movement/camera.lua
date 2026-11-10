@@ -9,7 +9,8 @@
 -- the game camera's own picture settings (exposure, colour grading, depth of
 -- field) and camera shakes don't apply. The camera manager's CameraStyle field
 -- isn't visible to UE4SS in Unreal 5.4, so the style is set through the player
--- controller's ClientSetCameraMode, every frame, and put back to "Default".
+-- controller's ClientSetCameraMode, every frame, and put back to "Default". It
+-- starts once the camera manager has finished blending to the character.
 --
 -- "game": the camera the game shows is taken off its spring arm and attached to
 -- the character's capsule at eye height, turning with the mouse. The game's
@@ -44,6 +45,10 @@ local KEEP_RELATIVE, SNAP_TO_TARGET = 0, 2 -- EAttachmentRule
 local FOCUS_DISABLED = 3 -- ECameraFocusMethod::Disable
 local NAME_CHECK_EVERY = 4 -- hiding passes between checks of the hidden parts' full names
 local MAX_MOVE_LINES = 3
+local FOV_TOLERANCE = 0.05 -- degrees: a field of view that differs by more was changed
+-- Seconds the engine's view waits for the camera manager to finish blending to
+-- the character, before it starts anyway.
+local BLEND_WAIT = 3
 
 local overrides = Overrides.new()
 local hidden = {} -- address -> { obj, fullName, how, was }
@@ -73,6 +78,9 @@ local st = {
     hasStyleField = false,
     moved = nil, -- the game camera while it is at the eyes (see moveCamera)
     moveLines = 0,
+    waiting = nil, -- why first person isn't on yet although it may be: "camera" or "blend"
+    blendSince = nil, -- when the camera manager was first seen blending to the character
+    blendStuck = false, -- a blend didn't end in BLEND_WAIT seconds: not waited for again until it ends
 }
 
 function camera.isActive()
@@ -141,6 +149,7 @@ end
 local function putStyleBack()
     local setter = st.styleSetter
     st.styleSetter = nil
+    st.styleRoute = nil
     if not setter then
         return
     end
@@ -184,18 +193,40 @@ local function placeAtEyes(m, eye)
     m.eye = eye
 end
 
+-- Attaches the camera to the capsule at the eyes. Returns false if Unreal refused
+-- the attachment.
 local function attachToEyes(m, eye, cfg)
     local cam = m.cam
     log.first("attach", "Attaching the game's camera %s to the character's capsule at the eyes", ue.describe(cam))
     -- Snapped to the capsule, keeping its own scale.
-    cam:K2_AttachToComponent(m.capsule, fname("None"), SNAP_TO_TARGET, SNAP_TO_TARGET, KEEP_RELATIVE, false)
+    local attached = cam:K2_AttachToComponent(m.capsule, fname("None"), SNAP_TO_TARGET, SNAP_TO_TARGET,
+        KEEP_RELATIVE, false)
+    if attached == false then
+        return false
+    end
     placeAtEyes(m, eye)
     -- The camera then turns with the control rotation when the view is worked out.
     cam.bUsePawnControlRotation = true
     cam:SetFieldOfView(cfg.FieldOfView)
-    m.fovPending = true
+    -- What the camera shows with the mod's field of view. A plain camera shows it
+    -- as set. A cine camera works its field of view out again from a focal length
+    -- that its lens limits, when the view is next worked out, so for it this is
+    -- read on a later frame (see keepAtEyes).
+    m.fovSeen = not m.cine and cfg.FieldOfView or nil
     if m.focus ~= nil then
         cam.FocusSettings = { FocusMethod = FOCUS_DISABLED }
+    end
+    return true
+end
+
+-- The camera controller's depth of field would focus on the hidden body, and its
+-- shake while running is in the way. Set again at each refresh, so a value the
+-- game sets meanwhile is the one put back.
+local function quietController(m)
+    local controller = m.controller
+    if controller and ue.valid(controller) then
+        overrides:set(controller, "EnableDynamicCameraFocus", false)
+        overrides:set(controller, "EnableCameraShakeWhenMoving", false)
     end
 end
 
@@ -218,27 +249,55 @@ local function moveCamera(pawn, pcm, cam, cfg, eye)
         usePawn = ue.get(cam, "bUsePawnControlRotation") == true,
         fov = ue.number(cam, "FieldOfView"),
         focus = focusMethod(cam),
+        cine = ue.number(cam, "CurrentFocalLength") ~= nil,
         capsule = capsule,
         capsuleAddr = ue.address(capsule),
         reattached = 0,
+        controller = ue.object(pawn, "BP_CameraControllerComponent"),
     }
     m.parentName = ue.fullName(m.parent)
     st.moved = m
     noteMove(m)
-    attachToEyes(m, eye, cfg)
-    local controller = ue.object(pawn, "BP_CameraControllerComponent")
-    if controller then
-        -- Its depth of field would focus on the hidden body, and its shake while
-        -- running is in the way.
-        overrides:set(controller, "EnableDynamicCameraFocus", false)
-        overrides:set(controller, "EnableCameraShakeWhenMoving", false)
+    if not attachToEyes(m, eye, cfg) then
+        error("Unreal refused to attach the camera to the character's capsule")
     end
+    quietController(m)
     pcall(stopShakes, pcm)
 end
 
+-- Whether a relative location is something other than the mod's own place at the
+-- eyes, (0, 0, eye).
+local function awayFromEyes(m, x, y, z)
+    return math.abs(x) > 1 or math.abs(y) > 1 or math.abs(z - m.eye) > 1
+end
+
+-- The camera's field of view: what the game set meanwhile is remembered to put
+-- back, and the mod's is set again. Not while paused: a cine camera only works
+-- its field of view out when the view is, and the game doesn't do that then.
+local function keepFov(m, cfg, paused)
+    local fov = ue.number(m.cam, "FieldOfView")
+    if not fov or paused then
+        return
+    end
+    if m.fovSeen == nil then
+        -- The first reading after the mod set it, on a later frame: what the
+        -- mod's field of view became.
+        m.fovSeen = fov
+        if math.abs(fov - cfg.FieldOfView) > 0.5 then
+            log.once("fov-limit", "The game's camera %s shows a field of view of %.1f instead of FieldOfView "
+                .. "%s: its lens can't go wider (or narrower).", ue.describe(m.cam), fov, tostring(cfg.FieldOfView))
+        end
+    elseif math.abs(fov - m.fovSeen) > FOV_TOLERANCE then
+        m.fov = fov -- the game's own, to put back
+        noteMove(m)
+        m.cam:SetFieldOfView(cfg.FieldOfView)
+    end
+end
+
 -- Every frame: undoes what the game did to its camera meanwhile, and remembers
--- the game's values to put back.
-local function keepAtEyes(m, eye, cfg, refresh)
+-- the game's values to put back. Returns false if the camera can't be put back
+-- at the eyes.
+local function keepAtEyes(m, eye, cfg, refresh, paused)
     local cam = m.cam
     local ok, parent = ue.call(cam, "GetAttachParent")
     if not ok or ue.address(parent) ~= m.capsuleAddr then
@@ -253,16 +312,24 @@ local function keepAtEyes(m, eye, cfg, refresh)
             if okSocket and ue.typeOf(socket) == "FName" then
                 m.socket = socket:ToString()
             end
+            -- Where the game put it on its arm, unless an attachment that kept the
+            -- relative location left it at the mod's place.
+            local at = vectorOf(ue.get(cam, "RelativeLocation"))
+            if awayFromEyes(m, at.X, at.Y, at.Z) then
+                m.location = at
+            end
         end
-        m.location = vectorOf(ue.get(cam, "RelativeLocation"))
+        local fov = ue.number(cam, "FieldOfView")
+        if fov and m.fovSeen and math.abs(fov - m.fovSeen) > FOV_TOLERANCE then
+            m.fov = fov
+        end
         noteMove(m)
-        attachToEyes(m, eye, cfg)
-        return
+        return attachToEyes(m, eye, cfg)
     end
     local at = ue.get(cam, "RelativeLocation")
     local x, y, z = ue.number(at, "X"), ue.number(at, "Y"), ue.number(at, "Z")
     if x and y and z then
-        local moved = math.abs(x) > 1 or math.abs(y) > 1 or math.abs(z - m.eye) > 1
+        local moved = awayFromEyes(m, x, y, z)
         if moved then
             -- A new camera setting from the game, meant for its arm: that is what to put back.
             m.location = { X = x, Y = y, Z = z }
@@ -272,21 +339,9 @@ local function keepAtEyes(m, eye, cfg, refresh)
             placeAtEyes(m, eye)
         end
     end
-    local fov = ue.number(cam, "FieldOfView")
-    if fov then
-        if m.fovPending then
-            -- A cine camera works its field of view out again from the focal length,
-            -- so the first reading after setting it is what the mod's value became.
-            m.fovSeen = fov
-            m.fovPending = false
-        elseif math.abs(fov - m.fovSeen) > 0.05 then
-            m.fov = fov -- the game's own, to put back
-            noteMove(m)
-            cam:SetFieldOfView(cfg.FieldOfView)
-            m.fovPending = true
-        end
-    end
+    keepFov(m, cfg, paused)
     if refresh then
+        quietController(m)
         if ue.get(cam, "bUsePawnControlRotation") ~= true then
             cam.bUsePawnControlRotation = true
         end
@@ -299,6 +354,7 @@ local function keepAtEyes(m, eye, cfg, refresh)
             end
         end
     end
+    return true
 end
 
 local function putCameraBack()
@@ -390,11 +446,16 @@ local function hidePart(entry)
     end
 end
 
+local function hiddenFlag(entry)
+    return entry.how == "owner" and "bOwnerNoSee" or "bHiddenInGame"
+end
+
 -- Shows a part the way it was before (if it is still the same part) and forgets it.
+-- A part the game has shown since the last pass stays shown.
 local function showPart(entry)
     journal.forget("hide", entry.fullName, entry.how)
     local part = entry.obj
-    if ue.valid(part) and ue.fullName(part) == entry.fullName then
+    if ue.valid(part) and ue.fullName(part) == entry.fullName and ue.get(part, hiddenFlag(entry)) ~= false then
         pcall(function()
             if entry.how == "owner" then
                 part:SetOwnerNoSee(entry.was)
@@ -407,15 +468,25 @@ end
 
 local function hideOne(part, address, primitive, pawnAddr, checkNames, firstPass)
     local entry = hidden[address]
-    if entry and (not ue.valid(entry.obj) or (checkNames and entry.fullName ~= ue.fullName(part))) then
+    if entry then
+        -- A known part that reads as shown was shown by the game, or is a new part
+        -- at the address of a destroyed one (UE4SS tells objects apart by their
+        -- address only), so then its full name is compared too.
+        local flag = ue.get(part, hiddenFlag(entry))
+        if ue.valid(entry.obj) and not ((checkNames or flag == false) and entry.fullName ~= ue.fullName(part)) then
+            if flag ~= true then
+                if flag == false and entry.was then
+                    -- The game showed it: shown is what to put back.
+                    entry.was = false
+                    journal.note("hide", entry.fullName, entry.how, false)
+                end
+                hidePart(entry)
+            end
+            return
+        end
         -- A new part where an old, now destroyed one used to be.
         journal.forget("hide", entry.fullName, entry.how)
         hidden[address] = nil
-        entry = nil
-    end
-    if entry then
-        hidePart(entry) -- hide it again if the game showed it
-        return
     end
     if notPrimitive[address] then
         return
@@ -499,6 +570,7 @@ local function showBody()
     end
     hidden = {}
     waiting = {}
+    notPrimitive = {} -- the next character's parts may have these addresses
 end
 
 -- Widens the pitch limits: the camera manager's own, and those of camera modifiers
@@ -541,10 +613,10 @@ local function failureReason()
     return string.format("the camera stayed %.0f cm away from the character's eyes", st.lastDistance or 0)
 end
 
+-- reason says what went wrong, and with which method.
 local function giveUp(pcm, cfg, reason)
-    log.warn("First person doesn't work here: %s with %s (camera manager: %s). The game's camera and your "
-        .. "character are back. %s, and please report UE4SS.log.", reason, METHOD_NAMES[st.method] or "?",
-        tostring(ue.className(pcm)),
+    log.warn("First person doesn't work here: %s (camera manager: %s). The game's camera and your character are "
+        .. "back. %s, and please report UE4SS.log.", reason, tostring(ue.className(pcm)),
         cfg.CameraKey and ("Press " .. cfg.CameraKey .. " twice to try again") or "Reload the settings to try again")
     camera.release()
     st.unavailable = reason
@@ -572,6 +644,7 @@ end
 -- game's camera; otherwise first person is given up.
 local function failed(pawn, pcm, cam, cfg)
     local reason = failureReason()
+    local how = METHOD_NAMES[st.method] or "?"
     if st.method == "engine" and cfg.CameraMethod == "auto" and cam then
         st.engineFailed[st.pcmClass or "?"] = reason
         log.info("First person: the engine's first-person view doesn't work here (%s). Moving the game's camera "
@@ -582,9 +655,9 @@ local function failed(pawn, pcm, cam, cfg)
             return
         end
         guard.report("moving the game's camera to the eyes", err)
-        reason = reason .. "; the game's camera couldn't be moved: " .. tostring(err)
+        how = how .. ", and the game's camera couldn't be moved to the eyes (" .. tostring(err) .. ")"
     end
-    giveUp(pcm, cfg, reason)
+    giveUp(pcm, cfg, reason .. " with " .. how)
 end
 
 -- Checks every frame until the camera is seen at the eyes, then at each refresh.
@@ -629,6 +702,42 @@ local function chooseMethod(cfg)
     return cfg.CameraMethod
 end
 
+-- Whether the camera manager is still blending from another view target to the
+-- character. GetViewTarget names the character as soon as such a blend starts,
+-- but the camera style applies to the old view target too, for the rest of the
+-- blend: with FirstPerson, an actor that holds a camera (for sneaking, aiming or a
+-- cutscene) would be shown from its own position instead. So the engine's view
+-- waits for the blend to end, BLEND_WAIT seconds at most. (The game's camera at
+-- the eyes doesn't need to: it blends there smoothly.)
+local function blending(pcm, now)
+    local pending = ue.get(pcm, "PendingViewTarget")
+    local target = ue.typeOf(pending) == "UScriptStruct" and ue.get(pending, "Target") or nil
+    if not ue.valid(target) then
+        st.blendSince, st.blendStuck = nil, false
+        return false
+    end
+    if st.blendStuck then
+        return false
+    end
+    st.blendSince = st.blendSince or now
+    if now - st.blendSince < BLEND_WAIT then
+        return true
+    end
+    st.blendStuck = true -- until the camera manager has no blend
+    log.once("blend-stuck", "The camera manager has been blending to %s for %d s; first person starts anyway.",
+        ue.describe(target), BLEND_WAIT)
+    return false
+end
+
+local function startOrGiveUp(method, pawn, pcm, cam, cfg)
+    local ok, err = pcall(startMethod, method, pawn, pcm, cam, cfg)
+    if not ok then
+        guard.report("moving the game's camera to the eyes", err)
+        giveUp(pcm, cfg, "the game's camera couldn't be moved to the eyes: " .. tostring(err))
+    end
+    return ok
+end
+
 --- Turns first person on, or keeps it on. Called every frame while it should be on.
 --- cam is the camera component the engine shows (nil if none); paused: whether the
 --- game is paused (the camera isn't updated then).
@@ -644,12 +753,21 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
     if st.active and (st.pawnAddr ~= pawnAddr or st.pcmAddr ~= pcmAddr) then
         camera.release()
     end
+    -- Whether the game's camera was moved to the eyes in this call: its field of
+    -- view is then read on the next frame, once the camera has been updated.
+    local justMoved = false
     if not st.active then
         st.pcmClass = ue.className(pcm)
         local method = chooseMethod(cfg)
         if method == "game" and not cam then
-            return -- nothing to move; waits for the game to show its camera
+            st.waiting = "camera" -- nothing to move; waits for the game to show its camera
+            return
         end
+        if method == "engine" and blending(pcm, now) then
+            st.waiting = "blend"
+            return
+        end
+        st.waiting = nil
         st.active = true
         st.pawnAddr = pawnAddr
         st.pcmAddr = pcmAddr
@@ -657,21 +775,17 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
         st.moveLines = 0
         st.nextRefresh = 0
         st.hasTargetRotation = ue.typeOf(ue.get(pawn, "TargetRotation")) == "UScriptStruct"
-        local ok, err = pcall(startMethod, method, pawn, pcm, cam, cfg)
-        if not ok then
-            guard.report("moving the game's camera to the eyes", err)
-            giveUp(pcm, cfg, "the game's camera couldn't be moved: " .. tostring(err))
+        if not startOrGiveUp(method, pawn, pcm, cam, cfg) then
             return
         end
+        justMoved = method == "game"
     elseif st.method == "game" and cam and st.moved and not ue.same(cam, st.moved.cam) then
         -- The game shows another of its exploration cameras now: move that one.
         putCameraBack()
-        local ok, err = pcall(startMethod, "game", pawn, pcm, cam, cfg)
-        if not ok then
-            guard.report("moving the game's camera to the eyes", err)
-            giveUp(pcm, cfg, "the game's camera couldn't be moved: " .. tostring(err))
+        if not startOrGiveUp("game", pawn, pcm, cam, cfg) then
             return
         end
+        justMoved = true
     end
     st.frames = st.frames + 1
 
@@ -684,8 +798,12 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
     if st.method == "engine" then
         useFirstPersonStyle(pc, pcm, refresh)
         overrides:set(pcm, "DefaultFOV", cfg.FieldOfView, refresh)
-    elseif st.moved then
-        keepAtEyes(st.moved, eye or st.moved.eye, cfg, refresh)
+    elseif st.moved and not justMoved then
+        if not keepAtEyes(st.moved, eye or st.moved.eye, cfg, refresh, paused) then
+            giveUp(pcm, cfg, "Unreal refused to attach the game's camera to the character's capsule again, after "
+                .. "the game had attached it elsewhere, with " .. METHOD_NAMES.game)
+            return
+        end
     end
     if refresh then
         st.nextRefresh = now + REFRESH
@@ -734,7 +852,7 @@ function camera.status()
     if st.unavailable then
         state = "given up: " .. st.unavailable
     elseif not st.active then
-        state = "off"
+        state = st.waiting and "waiting" or "off"
     elseif st.confirmed then
         state = "working"
     else
@@ -744,15 +862,17 @@ function camera.status()
     for class, reason in pairs(st.engineFailed) do
         engineFailed[#engineFailed + 1] = class .. ": " .. reason
     end
-    return { active = st.active, state = state, method = st.method,
+    return { active = st.active, state = state, method = st.method, waiting = st.waiting,
         methodName = st.method and METHOD_NAMES[st.method] or "none",
-        styleRoute = st.styleRoute or "not set yet", hiddenParts = count, lastDistance = st.lastDistance,
+        styleRoute = st.styleRoute or "not set", hiddenParts = count, lastDistance = st.lastDistance,
         moved = st.moved and ue.describe(st.moved.cam) or nil, reattached = st.moved and st.moved.reattached or 0,
         engineFailed = table.concat(engineFailed, "; ") }
 end
 
 --- Turns first person off and puts back everything it changed.
 function camera.release()
+    st.waiting = nil
+    st.blendSince = nil -- a blend seen from now on gets the whole wait again
     if not st.active and overrides:isEmpty() and next(hidden) == nil and not st.styleSetter and not st.moved then
         return
     end
@@ -789,6 +909,9 @@ function camera.forget()
     st.pawnAddr = nil
     st.pcmAddr = nil
     st.styleFieldPcm = nil
+    st.styleRoute = nil
+    st.waiting = nil
+    st.blendSince, st.blendStuck = nil, false
 end
 
 return camera

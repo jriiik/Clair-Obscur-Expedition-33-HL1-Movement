@@ -90,7 +90,8 @@ local RULES = {
 
     Movement = BOOLEAN,
     AutoHop = BOOLEAN,
-    PhysicsRate = number(0, 1000),
+    -- At most 25 updates run in a frame, and a frame counts as 0.1 s at most.
+    PhysicsRate = number(0, 250),
     KeepSpeed = BOOLEAN,
     MaxSpeed = number(1, 5000),
     InputSpeed = number(1, 10000),

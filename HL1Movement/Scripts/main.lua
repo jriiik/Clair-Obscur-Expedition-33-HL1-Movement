@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -34,6 +34,7 @@ local MAX_ERRORS_IN_A_ROW = 30
 local SETTLE_TIME = 3 -- seconds to leave a new level or character alone, while the game sets it up
 local REPORT_DELAY = 3 -- seconds after first taking over a character, before the automatic report
 local CAMERA_REPORT_DELAY = 10 -- seconds after taking over: a camera report if first person still waits
+local REPORT_WAIT = 10 -- seconds the report key's report waits at most for the game to finish loading
 local STATUS_INTERVAL = 10 -- seconds between status lines while the mod acts
 local MAX_STATUS_LINES = 30 -- per session
 local MODE_NAMES = { [0] = "none", [1] = "walking", [2] = "nav-mesh walking", [3] = "falling",
@@ -83,7 +84,8 @@ local mod = {
     reported = false, -- the automatic report has been written this session
     cameraReportAt = nil, -- when to check that first person isn't still waiting
     cameraReported = false,
-    reportWhy = nil, -- set to write a report at the end of this frame
+    reportWhy = nil, -- set to write a report at the end of this frame (see writeReport)
+    reportAskedAt = nil, -- when the report key asked for it
     givenUpReported = false,
     cameraBlock = nil, -- why first person waits, if it does
     announceCamera = false, -- say what first person does on the next frame, even if nothing changed
@@ -232,13 +234,15 @@ local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
     end
     camera.apply(pc, pawn, pcm, view.camera(), cfg, mod.now, paused)
     local status = camera.status()
-    state("First person", status.state .. "/" .. tostring(status.method), function()
+    state("First person", status.state .. "/" .. tostring(status.method) .. "/" .. tostring(status.waiting), function()
         if status.state == "checking" then
             return "on (" .. status.methodName .. "), checking that the view moved to the eyes"
         elseif status.state == "working" then
             return string.format("on (%s), the view is at the eyes (%.0f cm away)", status.methodName,
                 status.lastDistance or 0)
-        elseif status.state == "off" then
+        elseif status.state == "waiting" and status.waiting == "blend" then
+            return "waiting (the game's camera is still blending over to your character)"
+        elseif status.state == "waiting" or status.state == "off" then
             return "waiting (the game shows no camera to move to the eyes)"
         end
         return status.state
@@ -277,7 +281,7 @@ local function movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
     return nil
 end
 
-local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused)
+local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused, frameDt)
     local key, text = movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
     if key then
         movement.release()
@@ -289,12 +293,28 @@ local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused)
         return string.format("on (movement mode %s, %s)", tostring(mode), MODE_NAMES[mode] or "unknown")
     end)
     if not paused and ask(pawn, "IsPlayingRootMotion") ~= true then
-        movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames)
+        movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames, frameDt)
     end
 end
 
 local function report(title)
     diagnostics.report({ version = VERSION, mod = mod, cfg = cfg, P = P, pc = mod.pc, title = title })
+end
+
+-- Writes the report asked for (mod.reportWhy), at the end of a frame. Not while
+-- the game loads or sets up a character (waitingForGame), unless that has gone on
+-- for REPORT_WAIT seconds since the report key was pressed: a wait that doesn't
+-- end is worth a report too.
+local function writeReport(waitingForGame)
+    if not mod.reportWhy then
+        return
+    end
+    if waitingForGame and mod.now - (mod.reportAskedAt or mod.now) < REPORT_WAIT then
+        return
+    end
+    local why = mod.reportWhy
+    mod.reportWhy, mod.reportAskedAt = nil, nil
+    guard.run("writing the report", report, why)
 end
 
 -- One line every STATUS_INTERVAL seconds with the frame rate, the mod's own time
@@ -323,8 +343,8 @@ local function statusLine()
                 moved.airGain / moved.airHops / u, moved.airTurn / moved.airHops)
         end
         if moved.landings > 0 then
-            parts[#parts + 1] = string.format("landing lost %.0f u/s on average",
-                moved.landingLoss / moved.landings / u)
+            parts[#parts + 1] = string.format("at landing the game took %.0f u/s on average%s",
+                moved.landingLoss / moved.landings / u, cfg.KeepSpeed and " (before KeepSpeed)" or "")
         end
         if moved.cuts + moved.wakes + moved.rewrites + moved.leaks > 0 then
             parts[#parts + 1] = string.format("the game cut the speed %d times (%d undone), started its speed limiter "
@@ -346,6 +366,7 @@ local function onFrame(pc, dt)
     window.time = window.time + dt
     window.minDt = math.min(window.minDt, dt)
     window.maxDt = math.max(window.maxDt, dt)
+    local frameDt = dt
     if dt > 0.1 then
         dt = 0.1
     end
@@ -353,6 +374,7 @@ local function onFrame(pc, dt)
     mod.frames = mod.frames + 1
     mod.pc = pc
     if not mod.enabled then
+        writeReport(false)
         return
     end
 
@@ -392,6 +414,7 @@ local function onFrame(pc, dt)
         releaseAll()
         state("First person", "no-character", "off (no supported character)")
         state("Half-Life movement", "no-character", "off (no supported character)")
+        writeReport(mod.now < mod.settleUntil)
         return
     end
     -- While the game changes area (loads another level), everything is given back
@@ -401,11 +424,13 @@ local function onFrame(pc, dt)
         state("First person", "changing-area", "waiting (the game is changing area)")
         state("Half-Life movement", "changing-area", "waiting (the game is changing area)")
         mod.settleUntil = mod.now + SETTLE_TIME
+        writeReport(true)
         return
     end
     if mod.now < mod.settleUntil then
         state("First person", "settling", "waiting (the game is still setting up the character)")
         state("Half-Life movement", "settling", "waiting (the game is still setting up the character)")
+        writeReport(true)
         return
     end
     if not mod.reported and not mod.reportAt then
@@ -434,7 +459,7 @@ local function onFrame(pc, dt)
     guard.run(CAMERA_STEP, cameraStep, pc, pawn, pcm, inBattle, viewTarget, paused)
 
     local mode = cmc and ue.number(cmc, "MovementMode") or 0
-    guard.run(MOVEMENT_STEP, movementStep, pc, pawn, cmc, inBattle, yaw, dt, mode, paused)
+    guard.run(MOVEMENT_STEP, movementStep, pc, pawn, cmc, inBattle, yaw, dt, mode, paused, frameDt)
 
     if camera.isActive() and cfg.BodyFollowsView and (mode == 1 or mode == 2 or mode == 3) and yaw then
         guard.run(FACING_STEP, camera.faceView, pawn, yaw)
@@ -454,11 +479,7 @@ local function onFrame(pc, dt)
                 CAMERA_REPORT_DELAY)
         end
     end
-    if mod.reportWhy then
-        local why = mod.reportWhy
-        mod.reportWhy = nil
-        guard.run("writing the automatic report", report, why)
-    end
+    writeReport(false)
     if mod.now >= mod.nextStatus then
         mod.nextStatus = mod.now + STATUS_INTERVAL
         guard.run("writing the status line", statusLine)
@@ -541,6 +562,9 @@ local function tick(context, deltaSeconds)
     mod.lateHook = late
     local started = clock()
     safeFrame(obj, ue.unwrap(deltaSeconds))
+    if mod.broken then
+        writeReport(false) -- the frame update is off, so the report key still gets its report
+    end
     mod.window.ticks = mod.window.ticks + 1
     mod.window.cpu = mod.window.cpu + (clock() - started)
 end
@@ -659,7 +683,14 @@ local function applyReloadedSettings()
 end
 
 local function reportKey()
-    report("asked for with " .. tostring(cfg.DiagnosticsKey))
+    local why = "asked for with " .. tostring(cfg.DiagnosticsKey)
+    if mod.tickHook then
+        -- Written at the end of this frame, once the mod has looked at the game
+        -- (see writeReport).
+        mod.reportWhy, mod.reportAskedAt = why, mod.now
+    else
+        report(why) -- no save loaded yet, so there is nothing of the game to read
+    end
 end
 
 -- What each key does when pressed: work that doesn't touch the game, and the

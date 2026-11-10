@@ -72,6 +72,12 @@ t.test("numbers out of range are clamped with a warning", function()
     t.eq(#warnings, 2)
 end)
 
+t.test("PhysicsRate stops at 250: the most updates a frame of 0.1 s can run (25)", function()
+    local cfg, warnings = settings.load({ PhysicsRate = 1000 }, KEYS)
+    t.eq(cfg.PhysicsRate, 250)
+    t.contains(warnings, "PhysicsRate = 1000: lowered to the highest allowed value, 250")
+end)
+
 t.test("unknown settings and non-name list entries are reported", function()
     local cfg, warnings = settings.load({ MaxSpeedd = 1, JumpKeys = { "SpaceBar", 3, "" } }, KEYS)
     t.eq(#cfg.JumpKeys, 1)

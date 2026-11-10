@@ -49,9 +49,11 @@ local function distance(a, b)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- The game's own camera, on its arm with its own settings.
-local function gameCameraBack(g, cam)
+-- The game's own camera, on its arm with its own settings, at location (0, 0, 0)
+-- on the arm unless another is given.
+local function gameCameraBack(g, cam, location)
     cam = cam or g.c.cineCamera
+    location = location or { X = 0, Y = 0, Z = 0 }
     local link = g.c.attach[cam]
     t.truthy(link and link.parent == g.c.springArm, "the camera is back on its arm")
     t.eq(link.socket, "SpringEndpoint")
@@ -59,6 +61,10 @@ local function gameCameraBack(g, cam)
     t.eq(p.bUsePawnControlRotation, false)
     t.eq(p.FieldOfView, 85)
     t.eq(p.FocusSettings.FocusMethod, 1, "its focus is back on")
+    for _, axis in ipairs({ "X", "Y", "Z" }) do
+        t.eq(p.RelativeLocation[axis], location[axis], "its place on the arm, " .. axis)
+    end
+    t.eq(p.RelativeRotation.Yaw, 0)
     t.eq(fake.props(g.c.cameraController).EnableDynamicCameraFocus, true)
     t.eq(fake.props(g.c.cameraController).EnableCameraShakeWhenMoving, true)
 end
@@ -117,7 +123,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.2.0 loaded")
+    t.contains(g.log, "Version 0.2.1 loaded")
     for _, code in ipairs({ F5, F6, F7, F8 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
     end
@@ -189,8 +195,14 @@ end)
 
 t.test("hotkeys work before a save is loaded", function()
     local g = start()
+    local searched = false
+    _G.FindFirstOf = function()
+        searched = true
+    end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.2.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.1 diagnostics")
+    t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
+    t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
 
 t.test("hotkeys wait for the next frame when ExecuteInGameThread fails", function()
@@ -264,6 +276,57 @@ t.test("a body part replaced at the same address is hidden and shown again corre
     t.eq(fake.props(newSkin).bOwnerNoSee, true, "the new part is hidden too")
     g.press(F6)
     t.eq(fake.props(newSkin).bOwnerNoSee, false, "and shown again when first person turns off")
+    noErrors(g)
+end)
+
+t.test("a new part at a hidden part's address waits a pass like any new part, and is shown afterwards", function()
+    local g = running()
+    local c = g.c
+    -- In UE4SS the old part's object reads as valid again once a new one has its
+    -- address, so the old one isn't destroyed here.
+    local newSkin = fake.object({ className = "SkeletalMeshComponent", name = "NewSkinMesh",
+        address = fake.addressOf(c.skinMesh),
+        chain = { "SkeletalMeshComponent", "PrimitiveComponent", "SceneComponent", "ActorComponent", "Object" },
+        props = { AttachChildren = fake.array({}), bOwnerNoSee = false, bHiddenInGame = false },
+        methods = {
+            GetOwner = fake.ufunction("GetOwner", 0, function()
+                return c.skinActor
+            end),
+            SetOwnerNoSee = fake.ufunction("SetOwnerNoSee", 1, function(self, value)
+                fake.props(self).bOwnerNoSee = value
+            end),
+            SetHiddenInGame = fake.ufunction("SetHiddenInGame", 2, function(self, value)
+                fake.props(self).bHiddenInGame = value
+            end),
+        } })
+    fake.set(c.mesh, "AttachChildren", fake.array({ newSkin, c.propMesh }))
+    g.frames(31)
+    t.eq(fake.props(newSkin).bOwnerNoSee, false, "not touched on the pass it first appears")
+    g.frames(31)
+    t.eq(fake.props(newSkin).bOwnerNoSee, true, "hidden on the next pass")
+    g.press(F6)
+    t.eq(fake.props(newSkin).bOwnerNoSee, false, "and shown again when first person turns off")
+    noErrors(g)
+end)
+
+t.test("a part the game shows during first person stays shown afterwards, though it was hidden before", function()
+    local g = start()
+    local prop = fake.props(g.c.propMesh)
+    prop.bHiddenInGame = true -- put away when first person starts
+    g.loadSave()
+    g.frames(SETTLE_FRAMES)
+    prop.bHiddenInGame = false -- the game shows it
+    g.frames(31)
+    t.eq(prop.bHiddenInGame, true, "hidden again in first person")
+    g.press(F6)
+    t.eq(prop.bHiddenInGame, false, "shown afterwards, as the game wanted")
+    -- Shown by the game just before first person ends, with no hiding pass between.
+    prop.bHiddenInGame = true
+    g.press(F6)
+    g.frames(40)
+    prop.bHiddenInGame = false
+    g.press(F6)
+    t.eq(prop.bHiddenInGame, false, "left shown")
     noErrors(g)
 end)
 
@@ -354,10 +417,7 @@ t.test("switching first person off puts the game's camera back as it was", funct
     g.frames(SETTLE_FRAMES + 150)
     t.truthy(g.c.attach[g.c.cineCamera].parent == g.c.capsule)
     g.press(F6)
-    gameCameraBack(g)
-    t.eq(l.X, 10)
-    t.eq(l.Y, 20)
-    t.eq(l.Z, 30)
+    gameCameraBack(g, nil, { X = 10, Y = 20, Z = 30 })
     t.eq(styleOf(g), "Default")
     t.eq(fake.props(g.c.mesh).bOwnerNoSee, false)
     for _, kind in ipairs({ "attach", "hide", "style" }) do
@@ -369,13 +429,26 @@ end)
 t.test("the game attaching its camera to the arm again: it is moved back to the eyes", function()
     local g = onGameCamera()
     local c = g.c
+    -- Attached keeping its relative location, which is still the mod's place at the eyes.
     c.attachTo(c.cineCamera, c.springArm, "SpringEndpoint")
     g.frame()
     t.truthy(c.attach[c.cineCamera].parent == c.capsule, "at the eyes again")
     t.contains(g.log, "The game attached its camera to SpringArmComponent")
     g.inBattle = true
     g.frame()
-    gameCameraBack(g)
+    gameCameraBack(g) -- at its own place on the arm, not the mod's
+    -- Attached with a new place of its own: that is the one put back.
+    g.inBattle = false
+    g.frames(20)
+    t.truthy(c.attach[c.cineCamera].parent == c.capsule)
+    c.attachTo(c.cineCamera, c.springArm, "SpringEndpoint")
+    local l = fake.props(c.cineCamera).RelativeLocation
+    l.X, l.Y, l.Z = 5, 0, 10
+    g.frame()
+    t.truthy(c.attach[c.cineCamera].parent == c.capsule)
+    g.inBattle = true
+    g.frame()
+    gameCameraBack(g, nil, { X = 5, Y = 0, Z = 10 })
     noErrors(g)
 end)
 
@@ -405,6 +478,63 @@ t.test("a cine camera that can't reach the field of view isn't taken for the gam
     t.eq(fake.props(g.c.cineCamera).FieldOfView, 85, "the game's own field of view comes back")
 end)
 
+t.test("...nor when the camera is moved as first person starts: with CameraMethod game, or after a dialogue",
+    function()
+        local g = running({ CameraMethod = "game" }, { cineFovLimit = 95 })
+        g.frames(30)
+        local cine = fake.props(g.c.cineCamera)
+        t.eq(cine.FieldOfView, 95)
+        t.contains(g.log, "shows a field of view of 95.0 instead of FieldOfView 100")
+        g.press(F6)
+        t.eq(cine.FieldOfView, 85, "CameraMethod game")
+        g = onGameCamera(nil, { cineFovLimit = 95 })
+        cine = fake.props(g.c.cineCamera)
+        g.inDialogue = true
+        g.frames(20)
+        t.eq(cine.FieldOfView, 85)
+        g.inDialogue = false
+        g.frames(30)
+        t.truthy(g.c.attach[g.c.cineCamera].parent == g.c.capsule, "at the eyes again after the dialogue")
+        g.press(F6)
+        t.eq(cine.FieldOfView, 85, "moved again after a dialogue")
+        noErrors(g)
+    end)
+
+t.test("the game changing the field of view over several frames: the mod's comes back, then the game's last",
+    function()
+        for _, n in ipairs({ 1, 2, 3, 6, 7 }) do
+            local g = onGameCamera()
+            local cam = g.c.cineCamera
+            local cine = fake.props(cam)
+            local i = 0
+            -- Written after the controller's tick, as the game's camera blends and look-ats do.
+            g.afterMove = function()
+                i = i + 1
+                if i <= n then
+                    cam:SetFieldOfView(70 + 20 * i / n)
+                end
+            end
+            g.frames(n + 5)
+            t.eq(cine.FieldOfView, 100, n .. " frames: the mod's field of view again")
+            g.afterMove = nil
+            g.press(F6)
+            t.near(cine.FieldOfView, 90, 1e-9, n .. " frames: the game's last one comes back")
+        end
+        -- The game holding one value for a while.
+        local g = onGameCamera()
+        local cam = g.c.cineCamera
+        g.afterMove = function()
+            cam:SetFieldOfView(80)
+        end
+        g.frames(10)
+        g.afterMove = nil
+        g.frames(3)
+        t.eq(fake.props(cam).FieldOfView, 100)
+        g.press(F6)
+        t.eq(fake.props(cam).FieldOfView, 80)
+        noErrors(g)
+    end)
+
 t.test("once the engine's view didn't work, the next character starts with the game's camera", function()
     local g = onGameCamera()
     g.useCharacter(g.buildCharacter())
@@ -426,8 +556,11 @@ end)
 t.test("a game camera that can't be moved: first person is given up and everything put back", function()
     local g = running(nil, { cameraStyleIgnored = true, attachIgnored = true })
     g.frames(400)
-    t.contains(g.log, "First person doesn't work here: the camera stayed")
-    t.contains(g.log, "with the game's camera at the eyes")
+    local line = t.contains(g.log, "First person doesn't work here: the camera stayed")
+    t.truthy(line:find("with the engine's first-person view, and the game's camera couldn't be moved to the eyes "
+        .. "(", 1, true), line)
+    t.truthy(line:find("Unreal refused to attach the camera to the character's capsule", 1, true), line)
+    t.absent(g.log, "The game attached its camera", "the mod's own failed attachment isn't blamed on the game")
     cameraGivenBack(g)
     t.eq(g.shared[JOURNAL]:find("attach", 1, true), nil, "nothing left in the journal")
 end)
@@ -740,6 +873,34 @@ t.test("a wall turning the velocity, or a stop, isn't taken for a speed cut", fu
     t.absent(g.log, "The game cut the speed")
 end)
 
+t.test("a wall or a step that stops the move part of the way isn't taken for a speed cut", function()
+    local g = running()
+    runTo(g, MAX_SPEED)
+    g.moveShare = 0.5 -- running into something: half of each move happens
+    g.frames(5)
+    t.absent(g.log, "The game cut the speed")
+    t.truthy(g.speed() < MAX_SPEED * 0.6, "the speed isn't put back")
+    g.moveShare = nil
+    noErrors(g)
+end)
+
+t.test("KeepSpeed: a cut by the speed limiter to under a fifth of the speed is undone too", function()
+    local g = running(nil, { limiterWakesOnModeChange = true, maxSpeedIgnoresWalkSpeed = true })
+    fake.props(g.cmc).CurrentMovementSettings.SprintSpeed = 100 -- the limiter caps at 100 cm/s
+    strafeHops(g, 300)
+    t.truthy(g.speed() > MAX_SPEED, string.format("speed %.0f should stay above %.0f", g.speed(), MAX_SPEED))
+    t.contains(g.log, "to 40 u/s (")
+    noErrors(g)
+end)
+
+t.test("with DisableSpeedLimiter = false, the cut lines say the limiter isn't paused", function()
+    local g = running({ DisableSpeedLimiter = false }, { maxSpeedIgnoresWalkSpeed = true })
+    g.keys.W = true
+    g.frames(60)
+    t.contains(g.log, "speed limiter not paused (DisableSpeedLimiter = false)")
+    t.absent(g.log, "speed limiter not found")
+end)
+
 t.test("a jump keeps the velocity of a moving platform", function()
     local g = running()
     g.baseVelocity = { X = 200, Y = 0, Z = 50 }
@@ -749,6 +910,16 @@ t.test("a jump keeps the velocity of a moving platform", function()
     local v = fake.props(g.cmc).Velocity
     t.near(v.X, 200, 0.1, "the platform's speed is kept")
     t.near(v.Z, JUMP_SPEED + 50 - 980 * fake.props(g.cmc).GravityScale / 60, 1e-6)
+    t.absent(g.log, "changed the velocity")
+end)
+
+t.test("with bStayBasedInAir, a jump from a moving platform doesn't add the platform's velocity", function()
+    local g = running(nil, { stayBasedInAir = true })
+    g.baseVelocity = { X = 200, Y = 0, Z = 50 }
+    g.keys.SpaceBar = true
+    g.frame()
+    t.eq(g.mode(), 3)
+    t.near(fake.props(g.cmc).Velocity.X, 0, 0.1, "Unreal keeps carrying the character with the platform itself")
     t.absent(g.log, "changed the velocity")
 end)
 
@@ -805,6 +976,51 @@ t.test("the game's dialogue and cinematic systems put first person aside", funct
     g.inCinematic = false
     g.frames(20)
     t.eq(styleOf(g), "FirstPerson")
+end)
+
+t.test("the camera the game's GetMainCamera names shows exploration, whatever CameraComponents says", function()
+    local g = running({ CameraComponents = {} })
+    t.eq(styleOf(g), "FirstPerson", "Main_CineCamera, named by GetMainCamera")
+    g.press(F8)
+    t.contains(g.log, "the game's GetMainCamera: Main_CineCamera (CineCameraComponent);")
+    noErrors(g)
+end)
+
+t.test("the engine's view waits for the camera manager to finish blending over to the character", function()
+    local g = start()
+    g.loadSave()
+    local pending = fake.props(g.pcm).PendingViewTarget
+    pending.Target = g.pawn -- the game blends back to the character, from a sneaking camera for example
+    g.frames(SETTLE_FRAMES + 60)
+    t.eq(styleOf(g), "Default", "not during the blend")
+    t.contains(g.log, "First person: waiting (the game's camera is still blending over to your character)")
+    pending.Target = fake.INVALID
+    g.frame()
+    t.eq(styleOf(g), "FirstPerson", "once it is over")
+    -- A blend that never ends doesn't keep first person off for long.
+    g.press(F6)
+    pending.Target = g.pawn
+    g.press(F6)
+    g.frames(170)
+    t.eq(styleOf(g), "Default")
+    g.frames(30)
+    t.eq(styleOf(g), "FirstPerson", "after 3 s at most")
+    t.contains(g.log, "first person starts anyway")
+    g.inDialogue = true
+    g.frames(20)
+    g.inDialogue = false
+    g.frames(20)
+    t.eq(styleOf(g), "FirstPerson", "and the blend that doesn't end isn't waited for again")
+    noErrors(g)
+end)
+
+t.test("the game's camera at the eyes doesn't wait for a blend", function()
+    local g = start({ CameraMethod = "game" })
+    fake.props(g.pcm).PendingViewTarget.Target = g.pawn
+    g.loadSave()
+    g.frames(SETTLE_FRAMES)
+    t.truthy(g.c.attach[g.c.cineCamera].parent == g.c.capsule)
+    noErrors(g)
 end)
 
 t.test("without the game's GetMainCamera, the cameras named in CameraComponents count", function()
@@ -941,7 +1157,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.2.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.1 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")
@@ -955,6 +1171,34 @@ t.test("F8 writes a diagnostics report", function()
     t.contains(g.log, "Errors: none")
     t.contains(g.log, "end of diagnostics")
     noErrors(g)
+end)
+
+t.test("the report key waits while the game sets up a character or changes area, but not forever", function()
+    local g = running()
+    g.useCharacter(g.buildCharacter())
+    g.frame() -- the mod sees the new character and leaves it alone for a moment
+    g.press(F8)
+    g.frames(5)
+    t.absent(g.log, "diagnostics (asked for with F8)", "nothing read while the game sets the character up")
+    g.frames(SETTLE_FRAMES)
+    t.eq(count(g.log, "diagnostics (asked for with F8)"), 1, "written once that is over")
+    t.contains(g.log, "the game's GetMainCamera: Main_CineCamera")
+    -- An area change that doesn't end still gets its report.
+    g.changingArea = true
+    g.press(F8)
+    g.frames(580)
+    t.eq(count(g.log, "diagnostics (asked for with F8)"), 1)
+    g.frames(30)
+    t.eq(count(g.log, "diagnostics (asked for with F8)"), 2, "after 10 s")
+    noErrors(g)
+end)
+
+t.test("with the mod switched off, the report key still writes its report", function()
+    local g = running()
+    g.press(F5)
+    g.press(F8)
+    t.contains(g.log, "diagnostics (asked for with F8)")
+    t.contains(g.log, "Mod: enabled=false")
 end)
 
 t.test("a value that can't be read doesn't stop the report", function()
