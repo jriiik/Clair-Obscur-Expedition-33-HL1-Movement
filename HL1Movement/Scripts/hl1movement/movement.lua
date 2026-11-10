@@ -18,9 +18,12 @@
 -- velocity. A wall or a step that stops the character part of the way lowers it
 -- in the same direction, but then the character moved less too: Unreal works the
 -- velocity out from the distance moved. A moving platform's own motion doesn't
--- count. The distance isn't checked when the movement mode changed during Unreal's
--- update, at a landing or when walking off a ledge: the speed limiter listens to
--- mode changes, and a cap there comes part of the way through the move.)
+-- count, as far as Unreal reports the platform's velocity (a movement component's
+-- or a physics body's); a platform moved some other way still counts. Walking off
+-- a moving platform adds its velocity, as the mod's jump does. The distance isn't
+-- checked when the movement mode changed during Unreal's update, at a landing or
+-- when walking off a ledge: the speed limiter listens to mode changes, and a cap
+-- there comes part of the way through the move.)
 --
 -- When the mod hands the movement back, every value goes back to the last one the
 -- game set (see overrides.lua), including the walking speed. The mod doesn't ask
@@ -51,7 +54,7 @@ local LIMITER_CLASS = "BP_VelocityControllerComponent_C"
 local CUT_MIN, CUT_MAX, CUT_COS = 0.2, 0.97, math.cos(math.rad(2))
 -- ...and the character moved at least this share of the way the mod's velocity
 -- would take it, and not much more (more: the game moved it). A moving platform's
--- own motion is taken out first.
+-- own motion is taken out first, as far as Unreal reports its velocity.
 local MOVED_MIN, MOVED_MAX = 0.9, 2
 local MIN_CHECKED_SPEED = 50 -- cm/s
 local MAX_CUT_LINES = 5
@@ -72,7 +75,7 @@ local st = {
     jump = { latched = false },
     sim = {}, -- physics.simulate's state
     lastStepFrame = nil,
-    written = nil, -- the horizontal velocity the mod left for the game last frame
+    written = nil, -- the horizontal velocity the mod left for the game last frame, and the platform's
     lastMode = nil,
     lastSpeed = 0,
     emptyInputFrames = 0,
@@ -280,7 +283,8 @@ local function checkMaxSpeed(cmc)
 end
 
 --- Takes over the character's movement, or keeps it taken over. Called every frame
---- while the mod's movement should run.
+--- while the mod's movement should run. Returns true if it took over in this call
+--- (its refreshes start then, see movement.stagger).
 function movement.apply(pawn, cmc, cfg, P, now)
     if st.active and not ue.same(st.cmc, cmc) then
         movement.release()
@@ -311,8 +315,16 @@ function movement.apply(pawn, cmc, cfg, P, now)
     local refresh = now >= st.nextRefresh
     if refresh then
         -- The second refresh comes a quarter period after the first instead of a
-        -- whole one, so that refreshes fall between the camera's (see movement.stagger).
-        st.nextRefresh = now + (first and REFRESH / 4 or REFRESH)
+        -- whole one, so that refreshes fall between the camera's (see movement.stagger),
+        -- and each is counted from when the last was due, not from its frame, which
+        -- would drift with the frame times.
+        if first then
+            st.nextRefresh = now + REFRESH / 4
+        else
+            repeat
+                st.nextRefresh = st.nextRefresh + REFRESH
+            until st.nextRefresh > now
+        end
     end
     -- ALS sets the walking speed itself whenever the gait changes, and the game
     -- sets it for some areas, so this is set every frame. The high value stops the
@@ -339,13 +351,19 @@ function movement.apply(pawn, cmc, cfg, P, now)
     if cfg.DisableSpeedLimiter then
         guard.run("pausing the speed limiter", pauseLimiter, pawn, cmc, refresh)
     end
+    return first
 end
 
---- Called when first person starts, whose refreshes start then: the next refresh
---- here comes a quarter period later, between the camera's.
-function movement.stagger(now)
-    if st.active then
-        st.nextRefresh = now + REFRESH / 4
+--- Puts the refreshes here a quarter period after first person's, between them:
+--- called when first person starts, or when the movement starts while first person
+--- is on. cameraNext: when first person's next refresh is due.
+function movement.stagger(now, cameraNext)
+    if st.active and cameraNext then
+        local at = cameraNext - REFRESH + REFRESH / 4
+        while at <= now do
+            at = at + REFRESH
+        end
+        st.nextRefresh = at
     end
 end
 
@@ -381,8 +399,9 @@ local function atMaxSpeed(cmc, vx, vy, vz)
     return ok and at(max)
 end
 
--- The velocity of the moving platform the character is on (zero on still ground
--- and in the air), read while it is still standing on it.
+-- The velocity of the moving platform the character is on (zero on still ground,
+-- and in the air unless the movement component's bStayBasedInAir is set), read
+-- while it is still standing on it.
 local function platformVelocity(cmc)
     local ok, base = ue.call(cmc, "GetImpartedMovementBaseVelocity")
     if ok and type(base) == "table" then
@@ -399,27 +418,30 @@ local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
     if not w then
         return vx, vy
     end
-    local written = horizontal(w.x, w.y)
+    -- Walking off a ledge (leaving the ground other than by the mod's jump), Unreal
+    -- adds the velocity of the platform the character stood on, as the mod's jump does.
+    local ex, ey = w.x, w.y
+    if mode == FALLING and w.mode ~= FALLING and not st.stayBasedInAir then
+        ex, ey = ex + w.baseX, ey + w.baseY
+    end
+    local written = horizontal(ex, ey)
     local speed = horizontal(vx, vy)
     if written < MIN_CHECKED_SPEED or speed < 1e-3 then
         return vx, vy
     end
     local ratio = speed / written
-    if ratio > CUT_MAX or (vx * w.x + vy * w.y) / (speed * written) < CUT_COS then
+    if ratio > CUT_MAX or (vx * ex + vy * ey) / (speed * written) < CUT_COS then
         return vx, vy
     end
     if w.mode == mode and w.at and at and w.dt and w.dt > 0 then
         -- How fast the character really moved. A wall or a step that stopped it part
         -- of the way lowers the velocity to match the distance moved; a cap lowers
         -- the velocity after the move. Unreal moves a character on a moving platform
-        -- with it, apart from its velocity, so the platform's motion is taken out.
+        -- with it, apart from its velocity, so the motion of the platform it stood on
+        -- when the mod wrote is taken out, as far as Unreal reports its velocity.
         -- (When the mode changed during the move, a cap by a listener of that change
         -- came part of the way through it, so the distance tells nothing.)
-        local mx, my = (at.X - w.at.X) / w.dt, (at.Y - w.at.Y) / w.dt
-        local baseX, baseY = platformVelocity(cmc)
-        if baseX and baseY then
-            mx, my = mx - baseX, my - baseY
-        end
+        local mx, my = (at.X - w.at.X) / w.dt - w.baseX, (at.Y - w.at.Y) / w.dt - w.baseY
         local moved = horizontal(mx, my)
         if moved < written * MOVED_MIN or moved > written * MOVED_MAX or speed > moved * CUT_MAX then
             return vx, vy
@@ -627,10 +649,18 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         end
     end
     cmc.Velocity = { X = wx + bx, Y = wy + by, Z = nz + bz }
+    -- The velocity of the platform that carries the character in Unreal's update
+    -- (none after the mod's jump, unless bStayBasedInAir), read while it still
+    -- stands on it: that update starts by moving it along with the platform, and
+    -- adds the platform's velocity if it walks off.
+    local baseX, baseY = 0, 0
+    if (onGround and not jumped) or st.stayBasedInAir then
+        baseX, baseY = platformVelocity(cmc)
+    end
     -- What the game should hand back next frame, once its braking took the extra,
     -- and where the character was before this frame's move.
     st.written = { x = nx + bx, y = ny + by, mode = jumped and FALLING or mode, jumped = jumped, at = at,
-        dt = frameDt or dt }
+        dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0 }
 end
 
 --- Gives the movement back to the game and puts back everything the mod changed.

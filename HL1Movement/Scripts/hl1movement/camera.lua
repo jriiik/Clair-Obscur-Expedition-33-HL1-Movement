@@ -202,13 +202,20 @@ end
 -- field of view out again from a focal length that its lens limits, when the view
 -- is worked out at the end of a frame (not while the game is paused). So for a
 -- cine camera, what the mod's FieldOfView becomes (m.fovSeen) is learnt from
--- readings taken after that: FieldOfView itself, or the same other reading twice
--- with the mod's set again in between (its lens can't go further). A reading that
--- changed in between was the game's own, to put back. A limit learnt that way is
--- checked again at each refresh, in case it was the game holding its own value.
+-- readings taken after that: FieldOfView itself, or exactly the same other reading
+-- twice with the mod's set again in between (its lens can't go further: the lens
+-- gives the same value each time, while the steps of a game blend that eases in or
+-- out can be tiny). A reading that changed in between was the game's own, to put
+-- back. A limit learnt that way is checked again at each refresh, in case it was
+-- the game holding its own value, which readings can't tell from a lens limit.
 
 local function nearFov(a, b)
     return a ~= nil and b ~= nil and math.abs(a - b) <= FOV_TOLERANCE
+end
+
+-- The same value: a lens limit is worked out the same way each time.
+local function sameFov(a, b)
+    return a ~= nil and b ~= nil and math.abs(a - b) <= 1e-6
 end
 
 local function setFov(m, fov)
@@ -239,7 +246,7 @@ local function judgeFov(m, cfg, fov)
         end
         m.fovSeen, m.fovTry, m.fovRecheck = want, nil, nil
         return false
-    elseif nearFov(fov, try) then
+    elseif sameFov(fov, try) then
         if m.fovRecheck then
             log.once("fov-limit", "The game's camera %s shows a field of view of %.1f although the mod sets "
                 .. "FieldOfView %s: its lens can't go wider (or narrower), or the game keeps setting its own.",
@@ -376,9 +383,13 @@ local function keepAtEyes(m, eye, cfg, refresh, paused)
             end
         end
         -- The game's field of view, if it set one (attachToEyes sets the mod's again).
-        local fov = not paused and m.fovSetAt ~= st.updates and ue.number(cam, "FieldOfView")
-        if fov then
+        -- Read after the view was worked out, paused or not, it is judged as usual;
+        -- before that, the camera has the mod's own value unless the game set one.
+        local fov = ue.number(cam, "FieldOfView")
+        if fov and m.fovSetAt ~= st.updates then
             judgeFov(m, cfg, fov)
+        elseif fov and not nearFov(fov, cfg.FieldOfView) and not nearFov(fov, m.fovSeen) then
+            m.fov = fov
         end
         noteMove(m)
         return attachToEyes(m, eye, cfg)
@@ -795,8 +806,9 @@ local function blending(pcm, now, paused)
     return false
 end
 
---- Called every frame, whether first person is on or not: once a blend that went
---- on for BLEND_WAIT seconds has ended, the next one is waited for again.
+--- Called on every frame the mod acts, whether first person is on or not: once a
+--- blend that went on for BLEND_WAIT seconds has ended, the next one is waited for
+--- again.
 function camera.watchBlend(pcm, pawn)
     if not st.blendStuck then
         return
@@ -818,7 +830,8 @@ end
 
 --- Turns first person on, or keeps it on. Called every frame while it should be on.
 --- cam is the camera component the engine shows (nil if none); paused: whether the
---- game is paused (the camera isn't updated then).
+--- game is paused (the camera isn't updated then). Returns true if first person
+--- started in this call (its refreshes start then, see camera.nextRefresh).
 function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
     -- The camera manager works the view out at the end of each frame that isn't
     -- paused: counted, to tell when what the mod set has been taken in.
@@ -839,7 +852,7 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
     end
     -- Whether the game's camera was moved to the eyes in this call: then there is
     -- nothing the game could have changed yet.
-    local justMoved = false
+    local justMoved, started = false, false
     if not st.active then
         st.pcmClass = ue.className(pcm)
         local method = chooseMethod(cfg)
@@ -862,7 +875,7 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
         if not startOrGiveUp(method, pawn, pcm, cam, cfg) then
             return
         end
-        justMoved = method == "game"
+        justMoved, started = method == "game", true
     elseif st.method == "game" and cam and st.moved and not ue.same(cam, st.moved.cam) then
         -- The game shows another of its exploration cameras now: move that one.
         putCameraBack()
@@ -890,7 +903,14 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
         end
     end
     if refresh then
-        st.nextRefresh = now + REFRESH
+        -- Counted from when it was due, not from this frame: counted from the frame,
+        -- it would drift with the frame times onto the frames of the camera list's
+        -- scans and the movement's refreshes, which are put between these.
+        local due = st.nextRefresh > 0 and st.nextRefresh or now
+        repeat
+            due = due + REFRESH
+        until due > now
+        st.nextRefresh = due
         guard.run("widening the pitch limits", widenPitch, pcm, cfg.PitchLimit)
         if cfg.HideBody then
             guard.run("hiding the body", hideBody, pawn)
@@ -902,6 +922,12 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
         end
     end
     judgeView(pawn, pcm, cam, cfg, now, refresh, paused)
+    return started
+end
+
+--- When first person's next refresh is due (nil while it is off).
+function camera.nextRefresh()
+    return st.active and st.nextRefresh or nil
 end
 
 --- Lets first person start again after it was given up (a new character, the

@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.2"
+local VERSION = "0.2.3"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -235,13 +235,11 @@ local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
         state("First person", key, text, force)
         return
     end
-    local wasActive = camera.isActive()
-    camera.apply(pc, pawn, pcm, view.camera(), cfg, mod.now, paused)
-    if camera.isActive() and not wasActive then
+    if camera.apply(pc, pawn, pcm, view.camera(), cfg, mod.now, paused) and camera.isActive() then
         -- First person's refreshes start now: the camera list's scans and the
         -- movement's refreshes go between them, on other frames.
         view.stagger(mod.now)
-        movement.stagger(mod.now)
+        movement.stagger(mod.now, camera.nextRefresh())
     end
     local status = camera.status()
     state("First person", status.state .. "/" .. tostring(status.method) .. "/" .. tostring(status.waiting), function()
@@ -298,7 +296,10 @@ local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused, fram
         state("Half-Life movement", key, text)
         return
     end
-    movement.apply(pawn, cmc, cfg, P, mod.now)
+    if movement.apply(pawn, cmc, cfg, P, mod.now) and camera.isActive() then
+        -- Taken over while first person is on: its refreshes go between first person's.
+        movement.stagger(mod.now, camera.nextRefresh())
+    end
     state("Half-Life movement", "on", function()
         return string.format("on (movement mode %s, %s)", tostring(mode), MODE_NAMES[mode] or "unknown")
     end)
@@ -518,6 +519,11 @@ end
 
 local function safeFrame(pc, dt)
     if mod.broken then
+        -- The frame update is off, but the mod's clock goes on, so that the report
+        -- key's waits end (see tick).
+        if type(dt) == "number" and dt > 0 then
+            mod.now = mod.now + math.min(dt, 0.1)
+        end
         return
     end
     local ok, err = pcall(onFrame, pc, dt)
@@ -531,7 +537,7 @@ local function safeFrame(pc, dt)
     if mod.errorsInARow >= MAX_ERRORS_IN_A_ROW then
         mod.broken = true
         mod.enabled = false
-        mod.offPawnAddr = mod.pawnAddr
+        mod.offPawnAddr, mod.offSettleUntil = mod.pawnAddr, mod.settleUntil -- a settle under way goes on
         pcall(releaseAll)
         log.warn("Turned off after %d errors in a row. Press %s to try again, and please report UE4SS.log.",
             mod.errorsInARow, tostring(cfg.ToggleKey))
@@ -689,7 +695,7 @@ end
 local function toggleMod()
     if mod.enabled then
         mod.enabled = false
-        mod.offPawnAddr = mod.pawnAddr
+        mod.offPawnAddr, mod.offSettleUntil = mod.pawnAddr, mod.settleUntil -- a settle under way goes on
         releaseAll()
         log.info("Half-Life movement off")
         state("First person", "mod-off", "off (the mod is switched off)")

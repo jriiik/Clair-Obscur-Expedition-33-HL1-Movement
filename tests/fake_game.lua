@@ -1230,8 +1230,9 @@ function fake.newGame(options)
                 if s > cap then
                     local fell = startZ > pos.Z and startZ / (startZ - pos.Z) or 1 -- the share before touchdown
                     local r = cap / s
-                    pos.X = pos.X - v.X * dt * share * (1 - fell) * (1 - r)
-                    pos.Y = pos.Y - v.Y * dt * share * (1 - fell) * (1 - r)
+                    -- (v already has a shortened move's share in it.)
+                    pos.X = pos.X - v.X * dt * (1 - fell) * (1 - r)
+                    pos.Y = pos.Y - v.Y * dt * (1 - fell) * (1 - r)
                     v.X, v.Y = v.X * r, v.Y * r
                     g.landingClamps = g.landingClamps + 1
                 end

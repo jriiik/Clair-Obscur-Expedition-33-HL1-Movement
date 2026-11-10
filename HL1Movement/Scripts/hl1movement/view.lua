@@ -153,10 +153,20 @@ function view.update(pc, pawn, cfg, now)
         view.reset()
         st.pawnAddr = pawnAddr
     end
-    if now >= st.nextScan or pickChanged() then
+    local due = now >= st.nextScan
+    if due or pickChanged() then
         -- The second scan comes half a period after the first instead of a whole
-        -- one, so that scans fall between the camera's refreshes (see view.stagger).
-        st.nextScan = now + (st.nextScan == 0 and RESCAN / 2 or RESCAN)
+        -- one, so that scans fall between the camera's refreshes (see view.stagger),
+        -- and each is counted from when the last was due, not from its frame, which
+        -- would drift with the frame times. A scan because the pick changed doesn't
+        -- move them.
+        if st.nextScan == 0 then
+            st.nextScan = now + RESCAN / 2
+        elseif due then
+            repeat
+                st.nextScan = st.nextScan + RESCAN
+            until st.nextScan > now
+        end
         scan(pawn, cfg)
     end
     if now >= st.nextAsk then
