@@ -48,7 +48,17 @@ local st = {
     lastMode = nil,
     lastSpeed = 0,
     emptyInputFrames = 0,
+    takeoffSpeed = nil, -- horizontal speed when the mod's last jump left the ground
+    airYaw = nil, -- view yaw on the last frame in the air
+    airTurn = 0, -- degrees the view turned during this jump
 }
+
+-- What happened since the last status line (see movement.takeStats).
+local function newStats()
+    return { frames = 0, keys = 0, stick = 0, game = 0, none = 0, hops = 0, landings = 0, top = 0,
+        airHops = 0, airGain = 0, airTurn = 0, landingLoss = 0 }
+end
+local stats = newStats()
 
 function movement.isActive()
     return st.active
@@ -83,6 +93,7 @@ local function takeCurve(cmc)
         end
         local curve = movementSettings.MovementCurve
         if ue.valid(curve) then
+            log.first("curve", "Taking out the character's movement curve (%s)", tostring(ue.fullName(curve)))
             st.curve = curve
             local curveName = ue.fullName(curve)
             if curveName ~= st.curveName then
@@ -150,6 +161,8 @@ local function pauseLimiter(pawn)
             return
         end
         local ok, enabled = ue.call(component, "IsComponentTickEnabled")
+        log.first("limiter", "Pausing the game's speed limiter %s (it was %s)", LIMITER_CLASS,
+            ok and (enabled and "ticking" or "not ticking") or "in an unknown state")
         limiter = { obj = component, fullName = ue.fullName(component), wasEnabled = ok and enabled == true }
         st.limiter = limiter
         journal.note("tick", limiter.fullName, "", limiter.wasEnabled)
@@ -216,6 +229,9 @@ function movement.apply(pawn, cmc, cfg, P, now)
         if not st.worldGravity then
             log.once("gravity", "Could not read the game's gravity, so the game's own gravity stays.")
         end
+        log.first("movement", "Taking over the movement of %s (mode %s, world gravity %s cm/s2)",
+            tostring(ue.className(pawn)), tostring(ue.number(cmc, "MovementMode")), tostring(st.worldGravity))
+        st.takeoffSpeed, st.airYaw, st.airTurn = nil, nil, 0
         log.debug("Movement taken over")
     end
     -- ALS sets the walking speed itself whenever the gait changes, and the game
@@ -243,7 +259,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
     local pending = pawn:ConsumeMovementInputVector()
     local px, py = ue.vector(pending)
 
-    local forward, right = input.moveAxes(pc, cfg)
+    local forward, right, source = input.moveAxes(pc, cfg)
     local wx, wy, wishSpeed = 0, 0, 0
     if forward ~= 0 or right ~= 0 then
         wx, wy, wishSpeed = physics.wish(yaw, forward, right, P.inputSpeed, P.maxSpeed)
@@ -260,7 +276,13 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
         -- No known key is held, but the game got movement input (other key
         -- bindings, or a stick the mod doesn't read): use its direction.
         wx, wy, wishSpeed = physics.wishFromVector(px * P.inputSpeed, py * P.inputSpeed, P.maxSpeed)
+        source = "game"
+        log.first("input-game", "Movement comes from the game's own input, not from reading the keys "
+            .. "(vector X=%.2f Y=%.2f)", px, py)
     end
+    source = source or "none"
+    stats[source] = stats[source] + 1
+    stats.frames = stats.frames + 1
 
     local doJump = physics.wantJump(st.jump, input.jumpHeld(pc, cfg, frame), onGround, cfg.AutoHop)
 
@@ -272,11 +294,25 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
             log.once("landing-speed", "Landing cut the speed from %.0f to %.0f cm/s, so something in the game "
                 .. "still limits speed. Please report this with UE4SS.log.", st.lastSpeed, speed)
         end
+        stats.landings = stats.landings + 1
+        stats.landingLoss = stats.landingLoss + math.max(0, st.lastSpeed - speed)
+        if st.takeoffSpeed then
+            stats.airHops = stats.airHops + 1
+            stats.airGain = stats.airGain + (st.lastSpeed - st.takeoffSpeed)
+            stats.airTurn = stats.airTurn + st.airTurn
+        end
+        st.takeoffSpeed, st.airYaw, st.airTurn = nil, nil, 0
+    elseif not onGround then
+        if st.airYaw then
+            st.airTurn = st.airTurn + math.abs((yaw - st.airYaw + 180) % 360 - 180)
+        end
+        st.airYaw = yaw
     end
 
     local nx, ny, nz, jumped = physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, doJump, P, dt)
     local bx, by, bz = 0, 0, 0
     if jumped then
+        log.first("jump", "First jump by the mod (speed %.0f cm/s)", horizontal(nx, ny))
         cmc:SetMovementMode(FALLING, 0)
         -- Leaving the ground adds the velocity of a moving platform the character
         -- stood on (while walking, Velocity is relative to it). Keep that.
@@ -285,6 +321,13 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame)
     end
     st.lastMode = jumped and FALLING or mode
     st.lastSpeed = horizontal(nx, ny)
+    if jumped then
+        stats.hops = stats.hops + 1
+        st.takeoffSpeed, st.airYaw, st.airTurn = st.lastSpeed, yaw, 0
+    end
+    if st.lastSpeed > stats.top then
+        stats.top = st.lastSpeed
+    end
 
     -- Add back what Unreal's braking will take this frame (none in the air, and
     -- none on the ground once the movement curve is out).
@@ -312,6 +355,15 @@ function movement.release()
     st.cmcName = nil
     st.jump.latched = false
     log.debug("Movement given back to the game")
+end
+
+--- What happened since the last call: frames moved, where the input came from,
+--- hops, top speed, and per jump the speed gained in the air, how far the view
+--- turned meanwhile, and the speed lost at landing. Speeds in cm/s.
+function movement.takeStats()
+    local result = stats
+    stats = newStats()
+    return result
 end
 
 --- What the movement side is doing, for the diagnostics report.

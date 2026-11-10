@@ -40,7 +40,7 @@ local function anyPressed(pc, names)
 end
 
 --- Movement axes from the keys, or else from the left stick: forward and right,
---- each from -1 to 1.
+--- each from -1 to 1, and where they came from ("keys", "stick" or nil).
 function input.moveAxes(pc, cfg)
     local forward, right = 0, 0
     if anyHeld(pc, cfg.ForwardKeys) then
@@ -55,17 +55,20 @@ function input.moveAxes(pc, cfg)
     if anyHeld(pc, cfg.LeftKeys) then
         right = right - 1
     end
-    if forward == 0 and right == 0 and cfg.GamepadStick then
+    if forward ~= 0 or right ~= 0 then
+        return forward, right, "keys"
+    end
+    if cfg.GamepadStick then
         local x = tonumber(pc:GetInputAnalogKeyState(ue.fkey("Gamepad_LeftX"))) or 0
         local y = tonumber(pc:GetInputAnalogKeyState(ue.fkey("Gamepad_LeftY"))) or 0
         local length = math.sqrt(x * x + y * y)
         local dead = cfg.StickDeadzone
         if length > dead then
             local amount = math.min(1, (length - dead) / (1 - dead))
-            forward, right = y / length * amount, x / length * amount
+            return y / length * amount, x / length * amount, "stick"
         end
     end
-    return forward, right
+    return 0, 0, nil
 end
 
 --- Called from the hook on the game's jump input. Depending on how the game's

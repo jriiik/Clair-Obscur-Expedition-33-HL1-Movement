@@ -74,7 +74,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.1.0 loaded")
+    t.contains(g.log, "Version 0.1.1 loaded")
     for _, code in ipairs({ F5, F6, F7, F8 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
     end
@@ -123,7 +123,7 @@ end)
 t.test("hotkeys work before a save is loaded", function()
     local g = start()
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.1.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.1.1 diagnostics")
 end)
 
 t.test("hotkeys wait for the next frame when ExecuteInGameThread fails", function()
@@ -537,7 +537,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.1.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.1.1 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")

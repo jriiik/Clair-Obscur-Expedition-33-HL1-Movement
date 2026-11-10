@@ -498,6 +498,8 @@ function fake.newGame(options)
         ["/Script/Engine.PlayerController"] = fake.class("PlayerController"),
         ["/Script/Engine.PrimitiveComponent"] = fake.class("PrimitiveComponent"),
         ["/Script/Engine.ActorComponent"] = fake.class("ActorComponent"),
+        ["/Script/Engine.CameraComponent"] = fake.class("CameraComponent"),
+        ["/Script/Engine.SpringArmComponent"] = fake.class("SpringArmComponent"),
         ["/Script/Engine.Default__GameplayStatics"] = statics,
     }
 

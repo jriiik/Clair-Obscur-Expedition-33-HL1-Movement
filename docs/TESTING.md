@@ -1,8 +1,9 @@
 # Testing the mod in the game
 
-Version 0.1 hasn't been run in the game yet. This list goes through what to try
-on a first test and what to send back. Install it first as described in the
-[README](../README.md).
+This list goes through what to try on a test and what to send back. Install
+the mod first as described in the [README](../README.md). From version 0.1.1 the
+mod writes in `UE4SS.log` what it does and why, and a report a few seconds after
+you gain control, so the log is the most useful thing to send.
 
 ## Before you start
 
@@ -16,7 +17,7 @@ on a first test and what to send back. Install it first as described in the
 Write down what happens for each one. "Nothing happened" is useful too.
 
 1. **Loading.** Open `Win64\ue4ss\UE4SS.log`. Is there a line containing
-   `[HL1Movement] Version 0.1.0 loaded`? After loading a save, is there one
+   `[HL1Movement] Version` and `loaded`? After loading a save, is there one
    containing `[HL1Movement] Running every frame from`?
 2. **Camera.** About a second after the save loads, does the view switch to first
    person? Can you see any part of your character's body, hair or gear? Can you
@@ -49,6 +50,9 @@ Write down what happens for each one. "Nothing happened" is useful too.
   game again: UE4SS starts a new, empty log every time the game starts. Check it
   for anything private first: it can contain folder names from your PC.
 - Which UE4SS build you used: the name of the zip you downloaded.
+- If the game crashed: the newest `crash_....dmp` file from `Win64\ue4ss` (UE4SS
+  writes one on every crash) and the newest folder in
+  `%LOCALAPPDATA%\Sandfall\Saved\Crashes`.
 
 Things worth mentioning even if they seem small: the view drifting on its own,
 stuttering, the camera snapping back to third person, getting stuck, and any

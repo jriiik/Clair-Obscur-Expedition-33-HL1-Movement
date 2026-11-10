@@ -61,7 +61,7 @@ function diagnostics.report(env)
     end
 
     local mod, cfg, P = env.mod, env.cfg, env.P
-    line("==== HL1Movement %s diagnostics ====", env.version)
+    line("==== HL1Movement %s diagnostics (%s) ====", env.version, tostring(env.title or "report"))
     line("%s; UE4SS has LoopInGameThreadAfterFrames: %s; EngineTickAvailable: %s", _VERSION,
         tostring(rawget(_G, "LoopInGameThreadAfterFrames") ~= nil), tostring(rawget(_G, "EngineTickAvailable")))
     line("Mod: enabled=%s camera wanted=%s camera active=%s movement active=%s frames=%d errors=%d",
@@ -133,12 +133,55 @@ function diagnostics.report(env)
                 result("Capsule", capsule, "GetScaledCapsuleHalfHeight")
                 result("Capsule", capsule, "GetScaledCapsuleRadius")
             end
-            for _, name in ipairs({ "MainCamera", "Main_CineCamera" }) do
-                local component = ue.object(pawn, name)
-                line("  %s = %s", name, show(component))
-                if component then
-                    result(name, component, "IsActive")
+            -- The camera rig: every camera and spring arm on the character, and the
+            -- game's camera controller, which sets their values from its configs.
+            local function each(classPath, fn)
+                local class = ue.find(classPath)
+                local ok, list = false, "class not found"
+                if class then
+                    ok, list = ue.call(pawn, "K2_GetComponentsByClass", class)
                 end
+                if not ok then
+                    line("    (could not list them: %s)", tostring(list))
+                    return
+                end
+                for _, component in ipairs(ue.list(list)) do
+                    if ue.valid(component) then
+                        fn(component)
+                    end
+                end
+            end
+            local function parentOf(component)
+                local ok, parent = ue.call(component, "GetAttachParent")
+                return ok and ue.describe(parent) or "?"
+            end
+            local function values(obj, list)
+                local parts = {}
+                for _, name in ipairs(list) do
+                    parts[#parts + 1] = name .. "=" .. show(ue.get(obj, name))
+                end
+                return table.concat(parts, ", ")
+            end
+            line("  Cameras on the character:")
+            each("/Script/Engine.CameraComponent", function(component)
+                local okActive, active = ue.call(component, "IsActive")
+                local okAt, at = ue.call(component, "K2_GetComponentLocation")
+                line("    %s: active=%s, attached to %s, at %s, %s", ue.describe(component),
+                    okActive and tostring(active) or "?", parentOf(component), okAt and show(at) or "?",
+                    values(component, { "FieldOfView", "bUsePawnControlRotation" }))
+            end)
+            line("  Spring arms on the character:")
+            each("/Script/Engine.SpringArmComponent", function(arm)
+                line("    %s, attached to %s: %s", ue.describe(arm), parentOf(arm), values(arm, { "TargetArmLength",
+                    "SocketOffset", "TargetOffset", "RelativeLocation", "bUsePawnControlRotation", "bDoCollisionTest",
+                    "bEnableCameraLag", "CameraLagSpeed", "bEnableCameraRotationLag", "bInheritPitch", "bInheritYaw" }))
+            end)
+            local controller = ue.object(pawn, "BP_CameraControllerComponent")
+            if controller then
+                local okTick, ticking = ue.call(controller, "IsComponentTickEnabled")
+                line("  BP_CameraControllerComponent: ticking=%s, %s", okTick and tostring(ticking) or "?",
+                    values(controller, { "ApplyCameraConfigs", "IsCameraRecentering", "EnableDynamicCameraFocus",
+                        "EnableCameraShakeWhenMoving", "CachedControllerRotation" }))
             end
             local componentClass = ue.find("/Script/Engine.ActorComponent")
             if componentClass then
@@ -187,7 +230,14 @@ function diagnostics.report(env)
                 field("Camera", pcm, name)
             end
             result("Camera", pcm, "GetCameraLocation")
+            result("Camera", pcm, "GetCameraRotation")
             result("Camera", pcm, "GetFOVAngle")
+            for _, name in ipairs({ "ViewTarget", "PendingViewTarget" }) do
+                local target = ue.get(pcm, name)
+                if ue.typeOf(target) == "UScriptStruct" then
+                    line("  Camera.%s.Target = %s", name, show(ue.get(target, "Target")))
+                end
+            end
             for i, modifier in ipairs(ue.list(ue.get(pcm, "ModifierList"))) do
                 if ue.valid(modifier) then
                     line("  modifier %d: %s, PitchMin=%s, PitchMax=%s", i, tostring(ue.className(modifier)),

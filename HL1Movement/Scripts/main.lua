@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.1.0"
+local VERSION = "0.1.1"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -31,6 +31,14 @@ local diagnostics = require("hl1movement.diagnostics")
 
 local MAX_ERRORS_IN_A_ROW = 30
 local SETTLE_TIME = 1 -- seconds to leave a new level or character alone, while the game sets it up
+local REPORT_DELAY = 3 -- seconds after first taking over a character, before the automatic report
+local STATUS_INTERVAL = 10 -- seconds between status lines while the mod acts
+local MAX_STATUS_LINES = 30 -- per session
+local MODE_NAMES = { [0] = "none", [1] = "walking", [2] = "nav-mesh walking", [3] = "falling",
+    [4] = "swimming", [5] = "flying", [6] = "custom" }
+local clock = os and os.clock or function()
+    return 0
+end
 
 -- The mod's main steps, as their names appear in the log. Each runs on its own
 -- (see guard.lua), so one that keeps failing is turned off without the others.
@@ -60,7 +68,32 @@ local mod = {
     errors = 0,
     errorsInARow = 0,
     broken = false,
+    reportAt = nil, -- when to write the automatic report
+    reported = false, -- the automatic report has been written this session
+    reportWhy = nil, -- set to write a report at the end of this frame
+    givenUpReported = false,
+    nextStatus = nil,
+    statusLines = 0,
+    window = { frames = 0, time = 0, ticks = 0, cpu = 0 }, -- for the status lines
 }
+
+-- The reason last logged for each topic ("Character", "First person" ...).
+local stateKeys = {}
+
+-- Logs what a part of the mod is doing when it changes. key is a short reason
+-- compared every frame; text (a string, or a function that returns one) is the
+-- line for the log, worked out only when the key changes.
+local function state(topic, key, text)
+    if stateKeys[topic] == key then
+        return
+    end
+    stateKeys[topic] = key
+    if type(text) == "function" then
+        local ok, result = pcall(text)
+        text = ok and tostring(result) or key
+    end
+    log.state(topic, text or key)
+end
 
 local function loadSettings()
     local user, problem
@@ -128,13 +161,36 @@ local function supportedClass(className)
     return false
 end
 
+-- The character's class, whether the mod works with it, and why not.
 local function describePawn(pawn)
     local className = ue.className(pawn)
-    local allowed = className ~= nil and supportedClass(className)
-    if allowed and not cfg.AllowWorldMap and ue.get(pawn, "bIsWorldMapPawn") == true then
-        allowed = false
+    if className == nil or not supportedClass(className) then
+        return className, false, "not supported: the mod works with " .. table.concat(cfg.PawnClasses, ", ")
     end
-    return className, allowed
+    if not cfg.AllowWorldMap and ue.get(pawn, "bIsWorldMapPawn") == true then
+        return className, false, "not supported: a world map character"
+    end
+    return className, true, "supported"
+end
+
+-- The names of the character's active camera components, for the log.
+local function activeCameras(pawn)
+    local class = ue.find("/Script/Engine.CameraComponent")
+    local ok, list = false, nil
+    if class then
+        ok, list = ue.call(pawn, "K2_GetComponentsByClass", class)
+    end
+    if not ok then
+        return "unknown"
+    end
+    local names = {}
+    for _, component in ipairs(ue.list(list)) do
+        local okActive, active = ue.call(component, "IsActive")
+        if okActive and active == true then
+            names[#names + 1] = tostring(ue.name(component))
+        end
+    end
+    return #names > 0 and table.concat(names, ", ") or "none"
 end
 
 -- False while the game shows the view from another camera on the character, for
@@ -157,35 +213,136 @@ local function isPaused(pc)
     return ok and paused == true
 end
 
-local function cameraStep(pc, pawn, pcm, inBattle, viewingPawn, paused)
-    if cfg.FirstPerson and mod.cameraOn and not inBattle and viewingPawn and pcm and gameCameraActive(pawn) then
-        camera.apply(pc, pawn, pcm, cfg, mod.now, paused)
-    else
+-- Why first person can't be on right now: a short key and the text for the log.
+local function cameraBlocker(pawn, pcm, inBattle, viewTarget)
+    if not cfg.FirstPerson then
+        return "settings", "off (FirstPerson = false in config.lua)"
+    elseif not mod.cameraOn then
+        return "key", "off (switched off with " .. tostring(cfg.CameraKey) .. ")"
+    elseif inBattle then
+        return "battle", "off (battle)"
+    elseif not pcm then
+        return "no-camera-manager", "waiting (the controller has no camera manager)"
+    elseif ue.address(viewTarget) ~= ue.address(pawn) then
+        return "view-target", function()
+            return "waiting (the game shows the view of " .. ue.describe(viewTarget) .. ", not your character)"
+        end
+    elseif not gameCameraActive(pawn) then
+        return "main-camera", function()
+            return "waiting (the character's MainCamera isn't active; active cameras: " .. activeCameras(pawn) .. ")"
+        end
+    end
+    return nil
+end
+
+local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
+    local key, text = cameraBlocker(pawn, pcm, inBattle, viewTarget)
+    if key then
         camera.release()
+        state("First person", key, text)
+        return
+    end
+    camera.apply(pc, pawn, pcm, cfg, mod.now, paused)
+    local status = camera.status()
+    state("First person", status.state, function()
+        if status.state == "checking" then
+            return "on (" .. status.styleRoute .. "), checking that the view moved to the eyes"
+        elseif status.state == "working" then
+            return string.format("on, the view is at the eyes (%.0f cm away)", status.lastDistance or 0)
+        end
+        return status.state
+    end)
+    if status.state:find("^given up") and not mod.givenUpReported then
+        mod.givenUpReported = true
+        mod.reportWhy = "first person was given up"
     end
 end
 
-local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, walkingOrFalling, paused)
-    -- A frame hook that runs after the character's movement update (the fallback
-    -- hook) comes too late to take the game's input away, so it doesn't move.
-    local canMove = cfg.Movement and not mod.lateHook and cmc ~= nil and yaw ~= nil and not inBattle
-        and walkingOrFalling
-        and ask(pc, "IsMoveInputIgnored") ~= true
-        and ask(pawn, "CanAddMovementInput") ~= false
-    if canMove then
-        movement.apply(pawn, cmc, cfg, P, mod.now)
-        if not paused and ask(pawn, "IsPlayingRootMotion") ~= true then
-            movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames)
+-- Why the Half-Life movement can't run right now: a short key and the text for the log.
+local function movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
+    if not cfg.Movement then
+        return "settings", "off (Movement = false in config.lua)"
+    elseif mod.lateHook then
+        -- The fallback hook runs after the character's movement update: too late
+        -- to take the game's input away.
+        return "late-hook", "off (only the character's update could be hooked, and it comes too late)"
+    elseif not cmc then
+        return "no-movement-component", "off (the character has no movement component)"
+    elseif yaw == nil then
+        return "no-view", "off (can't read the view direction)"
+    elseif inBattle then
+        return "battle", "off (battle)"
+    elseif mode ~= 1 and mode ~= 2 and mode ~= 3 then
+        return "mode-" .. tostring(mode), function()
+            local custom = mode == 6 and (" " .. tostring(ue.number(cmc, "CustomMovementMode"))) or ""
+            return string.format("off (the game's movement mode is %s, %s%s)", tostring(mode),
+                MODE_NAMES[mode] or "unknown", custom)
         end
-    else
-        movement.release()
+    elseif ask(pc, "IsMoveInputIgnored") == true then
+        return "input-ignored", "off (the game ignores movement input)"
+    elseif ask(pawn, "CanAddMovementInput") == false then
+        return "input-blocked", "off (the game doesn't let the character take movement input)"
     end
+    return nil
+end
+
+local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused)
+    local key, text = movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
+    if key then
+        movement.release()
+        state("Half-Life movement", key, text)
+        return
+    end
+    movement.apply(pawn, cmc, cfg, P, mod.now)
+    state("Half-Life movement", "on", function()
+        return string.format("on (movement mode %s, %s)", tostring(mode), MODE_NAMES[mode] or "unknown")
+    end)
+    if not paused and ask(pawn, "IsPlayingRootMotion") ~= true then
+        movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames)
+    end
+end
+
+local function report(title)
+    diagnostics.report({ version = VERSION, mod = mod, cfg = cfg, P = P, pc = mod.pc, title = title })
+end
+
+-- One line every STATUS_INTERVAL seconds with the frame rate, the mod's own time
+-- per frame and what the movement did, so a test's log shows how it went.
+local function statusLine()
+    local window = mod.window
+    mod.window = { frames = 0, time = 0, ticks = 0, cpu = 0 }
+    local moved = movement.takeStats()
+    if mod.statusLines >= MAX_STATUS_LINES or (moved.frames == 0 and not camera.isActive()) then
+        return
+    end
+    mod.statusLines = mod.statusLines + 1
+    local u = P.unitScale
+    local fps = window.frames / math.max(window.time, 1e-6)
+    local ms = window.ticks > 0 and window.cpu / window.ticks * 1000 or 0
+    local parts = { string.format("%.0f fps, the mod took %.2f ms per frame", fps, ms) }
+    if moved.frames > 0 then
+        parts[#parts + 1] = string.format("moved on %d frames (input from keys %d, stick %d, game %d, none %d)",
+            moved.frames, moved.keys, moved.stick, moved.game, moved.none)
+        parts[#parts + 1] = string.format("%d hops, top speed %.0f u/s", moved.hops, moved.top / u)
+        if moved.airHops > 0 then
+            parts[#parts + 1] = string.format("per jump %+.0f u/s in the air while the view turned %.0f deg",
+                moved.airGain / moved.airHops / u, moved.airTurn / moved.airHops)
+        end
+        if moved.landings > 0 then
+            parts[#parts + 1] = string.format("landing lost %.0f u/s on average",
+                moved.landingLoss / moved.landings / u)
+        end
+    end
+    log.info("Status (%ds)%s: %s", STATUS_INTERVAL, mod.statusLines == MAX_STATUS_LINES and ", the last one" or "",
+        table.concat(parts, "; "))
 end
 
 local function onFrame(pc, dt)
     if not ue.valid(pc) or type(dt) ~= "number" or dt <= 0 then
         return
     end
+    mod.window.frames = mod.window.frames + 1
+    mod.window.time = mod.window.time + dt
     if dt > 0.1 then
         dt = 0.1
     end
@@ -209,11 +366,12 @@ local function onFrame(pc, dt)
         mod.settleUntil = mod.now + SETTLE_TIME
         input.reset()
         if pawn then
-            mod.pawnClass, mod.pawnAllowed = describePawn(pawn)
-            log.debug("Controlling %s (%s)", tostring(mod.pawnClass),
-                mod.pawnAllowed and "supported" or "not supported, so the mod waits")
+            local why
+            mod.pawnClass, mod.pawnAllowed, why = describePawn(pawn)
+            state("Character", tostring(pawnAddr), ue.describe(pawn) .. ", " .. why)
         else
             mod.pawnClass, mod.pawnAllowed = nil, false
+            state("Character", "none", "none")
         end
     end
     if mod.recheck and pawn then
@@ -222,29 +380,52 @@ local function onFrame(pc, dt)
     end
     if not pawn or not mod.pawnAllowed then
         releaseAll()
+        state("First person", "no-character", "off (no supported character)")
+        state("Half-Life movement", "no-character", "off (no supported character)")
         return
     end
     if mod.now < mod.settleUntil then
         return
     end
+    if not mod.reported and not mod.reportAt then
+        mod.reportAt = mod.now + REPORT_DELAY
+    end
+    mod.nextStatus = mod.nextStatus or (mod.now + STATUS_INTERVAL)
 
     local cmc = ue.object(pawn, "CharacterMovement")
     local pcm = ue.object(pc, "PlayerCameraManager")
     local inBattle = ask(pc, "IsInBattle") or ask(pc, "IsInBattleBeginTransition") or false
     local okView, viewTarget = ue.call(pc, "GetViewTarget")
-    local viewingPawn = okView and ue.address(viewTarget) == pawnAddr
+    if not okView then
+        viewTarget = nil
+    end
     local okRotation, rotation = ue.call(pc, "GetControlRotation")
     local yaw = okRotation and type(rotation) == "table" and tonumber(rotation.Yaw) or nil
     local paused = isPaused(pc)
 
-    guard.run(CAMERA_STEP, cameraStep, pc, pawn, pcm, inBattle, viewingPawn, paused)
+    guard.run(CAMERA_STEP, cameraStep, pc, pawn, pcm, inBattle, viewTarget, paused)
 
     local mode = cmc and ue.number(cmc, "MovementMode") or 0
-    local walkingOrFalling = mode == 1 or mode == 2 or mode == 3
-    guard.run(MOVEMENT_STEP, movementStep, pc, pawn, cmc, inBattle, yaw, dt, walkingOrFalling, paused)
+    guard.run(MOVEMENT_STEP, movementStep, pc, pawn, cmc, inBattle, yaw, dt, mode, paused)
 
-    if camera.isActive() and cfg.BodyFollowsView and walkingOrFalling and yaw then
+    if camera.isActive() and cfg.BodyFollowsView and (mode == 1 or mode == 2 or mode == 3) and yaw then
         guard.run(FACING_STEP, camera.faceView, pawn, yaw)
+    end
+
+    if mod.reportAt and mod.now >= mod.reportAt then
+        mod.reportAt = nil
+        mod.reported = true
+        mod.reportWhy = mod.reportWhy or string.format("automatic, %d s after taking over the character",
+            REPORT_DELAY)
+    end
+    if mod.reportWhy then
+        local why = mod.reportWhy
+        mod.reportWhy = nil
+        guard.run("writing the automatic report", report, why)
+    end
+    if mod.now >= mod.nextStatus then
+        mod.nextStatus = mod.now + STATUS_INTERVAL
+        guard.run("writing the status line", statusLine)
     end
 end
 
@@ -322,7 +503,10 @@ local function tick(context, deltaSeconds)
             .. "so the Half-Life movement stays off; first person still works. Please report UE4SS.log.")
     end
     mod.lateHook = late
+    local started = clock()
     safeFrame(obj, ue.unwrap(deltaSeconds))
+    mod.window.ticks = mod.window.ticks + 1
+    mod.window.cpu = mod.window.cpu + (clock() - started)
 end
 
 -- Runs every frame. The hook is on the player controller's tick, which comes after
@@ -398,6 +582,8 @@ local function toggleMod()
         mod.enabled = false
         releaseAll()
         log.info("Half-Life movement off")
+        state("First person", "mod-off", "off (the mod is switched off)")
+        state("Half-Life movement", "mod-off", "off (the mod is switched off)")
     else
         ensureHooks()
         turnOn()
@@ -424,8 +610,8 @@ local function reloadSettings()
     log.info("Settings reloaded (new hotkeys take effect after restarting the game)")
 end
 
-local function report()
-    diagnostics.report({ version = VERSION, mod = mod, cfg = cfg, P = P, pc = mod.pc })
+local function reportKey()
+    report("asked for with " .. tostring(cfg.DiagnosticsKey))
 end
 
 -- Key presses arrive on UE4SS's input thread. The action is queued for the next
@@ -468,7 +654,7 @@ journal.load() -- what a previous copy of the mod left changed, if UE4SS restart
 bindKey(cfg.ToggleKey, toggleMod)
 bindKey(cfg.CameraKey, toggleCamera)
 bindKey(cfg.ReloadKey, reloadSettings)
-bindKey(cfg.DiagnosticsKey, report)
+bindKey(cfg.DiagnosticsKey, reportKey)
 
 -- Hooks in straight away if the game is already running, for example after UE4SS
 -- restarted its mods. The first frame then puts back what the previous copy of the

@@ -80,6 +80,28 @@ function ue.className(obj)
     return nil
 end
 
+--- The object's own name, for example "MainCamera" or "BP_jRPG_Character_World_C_2147482516".
+function ue.name(obj)
+    if not ue.valid(obj) then
+        return nil
+    end
+    local ok, name = pcall(function()
+        return obj:GetFName():ToString()
+    end)
+    if ok and type(name) == "string" then
+        return name
+    end
+    return nil
+end
+
+--- "Name (Class)", for the log.
+function ue.describe(obj)
+    if not ue.valid(obj) then
+        return "nothing"
+    end
+    return string.format("%s (%s)", tostring(ue.name(obj)), tostring(ue.className(obj)))
+end
+
 --- Full name: the class name, a space and the object's path, for example
 --- "SkeletalMeshComponent /Game/Maps/Town.Town:PersistentLevel.Hero_C_12.Mesh".
 --- Used to check that an object at a remembered address is still the same object.
@@ -128,10 +150,15 @@ end
 function ue.call(obj, name, ...)
     local count = select("#", ...)
     local args = { ... }
-    return pcall(function()
+    local results = table.pack(pcall(function()
         local fn = obj[name]
         return fn(obj, table.unpack(args, 1, count))
-    end)
+    end))
+    if not results[1] and type(results[2]) == "string" and results[2]:find("attempt to call", 1, true) then
+        -- UE4SS gives back an invalid object for a name the object doesn't have.
+        results[2] = string.format("%s has no function named %s", tostring(ue.className(obj)), tostring(name))
+    end
+    return table.unpack(results, 1, results.n)
 end
 
 --- The elements of an array: a TArray property, or the table a call returned.
