@@ -64,16 +64,17 @@ local MAX_PER_STATE = 5 -- each different state text
 
 --- Logs "<topic>: <text>" when the topic's text changes. Each different text is
 --- logged at most MAX_PER_STATE times, and at most MAX_STATE_LINES in all, so a
---- state that flickers can't fill the log.
-function log.state(topic, text)
-    if states[topic] == text then
+--- state that flickers can't fill the log. force logs it even if it is the same
+--- as before, or has been logged often (answering a key press, for example).
+function log.state(topic, text, force)
+    if states[topic] == text and not force then
         return
     end
     states[topic] = text
     local line = topic .. ": " .. text
     local count = (stateCounts[line] or 0) + 1
     stateCounts[line] = count
-    if count > MAX_PER_STATE then
+    if count > MAX_PER_STATE and not force then
         return
     end
     stateLines = stateLines + 1

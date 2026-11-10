@@ -17,9 +17,12 @@ local jump = {
     keysSeen = false, -- reading a jump key has worked at least once
 }
 
+local seen = {} -- key name -> true once it has been seen held, for the report
+
 local function anyHeld(pc, names)
     for i = 1, #names do
         if pc:IsInputKeyDown(ue.fkey(names[i])) == true then
+            seen[names[i]] = true
             return true
         end
     end
@@ -27,16 +30,33 @@ local function anyHeld(pc, names)
 end
 input.anyHeld = anyHeld
 
--- Like anyHeld, but also true on the frame of a press that is already over,
--- which is what a mouse-wheel "press" looks like.
+local wheel = {} -- key name -> whether it is a mouse-wheel "key"
+
+-- Like anyHeld, but a mouse-wheel key also counts on the frame of a press that is
+-- already over, which is what a wheel "press" looks like.
 local function anyPressed(pc, names)
     for i = 1, #names do
-        local key = ue.fkey(names[i])
-        if pc:IsInputKeyDown(key) == true or pc:WasInputKeyJustPressed(key) == true then
+        local name = names[i]
+        local key = ue.fkey(name)
+        if wheel[name] == nil then
+            wheel[name] = name:find("^MouseScroll") ~= nil
+        end
+        if pc:IsInputKeyDown(key) == true or (wheel[name] and pc:WasInputKeyJustPressed(key) == true) then
+            seen[name] = true
             return true
         end
     end
     return false
+end
+
+--- The keys seen held so far, for the report.
+function input.keysSeen()
+    local list = {}
+    for name in pairs(seen) do
+        list[#list + 1] = name
+    end
+    table.sort(list)
+    return list
 end
 
 --- Movement axes from the keys, or else from the left stick: forward and right,

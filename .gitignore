@@ -26,3 +26,7 @@ ObjectDump*.txt
 *.utoc
 *.ucas
 *.sav
+
+# Crash files: UE4SS and Unreal crash dumps and their context
+*.dmp
+*.runtime-xml

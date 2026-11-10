@@ -199,3 +199,103 @@ t.test("air strafing while hopping builds speed past the max speed", function()
     local speed = simulateHops(5, true)
     t.truthy(speed > P.maxSpeed * 1.3, string.format("speed %.1f should be well above %.1f", speed, P.maxSpeed))
 end)
+
+-- About one hop's worth of air strafing (0.6 s) from 320 u/s: the right key held
+-- and the view turning right at turnRate degrees per second, at a given frame rate.
+local function airStrafe(fps, rate, turnRate)
+    local sim = { yaw = 0 }
+    local vx, vy, vz = 320, 0, 0
+    local yaw = 0
+    local dt = 1 / fps
+    for _ = 1, math.floor(0.6 * fps + 0.5) do
+        yaw = yaw + turnRate * dt
+        vx, vy, vz = physics.simulate(sim, vx, vy, vz, false, yaw, { forward = 0, right = 1 }, false, P, dt, rate)
+    end
+    return math.sqrt(vx * vx + vy * vy)
+end
+
+t.test("at a low frame rate, one update per frame gains little from air strafing", function()
+    local at30 = airStrafe(30, 0, 300)
+    local at100 = airStrafe(100, 0, 300)
+    t.truthy(at30 < 340, string.format("30 fps, once per frame: %.1f", at30))
+    t.truthy(at100 > 375, string.format("100 fps, once per frame: %.1f", at100))
+end)
+
+t.test("updates at 100 a second air strafe the same at any frame rate", function()
+    local reference = airStrafe(100, 0, 300)
+    for _, fps in ipairs({ 20, 30, 45, 60, 120, 240 }) do
+        local speed = airStrafe(fps, 100, 300)
+        t.truthy(math.abs(speed - reference) < reference * 0.02,
+            string.format("%d fps: %.1f, at 100 fps once per frame: %.1f", fps, speed, reference))
+    end
+end)
+
+t.test("ground running still settles at the max speed with updates at 100 a second", function()
+    local sim = {}
+    local vx, vy, vz = 0, 0, 0
+    for _ = 1, 60 do
+        vx, vy, vz = physics.simulate(sim, vx, vy, vz, true, 0, { forward = 1, right = 0 }, false, P, 1 / 30, 100)
+    end
+    t.near(math.sqrt(vx * vx + vy * vy), P.maxSpeed, 1e-6)
+end)
+
+t.test("leftover time is carried to the next frame", function()
+    local sim = {}
+    local _, _, _, _, steps = physics.simulate(sim, 0, 0, 0, true, 0, nil, false, P, 0.015, 100)
+    t.eq(steps, 1)
+    t.near(sim.time, 0.005, 1e-9)
+    _, _, _, _, steps = physics.simulate(sim, 0, 0, 0, true, 0, nil, false, P, 0.015, 100)
+    t.eq(steps, 2, "the 5 ms left over plus 15 ms")
+    t.near(sim.time, 0, 1e-9)
+end)
+
+t.test("a very long frame runs at most 25 updates", function()
+    local sim = {}
+    local _, _, _, _, steps = physics.simulate(sim, 0, 0, 0, true, 0, nil, false, P, 1, 100)
+    t.eq(steps, 25)
+    t.eq(sim.time, 0, "the rest is dropped, not carried")
+end)
+
+t.test("the view's turn is spread over the steps the short way round", function()
+    t.eq(physics.turn(170, -170), 20)
+    t.eq(physics.turn(-170, 170), -20)
+    t.eq(physics.turn(10, 350), -20)
+    local sim = { yaw = 170 }
+    local wish = { forward = 1, right = 0 }
+    local vx, vy = physics.simulate(sim, 0, 0, 0, false, -170, wish, false, P, 0.02, 100)
+    -- Two steps, with the view at 180 and then at 190 (-170), never through 0.
+    local ex, ey = 0, 0
+    for _, yaw in ipairs({ 180, 190 }) do
+        local wx, wy, speed = physics.wish(yaw, 1, 0, P.inputSpeed, P.maxSpeed)
+        ex, ey = physics.step(ex, ey, 0, false, wx, wy, speed, false, P, 0.01)
+    end
+    t.near(vx, ex, 1e-9)
+    t.near(vy, ey, 1e-9)
+    t.truthy(vx < 0, "accelerated towards yaw 180")
+    t.eq(sim.yaw, -170)
+end)
+
+t.test("a jump starts on the first step only, and even in a frame too short for a step", function()
+    local sim = {}
+    local _, _, vz, jumped, steps = physics.simulate(sim, 320, 0, 0, true, 0, nil, true, P, 1 / 30, 100)
+    t.truthy(jumped)
+    t.eq(steps, 3)
+    t.near(vz, P.jumpSpeed, 1e-9, "one jump, not three")
+    _, _, vz, jumped, steps = physics.simulate({}, 320, 0, 0, true, 0, nil, true, P, 0.004, 100)
+    t.eq(steps, 0)
+    t.truthy(jumped, "jumped without waiting for a step")
+    t.near(vz, P.jumpSpeed, 1e-9)
+end)
+
+t.test("a rate of 0 is one update per frame", function()
+    local sim = {}
+    local vx, vy, vz, jumped, steps = physics.simulate(sim, 320, 0, 0, false, 30, { forward = 0, right = 1 },
+        false, P, 1 / 30, 0)
+    local wx, wy, speed = physics.wish(30, 0, 1, P.inputSpeed, P.maxSpeed)
+    local ex, ey, ez = physics.step(320, 0, 0, false, wx, wy, speed, false, P, 1 / 30)
+    t.eq(steps, 1)
+    t.falsy(jumped)
+    t.near(vx, ex, 1e-9)
+    t.near(vy, ey, 1e-9)
+    t.near(vz, ez, 1e-9)
+end)

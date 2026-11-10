@@ -67,8 +67,9 @@ local function parse(line)
 end
 
 --- Notes a change the mod must put back. kind is "prop" (id: the property name),
---- "hide" (id: "owner" or "hidden"), "tick", "curve" (value: the curve's full name)
---- or "style" (value: the camera style name); value is what to put back.
+--- "hide" (id: "owner" or "hidden"), "tick", "curve" (value: the curve's full name),
+--- "style" (value: the camera style name) or "attach" (a camera moved to the eyes;
+--- value: see journal.attachValue); value is what to put back.
 function journal.note(kind, fullName, id, value)
     if type(fullName) ~= "string" or fullName:find("[\t\n]") then
         return
@@ -143,6 +144,27 @@ function journal.hasPending()
     return pending ~= nil
 end
 
+--- The value of an "attach" line: where a camera the mod moved to the eyes goes
+--- back. move holds parentName (full name), socket, location {X, Y, Z}, rotation
+--- {Pitch, Yaw, Roll}, usePawn, fov and focus (the last two may be nil).
+function journal.attachValue(move)
+    local function number(v)
+        return v == nil and "" or string.format("%.9g", v)
+    end
+    return table.concat({ move.parentName or "", move.socket or "None",
+        number(move.location.X), number(move.location.Y), number(move.location.Z),
+        number(move.rotation.Pitch), number(move.rotation.Yaw), number(move.rotation.Roll),
+        move.usePawn and "1" or "0", number(move.fov), number(move.focus) }, "|")
+end
+
+local function attachFields(value)
+    local fields = {}
+    for field in (value .. "|"):gmatch("([^|]*)|") do
+        fields[#fields + 1] = field
+    end
+    return fields
+end
+
 local restorers = {
     prop = function(obj, id, value)
         obj[id] = value
@@ -169,6 +191,26 @@ local restorers = {
     end,
     style = function(obj, _, value)
         obj:ClientSetCameraMode(FName(value))
+    end,
+    attach = function(obj, _, value)
+        local f = attachFields(value)
+        local parent = f[1] ~= "" and ue.findByFullName(f[1])
+        if parent then
+            obj:K2_AttachToComponent(parent, FName(f[2]), 0, 0, 0, false) -- keep the relative transform
+        end
+        local location = { X = tonumber(f[3]) or 0, Y = tonumber(f[4]) or 0, Z = tonumber(f[5]) or 0 }
+        local rotation = { Pitch = tonumber(f[6]) or 0, Yaw = tonumber(f[7]) or 0, Roll = tonumber(f[8]) or 0 }
+        obj:K2_SetRelativeLocationAndRotation(location, rotation, false, {}, true)
+        obj.bUsePawnControlRotation = f[9] == "1"
+        if tonumber(f[10]) then
+            obj:SetFieldOfView(tonumber(f[10]))
+        end
+        if tonumber(f[11]) then
+            obj.FocusSettings = { FocusMethod = math.tointeger(tonumber(f[11])) or 0 }
+        end
+        if not parent then
+            error("the camera's arm is gone")
+        end
     end,
 }
 

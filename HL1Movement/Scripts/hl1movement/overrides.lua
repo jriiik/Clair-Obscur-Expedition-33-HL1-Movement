@@ -47,13 +47,33 @@ end
 
 --- Sets obj[name] = value. The first time a property is set, its current value
 --- is remembered; later, a value the game wrote since the mod's last write
---- replaces it. Returns false if obj is not a usable object.
-function Overrides:set(obj, name, value)
+--- replaces it. Returns true if the game had written a value of its own since the
+--- mod's last write, else false (also when obj is not a usable object).
+---
+--- This runs every frame for some values, so once a property is known it is only
+--- read and compared, and written if needed. The object's full name is checked on
+--- the first write and when verify is true: a new object can take the address of
+--- a destroyed one.
+function Overrides:set(obj, name, value, verify)
     local address = ue.address(obj)
     if not address then
         return false
     end
     local entry = self.entries[address]
+    local slot = entry and entry.saved[name]
+    if slot and not verify then
+        local current = obj[name]
+        local gameWrote = not unchanged(current, slot.written)
+        if gameWrote then
+            slot.value = current
+            journal.note("prop", entry.fullName, name, current)
+        elseif unchanged(current, value) then
+            return false -- still the mod's value
+        end
+        obj[name] = value
+        slot.written = obj[name]
+        return gameWrote
+    end
     local fullName = ue.fullName(obj)
     if not entry or entry.fullName ~= fullName then
         -- New object, or a new object where an old one used to be: the old
@@ -63,26 +83,45 @@ function Overrides:set(obj, name, value)
         end
         entry = { obj = obj, fullName = fullName, saved = {}, order = {} }
         self.entries[address] = entry
+        slot = nil
     end
-    local slot = entry.saved[name]
     local current = obj[name]
+    local gameWrote = false
     if not slot then
         slot = { value = current }
         entry.saved[name] = slot
         entry.order[#entry.order + 1] = name
         journal.note("prop", fullName, name, current)
     elseif not unchanged(current, slot.written) then
+        gameWrote = true
         slot.value = current
         journal.note("prop", fullName, name, current)
     end
     obj[name] = value
     -- Read back, so the game's rounding isn't later taken for a change by the game.
     slot.written = obj[name]
-    return true
+    return gameWrote
+end
+
+--- The value to put back for obj[name] (the game's latest), or nil if the mod
+--- hasn't changed it.
+function Overrides:saved(obj, name)
+    local entry = self.entries[ue.address(obj) or false]
+    local slot = entry and entry.saved[name]
+    return slot and slot.value
 end
 
 function Overrides:isEmpty()
     return next(self.entries) == nil
+end
+
+--- Forgets every remembered value without touching the game, for objects that
+--- are gone (a new level).
+function Overrides:forget()
+    for _, entry in pairs(self.entries) do
+        forgetEntry(entry)
+    end
+    self.entries = {}
 end
 
 --- Puts every remembered value back, newest change first. Objects that no longer

@@ -14,6 +14,7 @@ settings.DEFAULTS = {
     DiagnosticsKey = "F8",
 
     FirstPerson = true,
+    CameraMethod = "auto",
     FieldOfView = 100,
     EyeHeight = "auto",
     HideBody = true,
@@ -22,6 +23,8 @@ settings.DEFAULTS = {
 
     Movement = true,
     AutoHop = true,
+    PhysicsRate = 100,
+    KeepSpeed = true,
     MaxSpeed = 320,
     InputSpeed = 400,
     Accelerate = 10,
@@ -37,18 +40,20 @@ settings.DEFAULTS = {
 
     JumpInput = "auto",
     JumpKeys = { "SpaceBar", "Gamepad_FaceButton_Bottom" },
-    ForwardKeys = { "W", "Up" },
-    BackKeys = { "S", "Down" },
-    LeftKeys = { "A", "Left" },
-    RightKeys = { "D", "Right" },
+    ForwardKeys = { "W" },
+    BackKeys = { "S" },
+    LeftKeys = { "A" },
+    RightKeys = { "D" },
     GamepadStick = true,
     StickDeadzone = 0.25,
 
     DisableSpeedLimiter = true,
     Debug = false,
 
-    -- Advanced: where the mod hooks into the game. Only change these if a game
-    -- update renames its classes.
+    -- Advanced: where the mod hooks into the game, and the character's cameras
+    -- that show exploration (besides the one the game's GetMainCamera names).
+    -- Only change these if a game update renames them.
+    CameraComponents = { "Main_CineCamera", "MainCamera" },
     TickFunctions = {
         "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Controller_World.BP_jRPG_Controller_World_C:ReceiveTick",
         "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C:ReceiveTick",
@@ -76,6 +81,7 @@ local RULES = {
     DiagnosticsKey = HOTKEY,
 
     FirstPerson = BOOLEAN,
+    CameraMethod = { kind = "choice", choices = { auto = true, engine = true, game = true } },
     FieldOfView = number(50, 150),
     EyeHeight = { kind = "eye", min = -200, max = 300 },
     HideBody = BOOLEAN,
@@ -84,6 +90,8 @@ local RULES = {
 
     Movement = BOOLEAN,
     AutoHop = BOOLEAN,
+    PhysicsRate = number(0, 1000),
+    KeepSpeed = BOOLEAN,
     MaxSpeed = number(1, 5000),
     InputSpeed = number(1, 10000),
     Accelerate = number(0, 1000),
@@ -109,6 +117,7 @@ local RULES = {
     DisableSpeedLimiter = BOOLEAN,
     Debug = BOOLEAN,
 
+    CameraComponents = NAMES,
     TickFunctions = NAMES,
     JumpFunctions = NAMES,
     PawnClasses = NAMES,
@@ -269,6 +278,7 @@ function settings.physics(cfg)
         jumpSpeed = physics.jumpSpeed(HALF_LIFE_GRAVITY * s, cfg.JumpHeight * s),
         bhopCap = cfg.BhopCap,
         maxVelocity = cfg.MaxVelocity * s,
+        rate = cfg.PhysicsRate, -- updates per second; 0: one per frame
     }
 end
 

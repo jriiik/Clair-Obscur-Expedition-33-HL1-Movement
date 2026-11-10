@@ -4,10 +4,13 @@ A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
 Half-Life 1's movement: fast, slippery running, air strafing and bunny hopping
 by holding the jump key.
 
-> **Status: version 0.1.1, early testing.** The first test in the game showed
-> problems: first person didn't start and air strafing didn't gain speed. This
-> version writes down in `UE4SS.log` what the mod does and why, to find the cause;
-> the fixes come in 0.2. See [Reporting problems](#reporting-problems).
+> **Status: version 0.2, early testing.** In the first test, first person never
+> started and air strafing gained no speed. 0.2 fixes the most likely causes:
+> first person now follows the camera the game really shows, with a second way to
+> get to the eyes if the first doesn't work, and the Half-Life movement runs 100
+> times a second whatever the frame rate. If the game cuts your speed, the mod
+> undoes it and notes it in `UE4SS.log`. It hasn't been tested in the game yet:
+> see [docs/TESTING.md](docs/TESTING.md) and [Reporting problems](#reporting-problems).
 
 ## What it does
 
@@ -60,8 +63,8 @@ only added files.
    `HL1Movement` folder into `Win64\ue4ss\Mods`. You should end up with
    `Win64\ue4ss\Mods\HL1Movement\Scripts\main.lua` and
    `Win64\ue4ss\Mods\HL1Movement\enabled.txt`.
-4. **Start the game from Steam** as usual and load a save. After a second the view
-   switches to first person.
+4. **Start the game from Steam** as usual and load a save. A few seconds after you
+   gain control, the view switches to first person.
 
 To check that it loaded, open `Win64\ue4ss\UE4SS.log` in a text editor. It should
 have a line containing `[HL1Movement] Version` and `loaded`, and after loading a
@@ -103,6 +106,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | --- | --- | --- |
 | `FieldOfView` | `100` | How wide the first-person view is, in degrees |
 | `FirstPerson` | `true` | `false` keeps the game's own camera |
+| `CameraMethod` | `"auto"` | How first person is done: `"engine"` (Unreal's own first-person view), `"game"` (the game's camera moved to the eyes, which keeps its picture settings) or `"auto"` (the first, then the second if it doesn't work) |
 | `Movement` | `true` | `false` keeps the game's own movement |
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
 | `JumpKeys` | `{ "SpaceBar", "Gamepad_FaceButton_Bottom" }` | Add `"MouseScrollDown"` to hop with the mouse wheel |
@@ -110,6 +114,9 @@ Each setting has a short explanation next to it. The most useful ones:
 | `JumpHeight` | `45` | How high a jump goes at `Gravity` 800; as in Half-Life, less gravity jumps higher |
 | `UnitScale` | `2.5` | Centimetres per Half-Life unit; higher makes everything faster and higher |
 | `BhopCap` | `0` | `1.7` copies later Half-Life updates, which slow you down above 1.7 × max speed |
+| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`; `0` updates once per frame |
+| `KeepSpeed` | `true` | Undoes the game cutting your speed (its own speed limit); `false` lets the game's cuts stand |
+| `ForwardKeys` and so on | `{ "W" }` … | The movement keys; add `"Up"`, `"Down"`, `"Left"`, `"Right"` for the arrow keys |
 
 New hotkeys only take effect after restarting the game.
 
@@ -119,12 +126,14 @@ Both the camera and the movement go back to the game, with everything the mod
 changed, when:
 
 - a battle starts (they come back afterwards);
+- the game changes area, and for three seconds after a new area or character
+  appears;
 - you are on the world map (Esquie and the world map aren't supported yet).
 
 Otherwise each part steps aside on its own:
 
-- **First person** switches off while the game shows another camera: dialogue,
-  cutscenes, sneaking or aiming.
+- **First person** switches off during dialogue and cinematics, and while the
+  game shows another camera, for example when sneaking or aiming.
 - **The game's own movement** comes back while the game locks your movement or
   moves the character itself: dialogue, cutscenes, climbing, ledge grabs.
 
@@ -162,10 +171,12 @@ checks the game's own files. It isn't needed to uninstall either.
 - **The game crashes at start** after installing UE4SS. Make sure you use an
   experimental build from the page above, and that you don't have two copies of
   UE4SS from different mods.
-- **The camera stays in third person.** If first person doesn't take effect, the
-  mod switches it off by itself after two seconds, so that your character isn't
-  left invisible, and the log says `First person doesn't work here`. Please
-  report it. Press F6 twice to try again.
+- **The camera stays in third person.** The log says why, in lines that start
+  with `First person:`. If Unreal's own first-person view doesn't reach the eyes
+  within two seconds, the mod moves the game's camera to the eyes instead. If
+  that doesn't work either, it switches first person off by itself, so that your
+  character isn't left invisible, and the log says `First person doesn't work
+  here`. Please report it. Press F6 twice to try again.
 - **Steam Deck or Linux**: add this launch option in Steam (right-click the game,
   *Properties*, *Launch options*): `WINEDLLOVERRIDES="dwmapi=n,b" %command%`.
 - **A key does nothing.** On a laptop, hold **Fn** with it. Another mod may use
@@ -173,7 +184,7 @@ checks the game's own files. It isn't needed to uninstall either.
 
 ## Reporting problems
 
-This version hasn't been tested in the game, so reports help a lot.
+This version hasn't been tested in the game yet, so reports help a lot.
 [docs/TESTING.md](docs/TESTING.md) has a short list of things to try.
 
 1. Play until the problem happens, then press **F8**. This adds a status report to
@@ -193,9 +204,12 @@ This version hasn't been tested in the game, so reports help a lot.
   Press F5 to climb, then F5 again.
 - In third person (F6) with the mod's movement, the character's animations can
   look wrong, because the game doesn't see your input.
-- In first person the game's camera effects, such as depth of field and camera
+- With Unreal's own first-person view (`CameraMethod = "engine"`, the first one
+  `"auto"` tries), the game's camera effects, such as depth of field and camera
   shake, don't apply. If the game sets brightness or colours on its own camera,
-  the picture can look a little different too.
+  the picture can look a little different too, and sound is heard from where the
+  game's camera would be. With `"game"`, the game's picture settings stay; only
+  its depth of field and its shake while running are switched off.
 
 ## Other versions of the game
 
@@ -216,13 +230,15 @@ mod runs from the player controller's update, after the game reads your input
 and before it moves your character:
 
 - It takes the movement input away from the game and works out the new velocity
-  with Half-Life's rules (`hl1movement/physics.lua`). It then hands that velocity
-  to Unreal's character movement, which still handles walls, stairs, slopes and
-  gravity. Unreal's own acceleration and braking are switched off or cancelled
-  out (`hl1movement/movement.lua`).
-- It switches Unreal's camera manager to its built-in `FirstPerson` camera style,
-  which looks out of the character's eyes, and hides the body
-  (`hl1movement/camera.lua`).
+  with Half-Life's rules (`hl1movement/physics.lua`), in steps of a hundredth of
+  a second, as Half-Life does. It then hands that velocity to Unreal's character
+  movement, which still handles walls, stairs, slopes and gravity. Unreal's own
+  acceleration and braking are switched off or cancelled out, and the game's
+  speed limiter is paused (`hl1movement/movement.lua`).
+- It checks which camera the game shows (`hl1movement/view.lua`). While that is
+  the character's main camera, it switches Unreal's camera manager to its built-in
+  `FirstPerson` camera style, which looks out of the character's eyes, or moves
+  the game's camera to the eyes, and hides the body (`hl1movement/camera.lua`).
 
 Everything it changes is remembered and put back when it steps aside. If the
 game sets a value of its own in the meantime, such as a new walking speed, that

@@ -17,6 +17,8 @@ return {
 
     -- Camera
     FirstPerson = true,     -- false: keep the game's camera and only change the movement
+    CameraMethod = "auto",  -- "engine": Unreal's own first-person view; "game": the game's camera,
+                            -- moved to the eyes; "auto": "engine", and "game" if that doesn't work
     FieldOfView = 100,      -- horizontal, in degrees (Half-Life's 90 on a 4:3 screen is about 106 on 16:9)
     EyeHeight = "auto",     -- "auto", or centimetres above the middle of the character
     HideBody = true,        -- hide your own character so it doesn't block the view
@@ -38,14 +40,17 @@ return {
                             -- which slow you down when you jump above 1.7 x MaxSpeed
     MaxVelocity = 2000,     -- sv_maxvelocity
     UnitScale = 2.5,        -- centimetres per Half-Life unit; higher makes everything faster and jumps higher
+    PhysicsRate = 100,      -- Half-Life updates per second, whatever the frame rate (Half-Life at fps_max 100);
+                            -- 0: one update per frame
+    KeepSpeed = true,       -- undo the game cutting your speed (its speed limit), so hops keep their speed
 
-    -- Input, as Unreal key names: W, A, S, D, SpaceBar, LeftShift, MouseScrollDown,
-    -- Gamepad_FaceButton_Bottom (the A button) ...
+    -- Input, as Unreal key names: W, A, S, D, Up, Down, Left, Right, SpaceBar,
+    -- LeftShift, MouseScrollDown, Gamepad_FaceButton_Bottom (the A button) ...
     JumpKeys = { "SpaceBar", "Gamepad_FaceButton_Bottom" }, -- add "MouseScrollDown" to hop with the mouse wheel
-    ForwardKeys = { "W", "Up" },
-    BackKeys = { "S", "Down" },
-    LeftKeys = { "A", "Left" },
-    RightKeys = { "D", "Right" },
+    ForwardKeys = { "W" },  -- for example { "W", "Up" } to use the arrow keys too
+    BackKeys = { "S" },
+    LeftKeys = { "A" },
+    RightKeys = { "D" },
     GamepadStick = true,    -- move with the left stick
     StickDeadzone = 0.25,
 

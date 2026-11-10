@@ -7,6 +7,29 @@
 
 local ue = {}
 
+-- The helpers below run many times a frame, so they pcall plain functions with
+-- arguments instead of making a new closure each time.
+local function typeName(value)
+    return value:type()
+end
+
+local function isValid(obj)
+    return obj:IsValid()
+end
+
+local function addressOf(obj)
+    return obj:GetAddress()
+end
+
+local function index(obj, name)
+    return obj[name]
+end
+
+local function invoke(obj, name, ...)
+    local fn = obj[name]
+    return fn(obj, ...)
+end
+
 --- UE4SS's own type name for a value ("UObject", "FName", "TArray", "UScriptStruct",
 --- "RemoteUnrealParam" ...), or Lua's type name for plain values.
 function ue.typeOf(value)
@@ -14,9 +37,7 @@ function ue.typeOf(value)
     if t ~= "userdata" then
         return t
     end
-    local ok, name = pcall(function()
-        return value:type()
-    end)
+    local ok, name = pcall(typeName, value)
     if ok and type(name) == "string" then
         return name
     end
@@ -39,9 +60,7 @@ function ue.valid(obj)
     if type(obj) ~= "userdata" then
         return false
     end
-    local ok, result = pcall(function()
-        return obj:IsValid()
-    end)
+    local ok, result = pcall(isValid, obj)
     return ok and result == true
 end
 
@@ -51,9 +70,7 @@ function ue.address(obj)
     if type(obj) ~= "userdata" then
         return nil
     end
-    local ok, result = pcall(function()
-        return obj:GetAddress()
-    end)
+    local ok, result = pcall(addressOf, obj)
     if ok and type(result) == "number" then
         return result
     end
@@ -65,15 +82,25 @@ function ue.same(a, b)
     return x ~= nil and x == ue.address(b)
 end
 
+local function classNameOf(obj)
+    return obj:GetClass():GetFName():ToString()
+end
+
+local function nameOf(obj)
+    return obj:GetFName():ToString()
+end
+
+local function fullNameOf(obj)
+    return obj:GetFullName()
+end
+
 --- Short class name, for example "BP_jRPG_Character_World_C". Checks first that
 --- obj is valid: UE4SS's GetClass on a null object crashes the game.
 function ue.className(obj)
     if not ue.valid(obj) then
         return nil
     end
-    local ok, name = pcall(function()
-        return obj:GetClass():GetFName():ToString()
-    end)
+    local ok, name = pcall(classNameOf, obj)
     if ok and type(name) == "string" then
         return name
     end
@@ -85,9 +112,7 @@ function ue.name(obj)
     if not ue.valid(obj) then
         return nil
     end
-    local ok, name = pcall(function()
-        return obj:GetFName():ToString()
-    end)
+    local ok, name = pcall(nameOf, obj)
     if ok and type(name) == "string" then
         return name
     end
@@ -109,9 +134,7 @@ function ue.fullName(obj)
     if not ue.valid(obj) then
         return nil
     end
-    local ok, name = pcall(function()
-        return obj:GetFullName()
-    end)
+    local ok, name = pcall(fullNameOf, obj)
     if ok and type(name) == "string" then
         return name
     end
@@ -120,9 +143,7 @@ end
 
 --- obj[name], or nil if reading it fails.
 function ue.get(obj, name)
-    local ok, value = pcall(function()
-        return obj[name]
-    end)
+    local ok, value = pcall(index, obj, name)
     if ok then
         return value
     end
@@ -137,6 +158,15 @@ function ue.number(obj, name)
     return nil
 end
 
+--- obj[name] if it is true or false, else nil.
+function ue.bool(obj, name)
+    local value = ue.get(obj, name)
+    if type(value) == "boolean" then
+        return value
+    end
+    return nil
+end
+
 --- obj[name] if it is a game object that exists, else nil.
 function ue.object(obj, name)
     local value = ue.get(obj, name)
@@ -146,19 +176,20 @@ function ue.object(obj, name)
     return nil
 end
 
+local function callResult(obj, name, ok, ...)
+    if not ok then
+        local err = ...
+        if type(err) == "string" and err:find("attempt to call", 1, true) then
+            -- UE4SS gives back an invalid object for a name the object doesn't have.
+            return false, string.format("%s has no function named %s", tostring(ue.className(obj)), tostring(name))
+        end
+    end
+    return ok, ...
+end
+
 --- Calls obj:name(...). Returns true and the result, or false and the error.
 function ue.call(obj, name, ...)
-    local count = select("#", ...)
-    local args = { ... }
-    local results = table.pack(pcall(function()
-        local fn = obj[name]
-        return fn(obj, table.unpack(args, 1, count))
-    end))
-    if not results[1] and type(results[2]) == "string" and results[2]:find("attempt to call", 1, true) then
-        -- UE4SS gives back an invalid object for a name the object doesn't have.
-        results[2] = string.format("%s has no function named %s", tostring(ue.className(obj)), tostring(name))
-    end
-    return table.unpack(results, 1, results.n)
+    return callResult(obj, name, pcall(invoke, obj, name, ...))
 end
 
 --- The elements of an array: a TArray property, or the table a call returned.

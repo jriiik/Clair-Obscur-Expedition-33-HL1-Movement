@@ -139,6 +139,73 @@ function physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jump, p, dt)
     return vx, vy, vz, jumped
 end
 
+--- The shortest turn in degrees from one yaw to another, from -180 to 180.
+function physics.turn(fromDegrees, toDegrees)
+    return (toDegrees - fromDegrees + 180) % 360 - 180
+end
+
+local MAX_STEPS = 25 -- per frame; time beyond that is dropped (a very long frame)
+
+--- Runs the Half-Life update at a fixed rate within one game frame. Half-Life
+--- updates the player once per input command, usually 100 times a second, and
+--- air strafing gains speed in small steps: at a low frame rate, one big update
+--- per frame gains much less, or even loses speed.
+---
+--- sim is a table the caller keeps between frames (an empty table to start): the
+--- time left over from earlier frames, and the view yaw of the last step. wish is
+--- the input: { forward = f, right = r } (axes from -1 to 1, turned with the view,
+--- whose turn since the last step is spread evenly over this frame's steps), or
+--- { x = wx, y = wy, speed = s } (a fixed direction), or nil for none. With a rate
+--- of 0 there is one update per frame. A jump can only start on the first step.
+--- Returns the new vx, vy, vz, whether a jump started, and the number of steps.
+function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rate)
+    local fromYaw = sim.yaw or yaw
+    local steps, stepTime
+    if not rate or rate <= 0 then
+        steps, stepTime = 1, dt
+        sim.time = 0
+    else
+        stepTime = 1 / rate
+        local total = (sim.time or 0) + dt
+        steps = math.floor(total * rate + 1e-9)
+        if steps > MAX_STEPS then
+            steps = MAX_STEPS
+            sim.time = 0
+        else
+            sim.time = math.max(0, total - steps * stepTime)
+        end
+    end
+    if steps == 0 then
+        -- Less than one step of time so far. A jump can't wait for the next frame,
+        -- since the game moves the character in between: it starts now.
+        sim.yaw = fromYaw
+        local jumped = false
+        if jump and onGround then
+            vx, vy, vz, jumped = physics.step(vx, vy, vz, true, 0, 0, 0, true, p, 0)
+        end
+        return vx, vy, vz, jumped, 0
+    end
+    local turn = physics.turn(fromYaw, yaw)
+    sim.yaw = yaw
+    local jumped = false
+    for k = 1, steps do
+        local wx, wy, wishSpeed = 0, 0, 0
+        if wish and wish.speed then
+            wx, wy, wishSpeed = wish.x, wish.y, wish.speed
+        elseif wish and (wish.forward ~= 0 or wish.right ~= 0) then
+            wx, wy, wishSpeed = physics.wish(fromYaw + turn * k / steps, wish.forward, wish.right,
+                p.inputSpeed, p.maxSpeed)
+        end
+        local started
+        vx, vy, vz, started = physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jump and k == 1, p, stepTime)
+        if started then
+            jumped = true
+            onGround = false
+        end
+    end
+    return vx, vy, vz, jumped, steps
+end
+
 --- Decides whether to jump. With auto hop, holding the key jumps on every
 --- landing. Without it (Half-Life 1's own rule) the key has to be released
 --- between jumps, and holding it in the air uses the press up.
