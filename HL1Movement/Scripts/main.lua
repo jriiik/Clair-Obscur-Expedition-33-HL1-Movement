@@ -548,9 +548,10 @@ end
 -- Runs every frame. The hook is on the player controller's tick, which comes after
 -- the frame's input and before the character's movement update.
 local function onTick(context, deltaSeconds)
+    local outer = mod.insideHook
     mod.insideHook = true
     local ok, err = pcall(tick, context, deltaSeconds)
-    mod.insideHook = false
+    mod.insideHook = outer
     if not ok then
         guard.report("the frame hook", err)
     end
@@ -560,9 +561,10 @@ end
 -- The game's jump event comes during input handling, before this frame's tick,
 -- so it belongs to the next frame number.
 local function onGameJump(_, pressed)
+    local outer = mod.insideHook
     mod.insideHook = true
     pcall(input.onGameJump, ue.unwrap(pressed) == true, mod.frames + 1)
-    mod.insideHook = false
+    mod.insideHook = outer
 end
 
 -- The function is looked up first: a RegisterHook that fails leaves things behind
