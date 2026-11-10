@@ -154,8 +154,8 @@ function view.update(pc, pawn, cfg, now)
         st.pawnAddr = pawnAddr
     end
     if now >= st.nextScan or pickChanged() then
-        -- After the first scan, the next one comes half a period early, so that the
-        -- scans fall between the camera's refreshes instead of on the same frames.
+        -- The second scan comes half a period after the first instead of a whole
+        -- one, so that scans fall between the camera's refreshes (see view.stagger).
         st.nextScan = now + (st.nextScan == 0 and RESCAN / 2 or RESCAN)
         scan(pawn, cfg)
     end
@@ -166,6 +166,14 @@ function view.update(pc, pawn, cfg, now)
         local cinematic = ue.object(pc, "BP_CinematicSystem")
         st.cinematic = cinematic ~= nil and (ue.bool(cinematic, "IsPlayingCinematic") == true
             or ask(cinematic, "IsInCinematicTransition") == true)
+    end
+end
+
+--- Called when first person starts, whose refreshes start then: the next scan
+--- comes half a period later, between them.
+function view.stagger(now)
+    if st.nextScan ~= 0 then
+        st.nextScan = now + RESCAN / 2
     end
 end
 

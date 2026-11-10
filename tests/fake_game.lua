@@ -360,6 +360,26 @@ function fake.destroy(obj)
     data[obj].alive = false
 end
 
+--- A new object at the address of a destroyed one: in UE4SS a Lua object holds
+--- only the address, so from now on old reads and writes the new object.
+function fake.reuseAddress(old, new)
+    data[old] = data[new]
+end
+
+--- A new object like obj, with the same class, values and functions, at a new
+--- address: for example the player controller of a new level.
+function fake.copy(obj)
+    local d = data[obj]
+    local props = {}
+    for key, value in pairs(d.props) do
+        props[key] = value
+    end
+    local copy = fake.object({ className = d.className, name = d.name .. "_Copy", chain = d.chain,
+        typeName = d.typeName, props = props, getters = d.getters, methods = d.methods, world = d.world })
+    data[copy].declared, data[copy].bytes = d.declared, d.bytes
+    return copy
+end
+
 function fake.addressOf(obj)
     return data[obj].address
 end
@@ -471,6 +491,7 @@ function fake.newGame(options)
         jumpCount = 0,
         gameJumps = 0,
         landings = 0,
+        landingClamps = 0, -- speed caps at a landing (options.landingListenerClamps)
         shakeStops = 0,
         attachCalls = 0,
         engineAccelerated = false,
@@ -648,7 +669,8 @@ function fake.newGame(options)
             DefaultFOV = 90, ViewPitchMin = -60, ViewPitchMax = 40,
             bAlwaysApplyModifiers = false, ModifierList = fake.array({ g.limiterModifier, g.shakeModifier }),
             -- While the camera manager blends to a new view target, that one is the
-            -- pending view target (see g.blendTo); the game's view target is in g.viewTarget.
+            -- pending view target (tests set PendingViewTarget.Target); the game's view
+            -- target is in g.viewTarget.
             ViewTarget = fake.struct({ Target = INVALID }), PendingViewTarget = fake.struct({ Target = INVALID }) },
         methods = {
             GetCameraLocation = ufunction("GetCameraLocation", 0, function()
@@ -956,8 +978,11 @@ function fake.newGame(options)
                     return copyVector(g.lastAcceleration)
                 end),
                 GetImpartedMovementBaseVelocity = ufunction("GetImpartedMovementBaseVelocity", 0, function()
-                    local mode = fake.props(c.cmc).MovementMode
-                    if (mode == 1 or mode == 2) and g.baseVelocity then
+                    -- The platform's velocity, while the character is based on it: on the
+                    -- ground, and in the air with bStayBasedInAir.
+                    local p = fake.props(c.cmc)
+                    local mode = p.MovementMode
+                    if (mode == 1 or mode == 2 or (mode == 3 and p.bStayBasedInAir)) and g.baseVelocity then
                         return copyVector(g.baseVelocity)
                     end
                     return { X = 0, Y = 0, Z = 0 }
@@ -1182,13 +1207,35 @@ function fake.newGame(options)
         end
         local pos = g.position
         local share = g.moveShare or 1
+        local startZ = pos.Z
         pos.X, pos.Y, pos.Z = pos.X + v.X * dt * share, pos.Y + v.Y * dt * share, pos.Z + v.Z * dt
+        local platform = g.baseVelocity
+        if platform and (walking or p.bStayBasedInAir) then
+            -- Unreal moves a character on a moving platform along with it, apart from
+            -- its velocity (which is relative to the platform).
+            pos.X, pos.Y = pos.X + platform.X * dt, pos.Y + platform.Y * dt
+        end
         if share < 1 then
             -- Something in the way stopped the move part of the way (a wall hit head
             -- on, a step too high): Unreal works the velocity out from the distance moved.
             v.X, v.Y = v.X * share, v.Y * share
         end
         if mode == 3 and pos.Z <= 0 then
+            if options.landingListenerClamps then
+                -- A listener of the landing's mode change (the game's speed limiter may
+                -- be one) caps the speed there, and the rest of the frame is walked at
+                -- that speed: Unreal lands part of the way through its update.
+                local cap = g.cmc:GetMaxSpeed()
+                local s = math.sqrt(v.X * v.X + v.Y * v.Y)
+                if s > cap then
+                    local fell = startZ > pos.Z and startZ / (startZ - pos.Z) or 1 -- the share before touchdown
+                    local r = cap / s
+                    pos.X = pos.X - v.X * dt * share * (1 - fell) * (1 - r)
+                    pos.Y = pos.Y - v.Y * dt * share * (1 - fell) * (1 - r)
+                    v.X, v.Y = v.X * r, v.Y * r
+                    g.landingClamps = g.landingClamps + 1
+                end
+            end
             pos.Z, v.Z = 0, 0
             p.MovementMode = 1
             g.jumpCount = 0

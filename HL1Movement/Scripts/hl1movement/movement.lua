@@ -17,7 +17,10 @@
 -- the cut is logged and, with KeepSpeed, undone. (Walls and slopes turn the
 -- velocity. A wall or a step that stops the character part of the way lowers it
 -- in the same direction, but then the character moved less too: Unreal works the
--- velocity out from the distance moved.)
+-- velocity out from the distance moved. A moving platform's own motion doesn't
+-- count. The distance isn't checked when the movement mode changed during Unreal's
+-- update, at a landing or when walking off a ledge: the speed limiter listens to
+-- mode changes, and a cap there comes part of the way through the move.)
 --
 -- When the mod hands the movement back, every value goes back to the last one the
 -- game set (see overrides.lua), including the walking speed. The mod doesn't ask
@@ -47,7 +50,8 @@ local LIMITER_CLASS = "BP_VelocityControllerComponent_C"
 -- character, unless the speed limiter just ran or the speed is now its maximum.
 local CUT_MIN, CUT_MAX, CUT_COS = 0.2, 0.97, math.cos(math.rad(2))
 -- ...and the character moved at least this share of the way the mod's velocity
--- would take it, and not much more (more: a moving platform, or the game moved it).
+-- would take it, and not much more (more: the game moved it). A moving platform's
+-- own motion is taken out first.
 local MOVED_MIN, MOVED_MAX = 0.9, 2
 local MIN_CHECKED_SPEED = 50 -- cm/s
 local MAX_CUT_LINES = 5
@@ -75,6 +79,8 @@ local st = {
     hop = nil, -- the jump in progress, for the hop lines
     hops = 0,
     maxSpeed = nil, -- what GetMaxSpeed() said after the mod set MaxWalkSpeed
+    gameWalkSpeed = nil, -- the MaxWalkSpeed the game wrote since the last frame, if it did
+    stayBasedInAir = false, -- the movement component's bStayBasedInAir
     counts = { cuts = 0, restores = 0, rewrites = 0, wakes = 0, leaks = 0, jumpChanges = 0 },
 }
 
@@ -304,14 +310,18 @@ function movement.apply(pawn, cmc, cfg, P, now)
     end
     local refresh = now >= st.nextRefresh
     if refresh then
-        -- After the first one, the next refresh comes a quarter period early, so
-        -- that refreshes fall between the camera's instead of on the same frames.
+        -- The second refresh comes a quarter period after the first instead of a
+        -- whole one, so that refreshes fall between the camera's (see movement.stagger).
         st.nextRefresh = now + (first and REFRESH / 4 or REFRESH)
     end
     -- ALS sets the walking speed itself whenever the gait changes, and the game
     -- sets it for some areas, so this is set every frame. The high value stops the
     -- game from capping your speed.
+    st.gameWalkSpeed = nil
     if overrides:set(cmc, "MaxWalkSpeed", SPEED_LIMIT, refresh) then
+        -- What the game wrote since the last frame: its speed cap may have cut the
+        -- speed to it meanwhile (see atMaxSpeed).
+        st.gameWalkSpeed = overrides:saved(cmc, "MaxWalkSpeed")
         local rewrites = count("rewrites")
         if rewrites <= MAX_NOTE_LINES then
             log.info("The game set MaxWalkSpeed to %s; the mod sets it back to %d%s",
@@ -331,6 +341,14 @@ function movement.apply(pawn, cmc, cfg, P, now)
     end
 end
 
+--- Called when first person starts, whose refreshes start then: the next refresh
+--- here comes a quarter period later, between the camera's.
+function movement.stagger(now)
+    if st.active then
+        st.nextRefresh = now + REFRESH / 4
+    end
+end
+
 -- The game's movement input still reaching Unreal's movement component, after the
 -- mod took it: then Unreal steers the velocity too. Shows as acceleration.
 local function checkInputLeak(cmc)
@@ -347,13 +365,30 @@ local function checkInputLeak(cmc)
     end
 end
 
--- Whether the velocity read back was capped at the movement component's maximum.
+-- Whether the velocity read back was capped at the movement component's maximum,
+-- or at a walking speed the game wrote since the last frame (the mod has already
+-- set MaxWalkSpeed back this frame, so GetMaxSpeed() may no longer say it).
 local function atMaxSpeed(cmc, vx, vy, vz)
-    local ok, max = ue.call(cmc, "GetMaxSpeed")
-    if not ok or type(max) ~= "number" or max <= 0 then
-        return false
+    local speed, flat = math.sqrt(vx * vx + vy * vy + vz * vz), horizontal(vx, vy)
+    local function at(cap)
+        return type(cap) == "number" and cap > 0
+            and (math.abs(speed - cap) <= cap * 0.01 or math.abs(flat - cap) <= cap * 0.01)
     end
-    return math.abs(math.sqrt(vx * vx + vy * vy + vz * vz) - max) <= max * 0.01
+    if at(st.gameWalkSpeed) then
+        return true
+    end
+    local ok, max = ue.call(cmc, "GetMaxSpeed")
+    return ok and at(max)
+end
+
+-- The velocity of the moving platform the character is on (zero on still ground
+-- and in the air), read while it is still standing on it.
+local function platformVelocity(cmc)
+    local ok, base = ue.call(cmc, "GetImpartedMovementBaseVelocity")
+    if ok and type(base) == "table" then
+        return ue.vector(base)
+    end
+    return nil
 end
 
 -- A cut of the speed the mod wrote last frame, with the direction kept, although
@@ -373,11 +408,19 @@ local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
     if ratio > CUT_MAX or (vx * w.x + vy * w.y) / (speed * written) < CUT_COS then
         return vx, vy
     end
-    if w.at and at and w.dt and w.dt > 0 then
+    if w.mode == mode and w.at and at and w.dt and w.dt > 0 then
         -- How fast the character really moved. A wall or a step that stopped it part
         -- of the way lowers the velocity to match the distance moved; a cap lowers
-        -- the velocity after the move.
-        local moved = horizontal(at.X - w.at.X, at.Y - w.at.Y) / w.dt
+        -- the velocity after the move. Unreal moves a character on a moving platform
+        -- with it, apart from its velocity, so the platform's motion is taken out.
+        -- (When the mode changed during the move, a cap by a listener of that change
+        -- came part of the way through it, so the distance tells nothing.)
+        local mx, my = (at.X - w.at.X) / w.dt, (at.Y - w.at.Y) / w.dt
+        local baseX, baseY = platformVelocity(cmc)
+        if baseX and baseY then
+            mx, my = mx - baseX, my - baseY
+        end
+        local moved = horizontal(mx, my)
         if moved < written * MOVED_MIN or moved > written * MOVED_MAX or speed > moved * CUT_MAX then
             return vx, vy
         end
@@ -402,7 +445,8 @@ local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
             .. "MaxWalkSpeed %s, speed limiter %s)%s%s", written / P.unitScale, speed / P.unitScale,
             landed and "on landing" or (mode == FALLING and "in the air" or "on the ground"),
             tostring(w.mode), tostring(mode), w.jumped and ", after a jump" or "",
-            okMax and string.format("%.0f", max or -1) or "?", tostring(ue.number(cmc, "MaxWalkSpeed")),
+            okMax and string.format("%.0f", max or -1) or "?", tostring(ue.number(cmc, "MaxWalkSpeed"))
+                .. (st.gameWalkSpeed and string.format(" (the game had set %s)", tostring(st.gameWalkSpeed)) or ""),
             limiter, cfg.KeepSpeed and "; the speed is kept" or "; KeepSpeed is off, so the cut stays",
             cuts == MAX_CUT_LINES and " (not logged again)" or "")
     end
@@ -437,16 +481,6 @@ local function hopLine(hop, landing, P)
         hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, (landing - hop.takeoff) / u, hop.time,
         hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", st.counts.cuts - hop.cuts,
         st.hops == MAX_HOP_LINES and " (further hops aren't logged)" or "")
-end
-
--- The velocity a moving platform the character stands on adds when it leaves the
--- ground, read while it is still standing on it.
-local function platformVelocity(cmc)
-    local ok, base = ue.call(cmc, "GetImpartedMovementBaseVelocity")
-    if ok and type(base) == "table" then
-        return ue.vector(base)
-    end
-    return nil
 end
 
 --- One frame of Half-Life movement. yaw is the camera's yaw in degrees; frame is
@@ -531,14 +565,16 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     if jumped then
         log.first("jump", "First jump by the mod (speed %.0f cm/s)", horizontal(nx, ny))
         -- With bStayBasedInAir, Unreal keeps carrying the character with the
-        -- platform in the air and adds nothing when it leaves the ground.
-        local platformX, platformY, platformZ
+        -- platform in the air and adds nothing when it leaves the ground, so the
+        -- mod keeps nothing either.
+        local platformX, platformY, platformZ = 0, 0, 0
         if not st.stayBasedInAir then
             platformX, platformY, platformZ = platformVelocity(cmc)
         end
         cmc:SetMovementMode(FALLING, 0)
         -- Leaving the ground adds the velocity of a moving platform the character
-        -- stood on (while walking, Velocity is relative to it). Keep that, and only that.
+        -- stood on (while walking, Velocity is relative to it). Keep that, and only
+        -- that: the speed limiter, for one, listens to mode changes.
         local after = cmc.Velocity
         local cx, cy, cz = after.X - rx, after.Y - ry, after.Z - rz
         if platformX then

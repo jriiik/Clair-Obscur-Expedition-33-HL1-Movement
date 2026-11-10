@@ -4,13 +4,13 @@ A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
 Half-Life 1's movement: fast, slippery running, air strafing and bunny hopping
 by holding the jump key.
 
-> **Status: version 0.2.1, early testing.** In the first test, first person never
+> **Status: version 0.2.2, early testing.** In the first test, first person never
 > started and air strafing gained no speed. 0.2 fixes the most likely causes:
 > first person now follows the camera the game really shows, with a second way to
 > get to the eyes if the first doesn't work, and the Half-Life movement runs 100
 > times a second whatever the frame rate. If the game cuts your speed, the mod
-> undoes it and notes it in `UE4SS.log`. 0.2.1 fixes what a code review of 0.2
-> found. It hasn't been tested in the game yet:
+> undoes it and notes it in `UE4SS.log`. 0.2.1 and 0.2.2 fix what two code
+> reviews found. It hasn't been tested in the game yet:
 > see [docs/TESTING.md](docs/TESTING.md) and [Reporting problems](#reporting-problems).
 
 ## What it does

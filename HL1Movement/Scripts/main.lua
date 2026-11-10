@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.1"
+local VERSION = "0.2.2"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -86,6 +86,8 @@ local mod = {
     cameraReported = false,
     reportWhy = nil, -- set to write a report at the end of this frame (see writeReport)
     reportAskedAt = nil, -- when the report key asked for it
+    offPawnAddr = nil, -- while the mod is off: the character last seen, and the end of its settle
+    offSettleUntil = 0,
     givenUpReported = false,
     cameraBlock = nil, -- why first person waits, if it does
     announceCamera = false, -- say what first person does on the next frame, even if nothing changed
@@ -225,6 +227,7 @@ end
 local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
     local force = mod.announceCamera
     mod.announceCamera = false
+    camera.watchBlend(pcm, pawn)
     local key, text = cameraBlocker(pc, pawn, pcm, inBattle, viewTarget)
     mod.cameraBlock = key
     if key then
@@ -232,7 +235,14 @@ local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
         state("First person", key, text, force)
         return
     end
+    local wasActive = camera.isActive()
     camera.apply(pc, pawn, pcm, view.camera(), cfg, mod.now, paused)
+    if camera.isActive() and not wasActive then
+        -- First person's refreshes start now: the camera list's scans and the
+        -- movement's refreshes go between them, on other frames.
+        view.stagger(mod.now)
+        movement.stagger(mod.now)
+    end
     local status = camera.status()
     state("First person", status.state .. "/" .. tostring(status.method) .. "/" .. tostring(status.waiting), function()
         if status.state == "checking" then
@@ -302,12 +312,16 @@ local function report(title)
 end
 
 -- Writes the report asked for (mod.reportWhy), at the end of a frame. Not while
--- the game loads or sets up a character (waitingForGame), unless that has gone on
--- for REPORT_WAIT seconds since the report key was pressed: a wait that doesn't
+-- the game loads or sets up a character (waitingForGame: a boolean, or a function
+-- that tells, only asked while a report waits), unless that has gone on for
+-- REPORT_WAIT seconds since the report key was first pressed: a wait that doesn't
 -- end is worth a report too.
 local function writeReport(waitingForGame)
     if not mod.reportWhy then
         return
+    end
+    if type(waitingForGame) == "function" then
+        waitingForGame = waitingForGame()
     end
     if waitingForGame and mod.now - (mod.reportAskedAt or mod.now) < REPORT_WAIT then
         return
@@ -315,6 +329,18 @@ local function writeReport(waitingForGame)
     local why = mod.reportWhy
     mod.reportWhy, mod.reportAskedAt = nil, nil
     guard.run("writing the report", report, why)
+end
+
+-- While the mod is switched off (or turned itself off), whether a report has to
+-- wait as it would with the mod on: for an area change, or a new character's
+-- first seconds. Only asked while a report waits.
+local function waitingWhileOff(pc)
+    local pawnAddr = ue.address(ue.object(pc, "Pawn"))
+    if pawnAddr ~= mod.offPawnAddr then
+        mod.offPawnAddr = pawnAddr
+        mod.offSettleUntil = mod.now + SETTLE_TIME
+    end
+    return ue.bool(pc, "IsChangingArea") == true or mod.now < mod.offSettleUntil
 end
 
 -- One line every STATUS_INTERVAL seconds with the frame rate, the mod's own time
@@ -374,7 +400,9 @@ local function onFrame(pc, dt)
     mod.frames = mod.frames + 1
     mod.pc = pc
     if not mod.enabled then
-        writeReport(false)
+        writeReport(function()
+            return waitingWhileOff(pc)
+        end)
         return
     end
 
@@ -414,7 +442,9 @@ local function onFrame(pc, dt)
         releaseAll()
         state("First person", "no-character", "off (no supported character)")
         state("Half-Life movement", "no-character", "off (no supported character)")
-        writeReport(mod.now < mod.settleUntil)
+        writeReport(function()
+            return mod.now < mod.settleUntil or ue.bool(pc, "IsChangingArea") == true
+        end)
         return
     end
     -- While the game changes area (loads another level), everything is given back
@@ -501,6 +531,7 @@ local function safeFrame(pc, dt)
     if mod.errorsInARow >= MAX_ERRORS_IN_A_ROW then
         mod.broken = true
         mod.enabled = false
+        mod.offPawnAddr = mod.pawnAddr
         pcall(releaseAll)
         log.warn("Turned off after %d errors in a row. Press %s to try again, and please report UE4SS.log.",
             mod.errorsInARow, tostring(cfg.ToggleKey))
@@ -562,8 +593,13 @@ local function tick(context, deltaSeconds)
     mod.lateHook = late
     local started = clock()
     safeFrame(obj, ue.unwrap(deltaSeconds))
-    if mod.broken then
-        writeReport(false) -- the frame update is off, so the report key still gets its report
+    if mod.broken and mod.reportWhy and ue.valid(obj) then
+        -- The frame update is off, so the report key still gets its report here,
+        -- about this frame's controller.
+        mod.pc = obj
+        writeReport(function()
+            return waitingWhileOff(obj)
+        end)
     end
     mod.window.ticks = mod.window.ticks + 1
     mod.window.cpu = mod.window.cpu + (clock() - started)
@@ -653,6 +689,7 @@ end
 local function toggleMod()
     if mod.enabled then
         mod.enabled = false
+        mod.offPawnAddr = mod.pawnAddr
         releaseAll()
         log.info("Half-Life movement off")
         state("First person", "mod-off", "off (the mod is switched off)")
@@ -686,8 +723,8 @@ local function reportKey()
     local why = "asked for with " .. tostring(cfg.DiagnosticsKey)
     if mod.tickHook then
         -- Written at the end of this frame, once the mod has looked at the game
-        -- (see writeReport).
-        mod.reportWhy, mod.reportAskedAt = why, mod.now
+        -- (see writeReport). Pressing the key again doesn't start the wait again.
+        mod.reportWhy, mod.reportAskedAt = why, mod.reportAskedAt or mod.now
     else
         report(why) -- no save loaded yet, so there is nothing of the game to read
     end
