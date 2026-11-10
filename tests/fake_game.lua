@@ -690,6 +690,30 @@ function fake.newGame(options)
     g.curve = fake.object({ className = "CurveVector", name = "C_ALS_Movement_Normal",
         path = "/Game/ALS/Curves/C_ALS_Movement_Normal.C_ALS_Movement_Normal" })
 
+    -- A movement mode change, as SetMovementMode makes it (the game's own jump too).
+    local function changeMode(cmc, mode)
+        local p = fake.props(cmc)
+        local was = p.MovementMode
+        p.MovementMode = mode
+        -- Leaving a moving platform adds its velocity (while walking, Velocity is
+        -- relative to it), unless the character stays based on it in the air.
+        local platform = g.baseVelocity
+        local v = p.Velocity
+        if mode == 3 and (was == 1 or was == 2) and platform and not p.bStayBasedInAir then
+            v.X, v.Y, v.Z = v.X + platform.X, v.Y + platform.Y, v.Z + platform.Z
+        end
+        -- Listeners of the movement mode change, such as the game's speed limiter.
+        if options.limiterWakesOnModeChange then
+            g.limiterTicking = true
+        end
+        if options.jumpListenerClamps then
+            local s = math.sqrt(v.X * v.X + v.Y * v.Y)
+            if s > 650 then
+                v.X, v.Y = v.X / s * 650, v.Y / s * 650
+            end
+        end
+    end
+
     -- The character, its parts and its movement component
     function g.buildCharacter()
         local c = { attach = {} }
@@ -927,27 +951,7 @@ function fake.newGame(options)
             methods = {
                 SetMovementMode = ufunction("SetMovementMode", 2, function(_, mode, custom)
                     assert(math.type(mode) == "integer" and math.type(custom) == "integer")
-                    local p = fake.props(c.cmc)
-                    local was = p.MovementMode
-                    p.MovementMode = mode
-                    -- Leaving a moving platform adds its velocity (while walking,
-                    -- Velocity is relative to it), unless the character stays based on
-                    -- it in the air.
-                    local platform = g.baseVelocity
-                    local v = p.Velocity
-                    if mode == 3 and (was == 1 or was == 2) and platform and not p.bStayBasedInAir then
-                        v.X, v.Y, v.Z = v.X + platform.X, v.Y + platform.Y, v.Z + platform.Z
-                    end
-                    -- Listeners of the movement mode change, such as the game's speed limiter.
-                    if options.limiterWakesOnModeChange then
-                        g.limiterTicking = true
-                    end
-                    if options.jumpListenerClamps then
-                        local s = math.sqrt(v.X * v.X + v.Y * v.Y)
-                        if s > 650 then
-                            v.X, v.Y = v.X / s * 650, v.Y / s * 650
-                        end
-                    end
+                    changeMode(c.cmc, mode)
                 end),
                 GetMaxBrakingDeceleration = ufunction("GetMaxBrakingDeceleration", 0, function()
                     local p = fake.props(c.cmc)
@@ -1147,12 +1151,12 @@ function fake.newGame(options)
         if g.pressedJump then
             g.pressedJump = false
             if (mode == 1 or mode == 2) and g.jumpCount < fake.props(g.pawn).JumpMaxCount then
+                -- Unreal's DoJump: the jump speed, then SetMovementMode(Falling).
                 v.Z = math.max(v.Z, p.JumpZVelocity)
-                p.MovementMode = 3
+                changeMode(g.cmc, 3)
                 mode = 3
                 g.jumpCount = g.jumpCount + 1
                 g.gameJumps = g.gameJumps + 1
-                wake()
             end
         end
         local walking = mode == 1 or mode == 2

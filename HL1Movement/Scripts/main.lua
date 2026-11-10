@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.3"
+local VERSION = "0.2.4"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.

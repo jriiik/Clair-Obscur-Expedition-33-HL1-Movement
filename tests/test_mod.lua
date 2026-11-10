@@ -123,7 +123,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.2.3 loaded")
+    t.contains(g.log, "Version 0.2.4 loaded")
     for _, code in ipairs({ F5, F6, F7, F8 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
     end
@@ -200,7 +200,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.2.3 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.4 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -1132,6 +1132,8 @@ t.test("on a moving platform, the platform's own motion isn't taken for the char
     end
     g.frames(5)
     g.afterMove = nil
+    g.frame()
+    t.near(g.speed(), MAX_SPEED, 1, "the speed is back on the next frame")
     t.contains(g.log, "The game cut the speed from 320 to 260 u/s (on the ground")
     noErrors(g)
 end)
@@ -1191,6 +1193,34 @@ t.test("with bStayBasedInAir, walking off a moving platform adds nothing, and is
     noErrors(g)
 end)
 
+t.test("with bStayBasedInAir, a cap as the character walks off a moving platform is undone to its speed on it",
+    function()
+        for _, platform in ipairs({ 300, -300 }) do
+            local g = running(nil, { stayBasedInAir = true, jumpListenerClamps = true })
+            runTo(g, MAX_SPEED)
+            g.position.Z = 1000 -- the platform is high above the fake's ground
+            g.baseVelocity = { X = platform, Y = 0, Z = 0 }
+            g.frames(3)
+            local walk = g.moveTick
+            g.moveTick = function(dt)
+                g.moveTick = walk
+                -- Unreal walks half the frame to the edge and starts falling; nothing is
+                -- added to the velocity, and a listener of the mode change caps it at 650 cm/s.
+                local v, pos = fake.props(g.cmc).Velocity, g.position
+                g.pending = { X = 0, Y = 0, Z = 0 }
+                pos.X = pos.X + g.baseVelocity.X * dt + v.X * dt / 2
+                g.cmc:SetMovementMode(3, 0)
+                pos.X = pos.X + v.X * dt / 2
+            end
+            g.frames(2)
+            t.eq(g.mode(), 3)
+            t.contains(g.log, "The game cut the speed from 320 to 260 u/s (in the air")
+            t.near(g.speed(), MAX_SPEED, 5, string.format("platform at %d cm/s: the speed relative to it, which "
+                .. "still carries the character", platform))
+            noErrors(g)
+        end
+    end)
+
 t.test("walking off a platform that moves sideways, a cap at the mode change is still undone", function()
     local g = running(nil, { jumpListenerClamps = true })
     runTo(g, MAX_SPEED)
@@ -1214,6 +1244,91 @@ t.test("walking off a platform that moves sideways, a cap at the mode change is 
     t.eq(g.mode(), 3)
     t.contains(g.log, "The game cut the speed from 342 to 260 u/s (in the air, movement mode 1 then 3")
     t.near(g.speed(), math.sqrt(MAX_SPEED ^ 2 + 300 ^ 2), 5, "the run and the platform's velocity are kept")
+    noErrors(g)
+end)
+
+t.test("in a long frame, walking off still ground just after leaving a moving platform isn't a speed cut", function()
+    local g = running()
+    runTo(g, MAX_SPEED)
+    g.position.Z = 1000 -- the platform is high above the fake's ground
+    g.baseVelocity = { X = 300, Y = 0, Z = 0 } -- moving along the run
+    g.frames(3)
+    local walk = g.moveTick
+    g.moveTick = function(dt)
+        g.moveTick = walk
+        -- Unreal walks a frame over 0.05 s in several moves. The first, carried by the
+        -- platform, ends on still ground, which becomes the base; the next walks off that
+        -- ground's ledge, and StartFalling adds the velocity of the base it has then: none.
+        local v, pos = fake.props(g.cmc).Velocity, g.position
+        g.pending = { X = 0, Y = 0, Z = 0 }
+        pos.X = pos.X + g.baseVelocity.X * dt + v.X * dt / 2
+        g.baseVelocity = nil
+        g.cmc:SetMovementMode(3, 0)
+        pos.X = pos.X + v.X * dt / 2
+    end
+    g.frames(2, 1 / 15)
+    t.eq(g.mode(), 3)
+    t.near(g.speed(), MAX_SPEED, 5, "Unreal added no platform velocity, and the mod adds none")
+    t.absent(g.log, "The game cut the speed")
+    noErrors(g)
+end)
+
+t.test("the game's own jump from a moving platform keeps the platform's velocity, and isn't a speed cut", function()
+    local g = running()
+    runTo(g, MAX_SPEED)
+    g.baseVelocity = { X = -300, Y = 0, Z = 0 } -- moving against the run
+    g.frames(3)
+    g.pressedJump = true -- the game's jump, from an input the mod doesn't read
+    g.frame()
+    t.eq(g.gameJumps, 1, "the game jumped")
+    g.frame()
+    t.near(g.speed(), MAX_SPEED - 300, 5, "the platform's velocity is kept")
+    t.absent(g.log, "The game cut the speed")
+    noErrors(g)
+end)
+
+t.test("hopping on a moving platform doesn't add its speed again at every hop", function()
+    for _, stay in ipairs({ false, true }) do
+        local g = running(nil, { stayBasedInAir = stay })
+        g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+        g.frames(3)
+        -- Jump in place, holding the key: the character should stay where it stood on
+        -- the platform. (Unreal leaves the velocity as it was in the air at a landing,
+        -- and also carries the character with the platform from then on.)
+        local startX, frames, landings, lastMode = g.position.X, 0, 0, g.mode()
+        g.keys.SpaceBar = true
+        while landings < 6 and frames < 600 do
+            g.frame()
+            frames = frames + 1
+            if lastMode == 3 and g.mode() == 1 then
+                landings = landings + 1
+            end
+            lastMode = g.mode()
+        end
+        g.keys.SpaceBar = false
+        t.eq(landings, 6, "hopped")
+        if not stay then
+            t.contains(g.log, "take-off 80 u/s, landing 80 u/s (+0)", "the hop lines count the platform's velocity")
+        end
+        local drift = g.position.X - startX - 200 * frames / 60
+        t.near(drift, 0, 5, string.format("bStayBasedInAir %s: the character stays on its spot", tostring(stay)))
+        noErrors(g)
+    end
+    -- From a moving platform onto still ground, the platform's velocity is kept.
+    local g = running()
+    g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+    g.frames(3)
+    g.keys.SpaceBar = true
+    g.frame()
+    g.keys.SpaceBar = false
+    t.eq(g.mode(), 3, "jumped")
+    g.baseVelocity = nil -- still ground below
+    while g.mode() == 3 do
+        g.frame()
+    end
+    g.frame() -- the mod's first frame on the ground, with Half-Life friction
+    t.truthy(g.speed() > 150, string.format("landing on still ground keeps the platform's velocity (%.0f cm/s)",
+        g.speed()))
     noErrors(g)
 end)
 
@@ -1257,9 +1372,17 @@ t.test("KeepSpeed: a mild cap at a landing early in the frame is undone too", fu
     g.frame()
     g.keys.SpaceBar = false
     t.eq(g.mode(), 3, "jumped")
-    g.frames(120)
+    local after -- the speed a frame after the landing (W is held, so it comes back anyway after that)
+    for _ = 1, 120 do
+        local landed = g.landingClamps > 0
+        g.frame()
+        if landed and not after then
+            after = g.speed()
+        end
+    end
     t.truthy(early and g.landingClamps == 1, "the game capped the speed early in the landing's update")
     t.contains(g.log, "The game cut the speed from 320 to 260 u/s (on landing")
+    t.near(after, MAX_SPEED, 1, "the speed is back on the frame after the landing")
     noErrors(g)
 end)
 
@@ -1601,7 +1724,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.2.3 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.4 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")

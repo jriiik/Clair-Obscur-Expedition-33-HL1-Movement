@@ -208,6 +208,10 @@ end
 -- out can be tiny). A reading that changed in between was the game's own, to put
 -- back. A limit learnt that way is checked again at each refresh, in case it was
 -- the game holding its own value, which readings can't tell from a lens limit.
+-- Until the next reading judges it, the newest isn't what release puts back: while
+-- the value is learnt (after a move or a recheck), a release within two frames of
+-- the game's last change, or in the pause it was read in, puts back an earlier one
+-- (with a lens limit, it can be the lens's own).
 
 local function nearFov(a, b)
     return a ~= nil and b ~= nil and math.abs(a - b) <= FOV_TOLERANCE

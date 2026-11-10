@@ -25,6 +25,11 @@
 -- when walking off a ledge: the speed limiter listens to mode changes, and a cap
 -- there comes part of the way through the move.)
 --
+-- On a moving platform, Unreal carries the character along, and the velocity is
+-- relative to the platform. Leaving it adds the platform's velocity (Unreal does,
+-- and the mod's jump keeps it). Landing on one, Unreal leaves the velocity as it
+-- was in the air, so the mod takes the platform's velocity out.
+--
 -- When the mod hands the movement back, every value goes back to the last one the
 -- game set (see overrides.lua), including the walking speed. The mod doesn't ask
 -- ALS to work out its walking speed again: that would lose a speed the game set
@@ -420,8 +425,15 @@ local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
     end
     -- Walking off a ledge (leaving the ground other than by the mod's jump), Unreal
     -- adds the velocity of the platform the character stood on, as the mod's jump does.
+    -- Unless a long frame, which Unreal walks in several moves, took the character
+    -- onto still ground first: then what the mod wrote comes back, no cut either.
     local ex, ey = w.x, w.y
     if mode == FALLING and w.mode ~= FALLING and not st.stayBasedInAir then
+        local plain, speed = horizontal(ex, ey), horizontal(vx, vy)
+        if plain >= MIN_CHECKED_SPEED and speed > plain * CUT_MAX
+            and vx * ex + vy * ey >= speed * plain * CUT_COS then
+            return vx, vy
+        end
         ex, ey = ex + w.baseX, ey + w.baseY
     end
     local written = horizontal(ex, ey)
@@ -492,6 +504,10 @@ local function hopLine(hop, landing, P)
     end
     local u = P.unitScale
     local time = math.max(hop.time, 1e-6)
+    local gain = (landing - hop.takeoff) / u
+    if math.abs(gain) < 0.5 then
+        gain = 0 -- not "-0"
+    end
     local keys = {}
     for _, key in ipairs({ "W", "A", "S", "D" }) do
         if hop.keys[key] then
@@ -500,7 +516,7 @@ local function hopLine(hop, landing, P)
     end
     log.info("Hop %d (%.0f fps, %.1f updates per frame): take-off %.0f u/s, landing %.0f u/s (%+.0f), %.2f s in "
         .. "the air, view turned %.0f deg (%.0f deg/s), keys %s, speed cuts %d%s", hop.n, hop.frames / time,
-        hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, (landing - hop.takeoff) / u, hop.time,
+        hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, gain, hop.time,
         hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", st.counts.cuts - hop.cuts,
         st.hops == MAX_HOP_LINES and " (further hops aren't logged)" or "")
 end
@@ -577,6 +593,17 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             hopLine(st.hop, speed, P)
         end
         st.hop = nil
+        -- Landed on a moving platform: from now on Unreal carries the character with
+        -- it, apart from its velocity, but leaves the velocity as it was in the air,
+        -- so the platform's motion would count twice (and each hop on the platform
+        -- would add its speed again). Take the platform's velocity out, as leaving it
+        -- put it in. (With bStayBasedInAir the velocity stayed relative to the platform.)
+        if not st.stayBasedInAir then
+            local baseX, baseY = platformVelocity(cmc)
+            if baseX then
+                vx, vy = vx - baseX, vy - baseY
+            end
+        end
     end
 
     local nx, ny, nz, jumped, steps = physics.simulate(st.sim, vx, vy, vz, onGround, yaw, wish, doJump, P, dt,
@@ -614,7 +641,9 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         end
     end
     st.lastMode = jumped and FALLING or mode
-    st.lastSpeed = horizontal(nx, ny)
+    -- Over the ground at a jump (with the platform's velocity) and in the air, as a
+    -- landing reads it; relative to the platform on it.
+    st.lastSpeed = horizontal(nx + bx, ny + by)
     if jumped then
         stats.hops = stats.hops + 1
         st.hop = { n = st.hops + 1, takeoff = st.lastSpeed, time = 0, turn = 0, frames = 0, steps = 0,

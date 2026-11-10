@@ -61,7 +61,8 @@ Write down what happens for each one. "Nothing happened" is useful too.
      loads?
    - If you can aim or sneak, try that too.
 8. **Things that move you.** If you find a moving platform, a grapple point, a
-   rope or anything else that throws or pulls the character, try it.
+   rope or anything else that throws or pulls the character, try it. On a moving
+   platform, hold Space without moving: you should stay on the same spot of it.
 9. **Report.** Press **F8**, then quit the game from its menu.
 
 ## What to send back
