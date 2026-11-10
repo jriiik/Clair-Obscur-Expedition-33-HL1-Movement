@@ -123,7 +123,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.2.5 loaded")
+    t.contains(g.log, "Version 0.2.6 loaded")
     for _, code in ipairs({ F5, F6, F7, F8 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
     end
@@ -200,7 +200,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.2.5 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.6 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -1335,13 +1335,58 @@ t.test("hopping on a moving platform doesn't add its speed again at every hop", 
     noErrors(g)
 end)
 
--- A pause the game starts from the controller's own input: the mod's frame hook
--- already sees it, but the world's tick had started unpaused, so the character's
--- movement still runs once, with the game's input.
-local function pauseFromInput(g)
-    g.paused = true
+t.test("hopping in place on a moving platform for a minute stays on the spot", function()
+    -- Unreal brakes the velocity it moves with, which after a jump has the platform's
+    -- in it. If the mod added back only the braking of the velocity relative to the
+    -- platform, each hop would fall a little more behind (0.9 m in a minute at 60 fps).
+    for _, fps in ipairs({ 30, 144 }) do
+        local dt = 1 / fps
+        local g = running()
+        g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+        g.frames(3, dt)
+        local startX, startT = g.position.X, g.time
+        g.keys.SpaceBar = true
+        while g.time - startT < 60 do
+            g.frame(dt)
+        end
+        g.keys.SpaceBar = false
+        t.truthy(g.landings > 60, "hopped")
+        local drift = g.position.X - startX - 200 * (g.time - startT)
+        t.near(drift, 0, 2, string.format("%d fps: the character stays on its spot (%.1f cm)", fps, drift))
+        noErrors(g)
+    end
+end)
+
+t.test("the status line's gain per jump reads +0 when it is under 0.5 u/s, as the hop lines do", function()
+    -- At under 10 fps the mod adds back the braking of the 0.1 s it simulates, while
+    -- Unreal brakes the whole frame: each hop ends a hair slower than it started.
+    local g = running()
+    runTo(g, MAX_SPEED)
+    g.keys.SpaceBar = true
+    g.frames(120, 0.15)
+    t.contains(g.log, "per jump +0 u/s in the air", "the status line")
+    t.absent(g.log, "per jump -0", "not -0")
+    t.contains(g.log, "(+0), ", "the hop lines")
+    noErrors(g)
+end)
+
+-- A pause the game starts from the controller's own input: IsGamePaused already says
+-- so in the mod's frame hook, but Unreal had started the world's tick unpaused, so
+-- the character's movement and the camera still run once, and the world's clock goes
+-- on. moveShare: the share of that move a wall lets through.
+local function pauseFromInput(g, moveShare)
+    g.paused, g.worldPaused, g.moveShare = true, false, moveShare
     g.frame()
-    g.moveTick(1 / 60)
+    g.worldPaused, g.moveShare = nil, nil
+end
+
+-- The game unpausing from the controller's own input: IsGamePaused says it runs in the
+-- mod's frame hook, but Unreal had started the world's tick paused, so nothing moves
+-- in that frame, the camera isn't updated and the world's clock stands still.
+local function unpauseFromInput(g)
+    g.paused, g.worldPaused = false, true
+    g.frame()
+    g.worldPaused = nil
 end
 
 t.test("a pause around a landing on a moving platform doesn't add its speed", function()
@@ -1385,29 +1430,183 @@ t.test("a pause around a landing on a moving platform doesn't add its speed", fu
     end
 end)
 
-t.test("a pause the game starts from the controller's input isn't an input leak or a speed cut", function()
+t.test("a pause the game starts from the controller's input: the mod moves the character that frame, not the game",
+    function()
+        local g = running()
+        runTo(g, MAX_SPEED)
+        g.engineAccelerated = false
+        pauseFromInput(g) -- W still held
+        t.falsy(g.engineAccelerated, "the game's input didn't move the character")
+        t.near(g.speed(), MAX_SPEED, 1, "the mod's speed")
+        g.frames(9)
+        g.paused = false
+        g.frames(3)
+        t.absent(g.log, "movement input still reaches", "no input leak")
+        -- A wall that stops that last move halfway: Unreal sets the velocity from the
+        -- distance moved, which isn't a cut.
+        g.keys.W = false
+        g.frames(2)
+        pauseFromInput(g, 0.5)
+        g.frames(9)
+        g.paused = false
+        g.frame()
+        t.absent(g.log, "The game cut the speed")
+        t.truthy(g.speed() < MAX_SPEED * 0.6, string.format("the wall's slowdown stays (%.0f cm/s)", g.speed()))
+        t.absent(g.log, "world's clock", "the clock follows the pauses")
+        noErrors(g)
+    end)
+
+t.test("without the world's clock, a pause from the controller's input isn't an input leak or a speed cut", function()
+    -- IsGamePaused already says paused in that frame, so the mod holds, and Unreal
+    -- moves the character once with the game's input.
     local g = running()
+    g.clock = "error"
     runTo(g, MAX_SPEED)
-    pauseFromInput(g) -- W still held: the game's input moves the character once
+    t.contains(g.log, "Can't read the world's clock (GetTimeSeconds:", "logged")
+    t.contains(g.log, "so pauses are told from IsGamePaused alone")
+    pauseFromInput(g) -- W still held
+    t.truthy(g.engineAccelerated, "the game's input moved the character once")
     g.frames(9)
     g.paused = false
     g.frames(3)
     t.absent(g.log, "movement input still reaches", "no input leak")
-    -- A wall that stops that last move halfway: Unreal sets the velocity from the
-    -- distance moved, which isn't a cut.
     g.keys.W = false
     g.frames(2)
-    g.paused = true
-    g.frame()
-    g.moveShare = 0.5
-    g.moveTick(1 / 60)
-    g.moveShare = nil
+    pauseFromInput(g, 0.5)
     g.frames(9)
     g.paused = false
     g.frame()
     t.absent(g.log, "The game cut the speed")
     t.truthy(g.speed() < MAX_SPEED * 0.6, string.format("the wall's slowdown stays (%.0f cm/s)", g.speed()))
     noErrors(g)
+end)
+
+t.test("pausing and unpausing from the controller's input isn't an input leak", function()
+    for _, clock in ipairs({ "normal", "error" }) do
+        for _, case in ipairs({ "a pause", "a one-frame pause", "a pause that ignores move input" }) do
+            local g = running()
+            g.clock = clock ~= "normal" and clock or nil
+            runTo(g, MAX_SPEED)
+            local what = string.format("%s (clock %s)", case, clock)
+            if case == "a pause that ignores move input" then
+                -- The mod gives the movement back while the pause lasts. In the frame the
+                -- game pauses, Unreal moves the character once with what the game added
+                -- before it ignored move input.
+                g.moveIgnored = true
+                g.pending.X = 1
+                pauseFromInput(g)
+                t.truthy(g.engineAccelerated, what .. ": the game's input moved the character")
+            else
+                pauseFromInput(g) -- W still held
+            end
+            g.frames(case == "a one-frame pause" and 0 or 9)
+            g.moveIgnored = false
+            unpauseFromInput(g)
+            g.frames(5)
+            t.absent(g.log, "movement input still reaches", what .. ": no input leak")
+            t.near(g.speed(), MAX_SPEED, 1, what .. ": the speed goes on")
+            if clock == "normal" then
+                t.absent(g.log, "world's clock", what .. ": the clock follows the pauses")
+            end
+            noErrors(g)
+        end
+        -- A real leak right after such a pause is still found.
+        local g = running()
+        g.clock = clock ~= "normal" and clock or nil
+        runTo(g, MAX_SPEED)
+        pauseFromInput(g)
+        g.frames(9)
+        g.options.lateInput = true
+        unpauseFromInput(g)
+        t.absent(g.log, "movement input still reaches", "no leak before the pause")
+        g.frames(3)
+        t.contains(g.log, "The game's movement input still reaches Unreal's movement", "clock " .. clock)
+    end
+end)
+
+t.test("an unpause from the controller's input: the camera's view isn't counted as worked out in that frame",
+    function()
+        -- With a lens limit, the field of view the mod sets in that frame (a refresh,
+        -- at any phase) or in the pause (the camera moved again) is only read once the
+        -- camera has worked it out; read before, it would pass for the lens letting it
+        -- through, and every frame's lens value for the game's.
+        for phase = 0, 32 do
+            local g = running({ CameraMethod = "game" }, { cineFovLimit = 95 })
+            local cam = g.c.cineCamera
+            local cine = fake.props(cam)
+            g.frames(30)
+            pauseFromInput(g)
+            if phase < 32 then
+                g.frames(phase)
+            else
+                g.press(F6)
+                g.press(F6)
+            end
+            unpauseFromInput(g)
+            local sets = 0
+            fake.method(cam, "SetFieldOfView", fake.ufunction("SetFieldOfView", 1, function(_, fov)
+                sets = sets + 1
+                cine.FieldOfView = fov
+            end))
+            g.frames(60)
+            local how = phase < 32 and ("phase " .. phase) or "moved in the pause"
+            t.eq(cine.FieldOfView, 95, how .. ": the lens's field of view is shown")
+            t.truthy(sets <= 5, string.format("%s: the mod's field of view isn't set every frame (%d sets)", how, sets))
+            g.press(F6)
+            t.eq(cine.FieldOfView, 85, how .. ": the game's own field of view comes back")
+            noErrors(g)
+        end
+    end)
+
+t.test("a wait that ends while the game is paused: nothing moves until it runs again", function()
+    -- The world's clock last read before the wait went on since, but that tells
+    -- nothing about this frame.
+    local g = running()
+    g.changingArea = true
+    g.frames(10)
+    g.changingArea = false
+    g.frames(30) -- part of the settle, with the game running
+    g.paused = true
+    g.keys.SpaceBar = true
+    g.frames(240) -- the rest of the settle and more, paused
+    t.eq(g.mode(), 1, "no jump while paused")
+    g.paused = false
+    g.frames(2)
+    t.eq(g.mode(), 3, "the jump once the game runs again")
+    t.absent(g.log, "world's clock", "the clock follows the pauses")
+    noErrors(g)
+end)
+
+t.test("if the world's clock doesn't follow the pauses, IsGamePaused tells them", function()
+    for _, clock in ipairs({ "stuck", "running" }) do
+        local g = start()
+        g.clock = clock -- from the first time the mod reads it
+        g.loadSave()
+        g.frames(SETTLE_FRAMES)
+        -- Hopping on a moving platform, with a few pauses.
+        g.baseVelocity = { X = 200, Y = 0, Z = 0 }
+        g.frames(3)
+        local startX, moved = g.position.X, 0
+        g.keys.SpaceBar = true
+        for i = 1, 400 do
+            if i % 100 == 50 then
+                g.paused = true
+                g.frames(6)
+                g.paused = false
+            end
+            g.frame()
+            moved = moved + 1
+        end
+        g.keys.SpaceBar = false
+        t.contains(g.log, string.format("The world's clock (GetTimeSeconds) %s, so pauses are told from "
+            .. "IsGamePaused alone", clock == "stuck" and "stood still while the game ran"
+            or "went on while the game was paused"), clock .. ": logged")
+        t.eq(count(g.log, "so pauses are told from IsGamePaused alone"), 1, clock .. ": once, and not asked again")
+        local drift = g.position.X - startX - 200 * moved / 60
+        t.near(drift, 0, 5, string.format("%s: the character stays on its spot on the platform", clock))
+        t.truthy(g.landings >= 4, clock .. ": hopped")
+        noErrors(g)
+    end
 end)
 
 t.test("a pause after root motion doesn't bring back the movement's state from before it", function()
@@ -1839,7 +2038,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.2.5 diagnostics")
+    t.contains(g.log, "HL1Movement 0.2.6 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")

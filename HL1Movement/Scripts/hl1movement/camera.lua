@@ -78,7 +78,7 @@ local st = {
     hasStyleField = false,
     moved = nil, -- the game camera while it is at the eyes (see moveCamera)
     moveLines = 0,
-    updates = 0, -- views the camera manager has worked out: one at the end of each frame not paused
+    updates = 0, -- views the camera manager has worked out: one at the end of each frame Unreal didn't pause
     lastUnpaused = false, -- the last frame wasn't paused
     waiting = nil, -- why first person isn't on yet although it may be: "camera" or "blend"
     blendWaited = nil, -- seconds (not paused) the camera manager has been seen blending to the character
@@ -833,9 +833,10 @@ local function startOrGiveUp(method, pawn, pcm, cam, cfg)
 end
 
 --- Turns first person on, or keeps it on. Called every frame while it should be on.
---- cam is the camera component the engine shows (nil if none); paused: whether the
---- game is paused (the camera isn't updated then). Returns true if first person
---- started in this call (its refreshes start then, see camera.nextRefresh).
+--- cam is the camera component the engine shows (nil if none); paused: whether
+--- Unreal runs this frame as paused (see main.lua's isPaused; the camera isn't
+--- updated then). Returns true if first person started in this call (its refreshes
+--- start then, see camera.nextRefresh).
 function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
     -- The camera manager works the view out at the end of each frame that isn't
     -- paused: counted, to tell when what the mod set has been taken in.

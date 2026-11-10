@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.5"
+local VERSION = "0.2.6"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -200,13 +200,56 @@ local function describePawn(pawn)
     return className, true, "supported"
 end
 
+-- The world's clock as last read (see isPaused).
+local worldClock = {
+    time = nil, -- GetTimeSeconds
+    frame = nil, -- the frame it was read on
+    paused = nil, -- what IsGamePaused said then
+    off = false, -- the clock doesn't follow the pauses, so it isn't asked again
+}
+
+-- Whether Unreal runs this frame as paused: then nothing moves, and the camera
+-- manager doesn't work the view out at the end of the frame. Unreal decides that
+-- once, at the start of the world's tick, and only then moves the world's clock on
+-- (GetTimeSeconds). The game can pause or unpause later in the frame, before this
+-- hook, from the controller's own input, and IsGamePaused already says so then.
+-- So when IsGamePaused changed since the last frame, the clock tells. It can't
+-- disagree with IsGamePaused otherwise; if it does, it doesn't follow the pauses
+-- (or doesn't read), and IsGamePaused tells from then on. IsGamePaused also tells
+-- when the clock wasn't read on the last frame.
 local function isPaused(pc)
     local statics = ue.find("/Script/Engine.Default__GameplayStatics")
     if not statics then
         return false
     end
     local ok, paused = ue.call(statics, "IsGamePaused", pc)
-    return ok and paused == true
+    if not ok then
+        return false
+    end
+    paused = paused == true
+    if worldClock.off then
+        return paused
+    end
+    local okTime, time = ue.call(statics, "GetTimeSeconds", pc)
+    if not okTime or type(time) ~= "number" then
+        worldClock.off = true
+        log.info("Can't read the world's clock (GetTimeSeconds: %s), so pauses are told from IsGamePaused alone",
+            tostring(time))
+        return paused
+    end
+    local last, lastFrame, lastPaused = worldClock.time, worldClock.frame, worldClock.paused
+    worldClock.time, worldClock.frame, worldClock.paused = time, mod.frames, paused
+    local stopped = time == last
+    if last == nil or lastFrame ~= mod.frames - 1 or stopped == paused then
+        return paused
+    elseif paused ~= lastPaused then
+        -- The game paused or unpaused since this frame started: Unreal runs it as before.
+        return stopped
+    end
+    worldClock.off = true
+    log.info("The world's clock (GetTimeSeconds) %s, so pauses are told from IsGamePaused alone",
+        stopped and "stood still while the game ran" or "went on while the game was paused")
+    return paused
 end
 
 -- Why first person can't be on right now: a short key and the text for the log.
@@ -368,8 +411,12 @@ local function statusLine()
         parts[#parts + 1] = string.format("%d hops, top speed %.0f u/s (%.0f on the ground)", moved.hops,
             moved.top / u, moved.topGround / u)
         if moved.airHops > 0 then
-            parts[#parts + 1] = string.format("per jump %+.0f u/s in the air while the view turned %.0f deg",
-                moved.airGain / moved.airHops / u, moved.airTurn / moved.airHops)
+            local gain = moved.airGain / moved.airHops / u
+            if math.abs(gain) <= 0.5 then
+                gain = 0 -- not "-0", as in the hop lines
+            end
+            parts[#parts + 1] = string.format("per jump %+.0f u/s in the air while the view turned %.0f deg", gain,
+                moved.airTurn / moved.airHops)
         end
         if moved.landings > 0 then
             parts[#parts + 1] = string.format("at landing the game took %.0f u/s on average%s",

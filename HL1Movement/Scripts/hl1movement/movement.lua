@@ -530,12 +530,18 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
 
     -- What carries over from the last frame only does so if the mod moved the
     -- character on the frame just before.
+    local afterMove = st.lastStepFrame == frame - 1 and st.written ~= nil
     if st.lastStepFrame ~= frame - 1 then
         st.sim = {}
         st.written = nil
         st.lastMode = nil
         st.hop = nil
-    elseif st.written then
+    elseif st.written and st.written.afterMove then
+        -- Only if the mod moved the character on the frame before that one too: the
+        -- first frame after a pause, or after a frame the mod left alone, may have
+        -- been one Unreal ran as paused although the game had just unpaused (if
+        -- main.lua couldn't tell), so its movement didn't run and the acceleration
+        -- read now is an old one.
         checkInputLeak(cmc)
     end
     st.lastStepFrame = frame
@@ -667,9 +673,10 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         stats.topGround = st.lastSpeed
     end
 
-    -- Add back what Unreal's braking will take this frame (none in the air, and
-    -- none on the ground once the movement curve is out).
-    local wx, wy = nx, ny
+    -- Add back what Unreal's braking will take this frame (it brakes the character
+    -- whenever it gets no movement input, and the mod took that input away). Unreal
+    -- brakes the velocity it moves with: after the mod's jump, with the platform's.
+    local wx, wy = nx + bx, ny + by
     local ok, decel = ue.call(cmc, "GetMaxBrakingDeceleration")
     if ok and type(decel) == "number" and decel > 0 then
         local speed = horizontal(wx, wy)
@@ -678,7 +685,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             wx, wy = wx * scale, wy * scale
         end
     end
-    cmc.Velocity = { X = wx + bx, Y = wy + by, Z = nz + bz }
+    cmc.Velocity = { X = wx, Y = wy, Z = nz + bz }
     -- The velocity of the platform that carries the character in Unreal's update
     -- (none after the mod's jump, unless bStayBasedInAir), read while it still
     -- stands on it: that update starts by moving it along with the platform, and
@@ -690,14 +697,15 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     -- What the game should hand back next frame, once its braking took the extra,
     -- and where the character was before this frame's move.
     st.written = { x = nx + bx, y = ny + by, mode = jumped and FALLING or mode, jumped = jumped, at = at,
-        dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0 }
+        dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0, afterMove = afterMove }
 end
 
---- A paused frame. Unreal doesn't move the character while the game is paused, so a
---- landing the mod hasn't handled yet is handled after the pause, and a hop goes on.
---- But on the frame the game pauses from the controller's own input, the character's
---- update still runs once, with the game's input: so what the mod wrote before isn't
---- checked after the pause (no speed cut, no input leak).
+--- A frame Unreal runs as paused (see main.lua's isPaused). Unreal doesn't move the
+--- character then, so a landing the mod hasn't handled yet is handled after the
+--- pause, and a hop goes on. What the mod wrote before isn't checked after the pause
+--- (no speed cut, no input leak): if main.lua can't tell such frames, it goes by
+--- IsGamePaused, and on the frame the game pauses from the controller's own input
+--- the character's update still runs once, with the game's input.
 function movement.hold(frame)
     if st.lastStepFrame == frame - 1 then
         st.lastStepFrame = frame

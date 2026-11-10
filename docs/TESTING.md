@@ -59,6 +59,9 @@ Write down what happens for each one. "Nothing happened" is useful too.
      person come back afterwards?
    - Go to another area: does first person come back a few seconds after it
      loads?
+   - Open the game's menu while running, and again while hopping, then close
+     it: once with Esc and once with the menu's own button to go back to the
+     game. Does the movement go on as before each time?
    - If you can aim or sneak, try that too.
 8. **Things that move you.** If you find a moving platform, a grapple point, a
    rope or anything else that throws or pulls the character, try it. On a moving

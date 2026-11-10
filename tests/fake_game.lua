@@ -485,7 +485,13 @@ function fake.newGame(options)
         changingArea = false,
         inputLocked = false,
         moveIgnored = false,
-        paused = false,
+        paused = false, -- what IsGamePaused says in the controller's tick (where the mod runs)
+        -- Whether Unreal runs the next frame as paused, if not as g.paused says: it
+        -- decides that at the start of the world's tick, and the game can pause or
+        -- unpause later in the frame, from the controller's input (see g.frame).
+        worldPaused = nil,
+        worldTime = 0, -- UWorld::TimeSeconds: goes on only in frames Unreal doesn't run as paused
+        clock = nil, -- GetTimeSeconds when it misbehaves: "stuck", "running" (real time) or "error"
         rootMotion = false,
         limiterTicking = true,
         jumpCount = 0,
@@ -569,6 +575,16 @@ function fake.newGame(options)
         path = "/Script/Engine.Default__GameplayStatics", methods = {
             IsGamePaused = ufunction("IsGamePaused", 1, function()
                 return g.paused
+            end),
+            GetTimeSeconds = ufunction("GetTimeSeconds", 1, function()
+                if g.clock == "error" then
+                    error("GetTimeSeconds: no such function", 2)
+                elseif g.clock == "stuck" then
+                    return 0
+                elseif g.clock == "running" then
+                    return g.time
+                end
+                return g.worldTime
             end),
         } })
     local GAME_KEYS = { JumpAction = { "SpaceBar", "Gamepad_FaceButton_Bottom" }, ForwardMovementAction = { "W" },
@@ -1309,9 +1325,18 @@ function fake.newGame(options)
     end
 
     --- One frame: input, the controller's tick (where the mod runs), the character's
-    --- movement and the camera.
+    --- movement and the camera. Unreal decides at the start of the world's tick
+    --- whether the frame runs paused (g.worldPaused, or else g.paused): then only the
+    --- controller ticks, the world's time stays, and nothing moves.
     function g.frame(dt)
         dt = dt or 1 / 60
+        local worldPaused = g.worldPaused
+        if worldPaused == nil then
+            worldPaused = g.paused
+        end
+        if not worldPaused then
+            g.worldTime = g.worldTime + dt
+        end
         local function keyDirection()
             local f = (g.keys.W and 1 or 0) - (g.keys.S and 1 or 0)
             local r = (g.keys.D and 1 or 0) - (g.keys.A and 1 or 0)
@@ -1362,7 +1387,7 @@ function fake.newGame(options)
             g.pending.X = g.pending.X + x
             g.pending.Y = g.pending.Y + y
         end
-        if not g.paused then
+        if not worldPaused then
             g.moveTick(dt)
             -- The character ticks after its movement component.
             local characterTick = g.hooks[g.characterTickPath]
