@@ -419,6 +419,12 @@ local function statusLine()
             parts[#parts + 1] = string.format("per jump %+.0f u/s in the air while the view turned %.0f deg", gain,
                 moved.airTurn / moved.airHops)
         end
+        if moved.slopeLandings + moved.slides + moved.launches > 0 then
+            local slopeGain = moved.slopeGain / u
+            parts[#parts + 1] = string.format("slopes: %d landings on one (%+.0f u/s in all), %d slides up one, "
+                .. "%d flights off one", moved.slopeLandings, math.abs(slopeGain) <= 0.5 and 0 or slopeGain,
+                moved.slides, moved.launches)
+        end
         if moved.landings > 0 then
             parts[#parts + 1] = string.format("at landing the game took %.0f u/s on average%s",
                 moved.landingLoss / moved.landings / u, cfg.KeepSpeed and " (before KeepSpeed)" or "")

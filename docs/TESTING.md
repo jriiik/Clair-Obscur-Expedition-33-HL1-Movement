@@ -59,6 +59,9 @@ Write down what happens for each one. "Nothing happened" is useful too.
      about 10.
    - If hopping looks worse than before in third person, set
      `BodyFollowsHop = false` in `config.lua`, press **F7**, and compare.
+   - For a little more speed per hop, try `PhysicsRate = 144` (Half-Life at a
+     higher frame rate) or `AirSpeedCap = 35` (not Half-Life's) in `config.lua`,
+     press **F7**, and compare the hop lines. Set them back to 100 and 30 after.
 6. **Keys.** Does F6 switch between first and third person? Does F5 turn the mod
    off and back on?
 7. **The game's own systems.**
@@ -81,7 +84,26 @@ Write down what happens for each one. "Nothing happened" is useful too.
    report then shows the platform's speed as the game reports it). If you fell
    behind, press **F5** and try the game's own jump there: does it fall behind
    too? Press **F5** again afterwards.
-9. **Report.** Press **F8**, then quit the game from its menu.
+9. **Slopes.** Find a long hill or ramp (a street, a path, a slope in a field).
+   Press **F8** once standing on flat ground and once standing on the slope.
+   - Hold Space and hop down the hill: do you get faster with each hop? Then hop
+     up it: do you slow down? Both are as in Half-Life (on a 10 degree hill, about
+     65 u/s gained per hop going down and 30 lost going up).
+   - Get fast (hop down a hill, or air strafe for a while), then run or hop
+     straight at a slope going up. Do you slide up it and fly off the top? The log
+     then has lines starting with `Slope:`, such as `ran into a 20 degree slope`
+     and `flew off the slope`.
+   - While sliding up a slope, tap Space once: you should keep sliding without a
+     jump (Half-Life doesn't jump in the air).
+   - Slide up a rough slope (rocks, uneven ground) and count how often you fly
+     off and land again on the way up.
+   - After a long flight or fast hops down a hill, does the game kill you, put you
+     back somewhere, or make your character fall over limply?
+   - Set `SlopeBoosts = false` in `config.lua` and press **F7**: running fast at
+     the same slope should just walk up it. Then also set `SlopeLandings = false`:
+     hopping up and down the hill should keep your speed. Which feels better? Set
+     both back to `true` and press **F7**.
+10. **Report.** Press **F8**, then quit the game from its menu.
 
 ## What to send back
 

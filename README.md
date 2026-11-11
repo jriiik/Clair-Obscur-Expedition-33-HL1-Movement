@@ -22,6 +22,10 @@ by holding the jump key.
 - **Bunny hopping**: hold the jump key and you jump again the moment you land,
   without losing speed. Steer in the air (air strafing) to build up speed. In
   third person (F6), your character turns in the air to face where it is going.
+- **Slopes as in Half-Life**: landing on a slope turns part of the fall into speed
+  along it, so hopping down a hill speeds you up and hopping up one slows you
+  down. Run or land fast against an upward slope and it lifts you off the
+  ground: you slide up it and fly off the top (slope boosting).
 - It **steps aside on its own** in battles and on the world map. When the game
   shows another camera (dialogue, cutscenes, sneaking, aiming), first person
   switches off. When the game locks your movement or moves the character itself
@@ -94,7 +98,8 @@ keys only work while you hold the **Fn** key.
    the same direction (left with A, right with D). This is air strafing: it
    gains speed.
 3. Switch between A and D as you turn left and right. The faster you turn, the
-   more speed you gain, up to a point.
+   more speed you gain, up to a point. Switch keys right when the mouse changes
+   direction: switching late loses much of the gain.
 
 Without air strafing you keep the speed you had, but don't gain any.
 
@@ -117,8 +122,10 @@ Each setting has a short explanation next to it. The most useful ones:
 | `JumpHeight` | `45` | How high a jump goes at `Gravity` 800; as in Half-Life, less gravity jumps higher |
 | `UnitScale` | `2.5` | Centimetres per Half-Life unit; higher makes everything faster and higher |
 | `BhopCap` | `0` | `1.7` copies later Half-Life updates, which slow you down above 1.7 × max speed |
-| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`, up to `250`; `0` updates once per frame |
+| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`, up to `250`; `0` updates once per frame. `144` to `250` gain a little more when air strafing (about 15 to 28 %), as Half-Life does at those frame rates |
 | `KeepSpeed` | `true` | Undoes the game cutting your speed (its own speed limit); `false` lets the game's cuts stand |
+| `SlopeLandings` | `true` | Landing on a slope turns part of the fall into speed along it: faster downhill, slower uphill, as in Half-Life; `false` keeps your speed at landings, as the game does |
+| `SlopeBoosts` | `true` | Running or landing fast against an upward slope lifts you off the ground: you slide up it without friction and fly off the top; `false` turns this off |
 | `ForwardKeys` and so on | `{ "W" }` … | The movement keys; add `"Up"`, `"Down"`, `"Left"`, `"Right"` for the arrow keys |
 
 New hotkeys only take effect after restarting the game.
@@ -202,6 +209,9 @@ This version hasn't been tested in the game yet, so reports help a lot.
 
 - Not tested in the game yet (see the top).
 - No crouch jumping, ducking, swimming or ladders the way Half-Life does them.
+- No surfing: a slope too steep to walk on stops you like a wall, where Half-Life
+  lets you slide along it. Slopes otherwise follow Half-Life's rules closely but
+  not exactly: the game keeps you on the ground over small bumps.
 - Half-Life's extra friction near ledge edges isn't copied.
 - While the mod moves you, the game's automatic ledge climbing may not trigger.
   Press F5 to climb, then F5 again.
@@ -235,7 +245,8 @@ and before it moves your character:
 - It takes the movement input away from the game and works out the new velocity
   with Half-Life's rules (`hl1movement/physics.lua`), in steps of a hundredth of
   a second, as Half-Life does. It then hands that velocity to Unreal's character
-  movement, which still handles walls, stairs, slopes and gravity. Unreal's own
+  movement, which still handles walls, stairs, slopes and gravity; on slopes the
+  mod changes the velocity as Half-Life would (landings, slides). Unreal's own
   acceleration and braking are switched off or cancelled out, and the game's
   speed limiter is paused (`hl1movement/movement.lua`).
 - It checks which camera the game shows (`hl1movement/view.lua`). While that is

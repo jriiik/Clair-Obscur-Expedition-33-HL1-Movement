@@ -32,7 +32,9 @@ return {
     MaxSpeed = 320,         -- sv_maxspeed
     Accelerate = 10,        -- sv_accelerate
     AirAccelerate = 10,     -- sv_airaccelerate
-    AirSpeedCap = 30,       -- the air strafing limit; keep it low, it is what makes air strafing work
+    AirSpeedCap = 30,       -- the air strafing limit; keep it low, it is what makes air strafing work.
+                            -- 35 or 40 gain about 20 or 40 % more speed per hop (strafing with two or
+                            -- three turns a hop), but aren't Half-Life's
     Friction = 4,           -- sv_friction
     StopSpeed = 100,        -- sv_stopspeed
     Gravity = 800,          -- sv_gravity; as in Half-Life, less gravity also means higher jumps
@@ -42,8 +44,14 @@ return {
     MaxVelocity = 2000,     -- sv_maxvelocity
     UnitScale = 2.5,        -- centimetres per Half-Life unit; higher makes everything faster and jumps higher
     PhysicsRate = 100,      -- Half-Life updates per second, whatever the frame rate (Half-Life at fps_max 100);
-                            -- up to 250; 0: one update per frame
+                            -- up to 250; 0: one update per frame. 144, 200 or 250 gain about 15, 24 or 28 %
+                            -- more speed per hop when air strafing, as Half-Life does at that frame rate
     KeepSpeed = true,       -- undo the game cutting your speed (its speed limit), so hops keep their speed
+    SlopeLandings = true,   -- Half-Life's landings on slopes: part of the fall turns into speed along the slope,
+                            -- so hopping down a 10 degree hill gains about 65 u/s a hop, and up it loses
+                            -- about 30; false: landings keep your speed, as the game's do
+    SlopeBoosts = true,     -- slope boosting: running or landing fast against an upward slope lifts you off
+                            -- the ground, you slide up it without friction and fly off the top; false: never
 
     -- Input, as Unreal key names: W, A, S, D, Up, Down, Left, Right, SpaceBar,
     -- LeftShift, MouseScrollDown, Gamepad_FaceButton_Bottom (the A button) ...

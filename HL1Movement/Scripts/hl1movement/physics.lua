@@ -139,6 +139,20 @@ function physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jump, p, dt)
     return vx, vy, vz, jumped
 end
 
+--- Half-Life's response to running into a surface, with an overbounce of 1: the
+--- part of the velocity going into the surface is taken out, so what is left runs
+--- along it. (nx, ny, nz) is the surface's unit normal. A velocity that doesn't go
+--- into the surface is returned as it is. Landing on a slope this turns some of the
+--- fall into speed down the slope; running into an upward slope it turns some of
+--- the speed into rising.
+function physics.clip(vx, vy, vz, nx, ny, nz)
+    local into = vx * nx + vy * ny + vz * nz
+    if into >= 0 then
+        return vx, vy, vz
+    end
+    return vx - into * nx, vy - into * ny, vz - into * nz
+end
+
 --- The shortest turn in degrees from one yaw to another, from -180 to 180.
 function physics.turn(fromDegrees, toDegrees)
     return (toDegrees - fromDegrees + 180) % 360 - 180

@@ -53,6 +53,18 @@ local function values(obj, list)
     return table.concat(parts, ", ")
 end
 
+-- A surface's normal, with 3 decimals and how far it leans from straight up.
+local function normal(value)
+    local x, y, z = ue.number(value, "X"), ue.number(value, "Y"), ue.number(value, "Z")
+    if not (x and y and z) then
+        return show(value)
+    end
+    local length = math.sqrt(x * x + y * y + z * z)
+    local angle = length > 1e-6 and string.format(", %.1f deg", math.deg(math.acos(math.max(-1, math.min(1,
+        z / length))))) or ""
+    return string.format("(X=%.3f Y=%.3f Z=%.3f%s)", x, y, z, angle)
+end
+
 -- The class and the classes it is built on, if UE4SS can tell.
 local function classChain(obj)
     local names = { tostring(ue.className(obj)) }
@@ -156,6 +168,11 @@ function diagnostics.report(env)
     line("  since taking over: speed cuts %d (undone %d), MaxWalkSpeed set by the game %d, speed limiter started "
         .. "%d, the game's input reaching Unreal %d, velocity changed at a jump %d", counts.cuts, counts.restores,
         counts.rewrites, counts.wakes, counts.leaks, counts.jumpChanges)
+    line("  slopes (SlopeLandings=%s, SlopeBoosts=%s): landings on one %d, slides up one %d, flights off one %d, "
+        .. "the game's jumps held back while sliding %d, MaxSimulationTimeStep %s s%s", tostring(cfg.SlopeLandings),
+        tostring(cfg.SlopeBoosts), counts.slopeLandings, counts.slides, counts.launches, counts.stoppedJumps,
+        show(moveStatus.maxStep), moveStatus.slopeBroken and "; off: the floor's normal can't be read"
+            or (moveStatus.sliding and "; sliding up a slope now" or ""))
     line("Physics in cm: max speed %.0f, jump speed %.0f, gravity %.0f, air cap %.0f, unit scale %.2f, "
         .. "updates per second %s", P.maxSpeed, P.jumpSpeed, P.gravity, P.airSpeedCap, P.unitScale,
         P.rate > 0 and tostring(P.rate) or "one per frame")
@@ -340,8 +357,20 @@ function diagnostics.report(env)
                     "MaxStepHeight", "bStayBasedInAir", "bMaintainHorizontalGroundVelocity", "MaxSimulationTimeStep",
                     "MaxSimulationIterations", "bRequestMovementSettingsChange", "AllowedGait",
                     "bForceUseNavMeshWalking", "bForcePositionOnNavMesh", "CustomDefaultMovementMode",
-                    "bUseMovementSettingsWhenFlying", "bOrientRotationToMovement", "bUseControllerDesiredRotation" }) do
+                    "bUseMovementSettingsWhenFlying", "bOrientRotationToMovement", "bUseControllerDesiredRotation",
+                    "WalkableFloorAngle", "WalkableFloorZ", "PerchRadiusThreshold", "bUseFlatBaseForFloorChecks",
+                    "LedgeCheckThreshold", "bCanWalkOffLedges" }) do
                     field("Movement", cmc, name)
+                end
+                -- The floor Unreal's walking found, which the slopes read, field by field.
+                local floor = ue.get(cmc, "CurrentFloor")
+                if ue.typeOf(floor) == "UScriptStruct" then
+                    local hit = ue.get(floor, "HitResult")
+                    line("  Movement.CurrentFloor: %s, HitResult.ImpactNormal=%s, HitResult.Normal=%s", values(floor,
+                        { "bBlockingHit", "bWalkableFloor", "bLineTrace", "FloorDist", "LineDist" }),
+                        normal(ue.get(hit, "ImpactNormal")), normal(ue.get(hit, "Normal")))
+                else
+                    line("  Movement.CurrentFloor: not found")
                 end
                 result("Movement", cmc, "GetMaxBrakingDeceleration")
                 result("Movement", cmc, "GetMaxAcceleration")
@@ -376,6 +405,13 @@ function diagnostics.report(env)
             if limiter then
                 result("Speed limiter", limiter, "IsComponentTickEnabled")
             end
+            -- What may react to the long, fast flights slopes make: the game's fall
+            -- detector, and ALS's ragdoll or breakfall on landing.
+            local fallDetector = ue.object(pawn, "BP_FallDetectorComponent")
+            line("  BP_FallDetectorComponent: %s", fallDetector and values(fallDetector, { "EnableKillDetection",
+                "KillDistance", "KillTime" }) or "not found")
+            line("  ALS on landing: %s", values(pawn, { "bRagdollOnLand", "RagdollOnLandVelocity", "bBreakfallOnLand",
+                "BreakfallOnLandVelocity" }))
         end
 
         if pcm then

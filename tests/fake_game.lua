@@ -9,8 +9,9 @@
 -- and using an object after it was destroyed raises an error (in the real game
 -- that would crash).
 -- The fake character movement follows Unreal's closely enough (input acceleration,
--- braking, curve-driven ground values, gravity, landing) to check that the mod's
--- speeds survive it. The camera follows Unreal's rule: the view target's first
+-- braking, curve-driven ground values, gravity, landing, and with g.terrain walking
+-- along slopes, with the floor in CurrentFloor) to check that the mod's speeds
+-- survive it. The camera follows Unreal's rule: the view target's first
 -- active camera component, in the order the components are listed, or the eyes
 -- with the FirstPerson style.
 
@@ -124,6 +125,7 @@ function fake.array(list)
 end
 
 local function structView(s)
+    local views = {}
     return newUserdata({
         __index = function(_, key)
             if key == "type" then
@@ -134,7 +136,13 @@ local function structView(s)
             if key == "__fields" or not s.__fields[key] then
                 error("[handle_unreal_property_value]: Was unable to retrieve property '" .. tostring(key) .. "'", 2)
             end
-            return s[key]
+            local value = s[key]
+            if type(value) == "table" and value.__fields and getmetatable(value) == nil then
+                -- A struct inside a struct reads as a view too, as in UE4SS.
+                views[value] = views[value] or structView(value)
+                return views[value]
+            end
+            return value
         end,
         __newindex = function(_, key, value)
             if s.__locked then
@@ -235,6 +243,9 @@ objectMeta.__index = function(self, key)
         return method
     end
     fake.counts.reads = fake.counts.reads + 1
+    if d.onRead and d.onRead[key] then
+        d.onRead[key]()
+    end
     local getter = d.getters[key]
     if getter then
         return getter(self)
@@ -395,6 +406,12 @@ function fake.breakOnRead(obj, key)
     data[obj].breakOnRead[key] = true
 end
 
+--- Calls fn whenever obj[key] is read, which then reads as usual (to count reads).
+function fake.onRead(obj, key, fn)
+    data[obj].onRead = data[obj].onRead or {}
+    data[obj].onRead[key] = fn
+end
+
 --- Makes writes of obj[key] fail, as a write UE4SS can't do.
 function fake.breakOnWrite(obj, key)
     data[obj].breakOnWrite = data[obj].breakOnWrite or {}
@@ -505,6 +522,7 @@ function fake.newGame(options)
         limiterTicking = true,
         jumpCount = 0,
         gameJumps = 0,
+        stoppedJumps = 0, -- the mod taking back the game's jump press (StopJumping)
         landings = 0,
         landingClamps = 0, -- speed caps at a landing (options.landingListenerClamps)
         inAirResets = 0, -- ALS setting the in-air rotation to the body's as the character left the ground
@@ -728,11 +746,46 @@ function fake.newGame(options)
             end),
         } })
 
+    -- The ground under (x, y): its height and the unit normal of its surface. Flat at
+    -- Z = 0 unless a test sets g.terrain, a function of (x, y) that returns them.
+    function g.groundAt(x, y)
+        if g.terrain then
+            return g.terrain(x, y)
+        end
+        return 0, 0, 0, 1
+    end
+
+    -- The movement component's CurrentFloor: the floor under the character while it
+    -- walks, cleared (zeros) otherwise, as Unreal does. g.contactNormal, if set, gives
+    -- the capsule's contact normal from the surface's (it leans on a step's edge).
+    local function setFloor(cmc, nx, ny, nz)
+        local p = fake.props(cmc)
+        local floor = p.CurrentFloor
+        if not floor then
+            return
+        end
+        floor.bBlockingHit = nz ~= nil
+        floor.bWalkableFloor = nz ~= nil and nz >= p.WalkableFloorZ
+        floor.bLineTrace = false
+        floor.FloorDist = nz and 2.15 or 0
+        local surface, contact = floor.HitResult.ImpactNormal, floor.HitResult.Normal
+        surface.X, surface.Y, surface.Z = nx or 0, ny or 0, nz or 0
+        if nz and g.contactNormal then
+            contact.X, contact.Y, contact.Z = g.contactNormal(nx, ny, nz)
+        else
+            contact.X, contact.Y, contact.Z = nx or 0, ny or 0, nz or 0
+        end
+    end
+    g.setFloor = setFloor
+
     -- A movement mode change, as SetMovementMode makes it (the game's own jump too).
     local function changeMode(cmc, mode, pawn)
         local p = fake.props(cmc)
         local was = p.MovementMode
         p.MovementMode = mode
+        if mode ~= 1 then
+            setFloor(cmc, nil) -- Unreal keeps CurrentFloor only while walking
+        end
         -- ALS (OnMovementModeChanged, then OnMovementStateChanged): entering the air,
         -- the in-air rotation starts as the character's own rotation.
         local inAir = pawn and fake.props(pawn).InAirRotation
@@ -989,6 +1042,21 @@ function fake.newGame(options)
                 JumpZVelocity = 450,
                 AirControl = 0.35,
                 MaxStepHeight = 45,
+                MaxSimulationTimeStep = 0.05,
+                -- Unreal's floor settings (its defaults), and the floor its walking found
+                -- (cleared in any other movement mode).
+                WalkableFloorAngle = 44.765,
+                WalkableFloorZ = 0.71,
+                PerchRadiusThreshold = 0,
+                bUseFlatBaseForFloorChecks = false,
+                LedgeCheckThreshold = 4,
+                bCanWalkOffLedges = true,
+                CurrentFloor = fake.struct({ bBlockingHit = true, bWalkableFloor = true, bLineTrace = false,
+                    FloorDist = 2.15, LineDist = 0, HitResult = fake.struct({
+                        -- (options.floorNormalUnreadable: as if UE4SS couldn't find the
+                        -- vector's fields, which FVector_NetQuantizeNormal inherits.)
+                        ImpactNormal = options.floorNormalUnreadable and fake.struct({}) or fake.vector(0, 0, 1),
+                        Normal = fake.vector(0, 0, 1) }) }),
                 bStayBasedInAir = options.stayBasedInAir == true,
                 bRequestMovementSettingsChange = 0, -- a uint8 in ALS
                 CurrentMovementSettings = movementSettings,
@@ -1047,10 +1115,21 @@ function fake.newGame(options)
             fake.breakOnRead(c.cmc, "Velocity")
         end
 
+        -- The game's fall detector, which "kills" the character after a fall that went too
+        -- far or lasted too long (its values here are made up).
+        c.fallDetector = fake.object({ className = "BP_FallDetectorComponent_C", world = world,
+            chain = { "BP_FallDetectorComponent_C", "ActorComponent", "Object" },
+            props = { EnableKillDetection = true, KillDistance = 3000, KillTime = 4 } })
+
         c.pawn = fake.object({ className = "BP_jRPG_Character_World_C",
             name = "BP_jRPG_Character_World_C_" .. nextAddress, world = world,
             chain = { "BP_jRPG_Character_World_C", "ALS_CharacterBP_C", "ALSCharacter", "ALSBaseCharacter",
                 "Character", "Pawn", "Actor", "Object" },
+            -- Unreal's Jump sets bPressedJump during the game's input; the movement update
+            -- jumps then (options.noPressedJump: UE4SS can't read it).
+            getters = { bPressedJump = not options.noPressedJump and function()
+                return g.pressedJump == true
+            end or nil },
             props = {
                 BaseEyeHeight = 64,
                 JumpMaxHoldTime = 0.2,
@@ -1076,6 +1155,12 @@ function fake.newGame(options)
                 BP_VelocityControllerComponent = not options.noLimiterProperty and c.limiter or nil,
                 Controller = g.pc,
                 IsAttachedToMovingPlatform = false, -- the game's own flag (it scales cloth then)
+                BP_FallDetectorComponent = c.fallDetector,
+                -- ALS's reactions to a hard landing (ALS-Community's defaults).
+                bRagdollOnLand = false,
+                RagdollOnLandVelocity = 1000,
+                bBreakfallOnLand = true,
+                BreakfallOnLandVelocity = 700,
             },
             methods = {
                 ConsumeMovementInputVector = ufunction("ConsumeMovementInputVector", 0, function()
@@ -1091,6 +1176,10 @@ function fake.newGame(options)
                 end),
                 IsPlayingRootMotion = ufunction("IsPlayingRootMotion", 0, function()
                     return g.rootMotion
+                end),
+                StopJumping = ufunction("StopJumping", 0, function()
+                    g.pressedJump = false
+                    g.stoppedJumps = g.stoppedJumps + 1
                 end),
                 K2_GetActorLocation = ufunction("K2_GetActorLocation", 0, function()
                     return copyVector(g.position)
@@ -1294,7 +1383,25 @@ function fake.newGame(options)
             -- on, a step too high): Unreal works the velocity out from the distance moved.
             v.X, v.Y = v.X * share, v.Y * share
         end
-        if mode == 3 and pos.Z <= 0 then
+        local ground, gnx, gny, gnz = g.groundAt(pos.X, pos.Y)
+        if walking and g.terrain then
+            -- (Without a terrain the fake's ground is wherever the character walks: a test
+            -- may put a platform high above Z = 0.)
+            if ground >= pos.Z - (p.MaxStepHeight + 2.4) then
+                -- Unreal walks along the floor (up and down slopes and steps), keeping the
+                -- horizontal velocity (bMaintainHorizontalGroundVelocity).
+                pos.Z = ground
+                if mode == 1 then
+                    setFloor(g.cmc, gnx, gny, gnz)
+                else
+                    setFloor(g.cmc, nil) -- nav-mesh walking doesn't look for a floor
+                end
+            else
+                -- No floor within reach: walking off a ledge.
+                changeMode(g.cmc, 3, g.pawn)
+            end
+        end
+        if mode == 3 and pos.Z <= ground then
             if options.landingListenerClamps then
                 -- A listener of the landing's mode change (the game's speed limiter may
                 -- be one) caps the speed there, and the rest of the frame is walked at
@@ -1302,7 +1409,8 @@ function fake.newGame(options)
                 local cap = g.cmc:GetMaxSpeed()
                 local s = math.sqrt(v.X * v.X + v.Y * v.Y)
                 if s > cap then
-                    local fell = startZ > pos.Z and startZ / (startZ - pos.Z) or 1 -- the share before touchdown
+                    -- the share before touchdown
+                    local fell = startZ > pos.Z and (startZ - ground) / (startZ - pos.Z) or 1
                     local r = cap / s
                     -- (v already has a shortened move's share in it.)
                     pos.X = pos.X - v.X * dt * (1 - fell) * (1 - r)
@@ -1311,7 +1419,8 @@ function fake.newGame(options)
                     g.landingClamps = g.landingClamps + 1
                 end
             end
-            pos.Z, v.Z = 0, 0
+            pos.Z, v.Z = ground, 0
+            setFloor(g.cmc, gnx, gny, gnz)
             p.MovementMode = 1
             g.jumpCount = 0
             g.landings = g.landings + 1

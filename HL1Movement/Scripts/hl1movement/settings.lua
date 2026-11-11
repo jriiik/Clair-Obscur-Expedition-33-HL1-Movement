@@ -26,6 +26,8 @@ settings.DEFAULTS = {
     AutoHop = true,
     PhysicsRate = 100,
     KeepSpeed = true,
+    SlopeLandings = true,
+    SlopeBoosts = true,
     MaxSpeed = 320,
     InputSpeed = 400,
     Accelerate = 10,
@@ -95,6 +97,8 @@ local RULES = {
     -- At most 25 updates run in a frame, and a frame counts as 0.1 s at most.
     PhysicsRate = number(0, 250),
     KeepSpeed = BOOLEAN,
+    SlopeLandings = BOOLEAN,
+    SlopeBoosts = BOOLEAN,
     MaxSpeed = number(1, 5000),
     InputSpeed = number(1, 10000),
     Accelerate = number(0, 1000),
@@ -281,6 +285,13 @@ function settings.physics(cfg)
         jumpSpeed = physics.jumpSpeed(HALF_LIFE_GRAVITY * s, cfg.JumpHeight * s),
         bhopCap = cfg.BhopCap,
         maxVelocity = cfg.MaxVelocity * s,
+        -- Half-Life counts a player rising faster than 180 u/s as in the air, even on
+        -- the ground: it is what lets slopes launch you.
+        airborneSpeed = 180 * s,
+        -- A slide up a slope flies off where the slope falls away under it, if it would
+        -- rise this far above the new floor. Half-Life's ground layer is 2 units; on
+        -- bumpy slopes that made strings of tiny launches and landings.
+        leaveHeight = 8 * s,
         rate = cfg.PhysicsRate, -- updates per second; 0: one per frame
     }
 end
