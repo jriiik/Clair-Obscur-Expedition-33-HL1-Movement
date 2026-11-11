@@ -278,6 +278,9 @@ objectMeta.__newindex = function(self, key, value)
         return
     end
     d.writes[key] = (d.writes[key] or 0) + 1
+    if d.breakOnWrite and d.breakOnWrite[key] then
+        error("writing " .. key .. " failed", 2)
+    end
     if d.bytes[key] then
         value = toByte(value)
     end
@@ -392,6 +395,12 @@ function fake.breakOnRead(obj, key)
     data[obj].breakOnRead[key] = true
 end
 
+--- Makes writes of obj[key] fail, as a write UE4SS can't do.
+function fake.breakOnWrite(obj, key)
+    data[obj].breakOnWrite = data[obj].breakOnWrite or {}
+    data[obj].breakOnWrite[key] = true
+end
+
 --- Replaces one of the object's game functions, for example to make it fail.
 function fake.method(obj, name, fn)
     data[obj].methods[name] = fn
@@ -498,6 +507,10 @@ function fake.newGame(options)
         gameJumps = 0,
         landings = 0,
         landingClamps = 0, -- speed caps at a landing (options.landingListenerClamps)
+        inAirResets = 0, -- ALS setting the in-air rotation to the body's as the character left the ground
+        -- How fast ALS turns the body on the ground (RInterpTo's speed): the game's curve
+        -- at the mapped speed times 1 to 3 (more while the view turns fast).
+        groundRotationRate = options.groundRotationRate or 10,
         shakeStops = 0,
         attachCalls = 0,
         engineAccelerated = false,
@@ -705,12 +718,28 @@ function fake.newGame(options)
     -- ALS's movement curve, an asset all characters share
     g.curve = fake.object({ className = "CurveVector", name = "C_ALS_Movement_Normal",
         path = "/Game/ALS/Curves/C_ALS_Movement_Normal.C_ALS_Movement_Normal" })
+    -- ALS's grounded turn rate by mapped speed (1 walking, 2 running, 3 sprinting or
+    -- faster, as the mod's speeds are): at 3 the fake's grounded rate.
+    g.rotationCurve = fake.object({ className = "CurveFloat", name = "C_ALS_RotationRate",
+        path = "/Game/ALS/Curves/C_ALS_RotationRate.C_ALS_RotationRate", methods = {
+            GetFloatValue = ufunction("GetFloatValue", 1, function(_, time)
+                assert(type(time) == "number")
+                return g.groundRotationRate * time / 3
+            end),
+        } })
 
     -- A movement mode change, as SetMovementMode makes it (the game's own jump too).
-    local function changeMode(cmc, mode)
+    local function changeMode(cmc, mode, pawn)
         local p = fake.props(cmc)
         local was = p.MovementMode
         p.MovementMode = mode
+        -- ALS (OnMovementModeChanged, then OnMovementStateChanged): entering the air,
+        -- the in-air rotation starts as the character's own rotation.
+        local inAir = pawn and fake.props(pawn).InAirRotation
+        if mode == 3 and was ~= 3 and inAir then
+            inAir.Pitch, inAir.Yaw, inAir.Roll = 0, g.actorYaw or 0, 0
+            g.inAirResets = g.inAirResets + 1
+        end
         -- Leaving a moving platform adds its velocity (while walking, Velocity is
         -- relative to it), unless the character stays based on it in the air.
         local platform = g.baseVelocity
@@ -936,7 +965,7 @@ function fake.newGame(options)
         c.curve = g.curve
 
         local movementSettings = fake.struct({ WalkSpeed = 175, RunSpeed = 375, SprintSpeed = 650,
-            MovementCurve = c.curve, RotationRateCurve = false })
+            MovementCurve = c.curve, RotationRateCurve = g.rotationCurve })
         movementSettings.__locked = options.curveLocked
         c.cmc = fake.object({ className = "ALSCharacterMovementComponent", name = "CharMoveComp", world = world,
             path = string.format("/Game/Levels/Fake.Fake:PersistentLevel.Character_%X.CharMoveComp", nextAddress),
@@ -963,11 +992,14 @@ function fake.newGame(options)
                 bStayBasedInAir = options.stayBasedInAir == true,
                 bRequestMovementSettingsChange = 0, -- a uint8 in ALS
                 CurrentMovementSettings = movementSettings,
+                -- The engine's own ways of turning the character, which ALS leaves off.
+                bOrientRotationToMovement = false,
+                bUseControllerDesiredRotation = false,
             },
             methods = {
                 SetMovementMode = ufunction("SetMovementMode", 2, function(_, mode, custom)
                     assert(math.type(mode) == "integer" and math.type(custom) == "integer")
-                    changeMode(c.cmc, mode)
+                    changeMode(c.cmc, mode, c.pawn)
                 end),
                 GetMaxBrakingDeceleration = ufunction("GetMaxBrakingDeceleration", 0, function()
                     local p = fake.props(c.cmc)
@@ -1026,6 +1058,15 @@ function fake.newGame(options)
                 bIsWorldMapPawn = options.worldMap == true,
                 bFindCameraComponentWhenViewTarget = true,
                 TargetRotation = fake.struct({ Pitch = 0, Yaw = 0, Roll = 0 }),
+                -- ALS's rotation: what the body turns towards in the air, and the
+                -- velocity's direction and speed as its last update saw them.
+                InAirRotation = not options.noInAirRotation and fake.struct({ Pitch = 0, Yaw = 0, Roll = 0 }) or nil,
+                LastVelocityRotation = fake.struct({ Pitch = 0, Yaw = 0, Roll = 0 }),
+                Speed = 0,
+                AimYawRate = 0,
+                RotationMode = 0, -- VelocityDirection, as in E33
+                ViewMode = 0, -- ThirdPerson
+                bUseControllerRotationYaw = false,
                 CharacterMovement = c.cmc,
                 CapsuleComponent = c.capsule,
                 RootComponent = c.capsule,
@@ -1053,6 +1094,9 @@ function fake.newGame(options)
                 end),
                 K2_GetActorLocation = ufunction("K2_GetActorLocation", 0, function()
                     return copyVector(g.position)
+                end),
+                K2_GetActorRotation = ufunction("K2_GetActorRotation", 0, function()
+                    return { Pitch = 0, Yaw = g.actorYaw or 0, Roll = 0 }
                 end),
                 K2_SetActorRotation = ufunction("K2_SetActorRotation", 2, function(_, rotation, teleport)
                     assert(type(rotation) == "table" and type(rotation.Yaw) == "number")
@@ -1173,10 +1217,16 @@ function fake.newGame(options)
             if (mode == 1 or mode == 2) and g.jumpCount < fake.props(g.pawn).JumpMaxCount then
                 -- Unreal's DoJump: the jump speed, then SetMovementMode(Falling).
                 v.Z = math.max(v.Z, p.JumpZVelocity)
-                changeMode(g.cmc, 3)
+                changeMode(g.cmc, 3, g.pawn)
                 mode = 3
                 g.jumpCount = g.jumpCount + 1
                 g.gameJumps = g.gameJumps + 1
+                -- Then OnJumped: ALS's EventOnJumped turns the body in the air towards
+                -- the velocity's direction, if its last update saw some speed.
+                local als = fake.props(g.pawn)
+                if als.InAirRotation then
+                    als.InAirRotation.Yaw = als.Speed > 100 and als.LastVelocityRotation.Yaw or (g.actorYaw or 0)
+                end
             end
         end
         local walking = mode == 1 or mode == 2
@@ -1291,6 +1341,38 @@ function fake.newGame(options)
         end
     end
 
+    -- ALS's rotation, in the character's update after Unreal's movement (its Tick:
+    -- the Blueprint's ReceiveTick, then SetEssentialValues, then UpdateGroundedRotation
+    -- or UpdateInAirRotation), in its VelocityDirection mode. FMath::RInterpTo turns
+    -- the short way round by a share of the difference.
+    local function normalized(yaw)
+        return (yaw + 180) % 360 - 180
+    end
+    local function interpTo(from, to, dt, speed)
+        return normalized(from + normalized(to - from) * math.min(math.max(dt * speed, 0), 1))
+    end
+    function g.alsTick(dt)
+        local p = fake.props(g.pawn)
+        local v = fake.props(g.cmc).Velocity
+        local speed = math.sqrt(v.X * v.X + v.Y * v.Y)
+        p.Speed = speed
+        if speed > 1 then
+            p.LastVelocityRotation.Yaw = math.deg(math.atan(v.Y, v.X))
+        end
+        local yaw = g.actorYaw or 0
+        local mode = fake.props(g.cmc).MovementMode
+        if mode == 3 then
+            local target = p.InAirRotation and p.InAirRotation.Yaw or yaw
+            p.TargetRotation.Yaw = normalized(target)
+            g.actorYaw = interpTo(yaw, target, dt, 5)
+        elseif (mode == 1 or mode == 2) and speed > 150 then
+            local delta = normalized(p.LastVelocityRotation.Yaw - p.TargetRotation.Yaw)
+            local step = 800 * dt
+            p.TargetRotation.Yaw = normalized(p.TargetRotation.Yaw + math.max(-step, math.min(step, delta)))
+            g.actorYaw = interpTo(yaw, p.TargetRotation.Yaw, dt, g.groundRotationRate)
+        end
+    end
+
     -- The camera manager's update at the end of the frame. With g.cameraSpeed set
     -- (cm/s), the camera moves to its new place at that speed, like a slow blend.
     function g.updateCamera(dt)
@@ -1397,6 +1479,7 @@ function fake.newGame(options)
                 g.inHook = false
                 assert(ok, err)
             end
+            g.alsTick(dt) -- in the character's update, after its ReceiveTick
             g.updateCamera(dt) -- Unreal doesn't update the camera while the game is paused
         end
         g.justPressed = {}

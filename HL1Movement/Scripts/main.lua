@@ -50,6 +50,7 @@ end
 local CAMERA_STEP = "the first-person camera"
 local MOVEMENT_STEP = "the Half-Life movement"
 local FACING_STEP = "turning the character to the view"
+local HEADING_STEP = "turning the character to where it heads"
 
 local function newWindow()
     return { frames = 0, time = 0, ticks = 0, cpu = 0, minDt = math.huge, maxDt = 0, turn = 0 }
@@ -541,8 +542,22 @@ local function onFrame(pc, dt)
     local mode = cmc and ue.number(cmc, "MovementMode") or 0
     guard.run(MOVEMENT_STEP, movementStep, pc, pawn, cmc, inBattle, yaw, dt, mode, paused, frameDt)
 
-    if camera.isActive() and cfg.BodyFollowsView and (mode == 1 or mode == 2 or mode == 3) and yaw then
-        guard.run(FACING_STEP, camera.faceView, pawn, yaw)
+    -- Which way the body faces: in first person where you look (and while the mod
+    -- moves the character in the air, ALS's in-air rotation with it); otherwise, in
+    -- the air while the mod moves the character, where it heads.
+    local viewYaw = camera.isActive() and cfg.BodyFollowsView and yaw or nil
+    if viewYaw then
+        if mode == 1 or mode == 2 or mode == 3 then
+            guard.run(FACING_STEP, camera.faceView, pawn, viewYaw)
+            if cfg.BodyFollowsHop and movement.heading(mod.frames) ~= nil then
+                guard.run(HEADING_STEP, movement.faceHeading, pawn, viewYaw)
+            end
+        end
+    elseif cfg.BodyFollowsHop then
+        local target, heading = movement.heading(mod.frames) -- nil unless moved in the air this frame
+        if target then
+            guard.run(HEADING_STEP, movement.faceHeading, pawn, target, heading)
+        end
     end
 
     if mod.reportAt and mod.now >= mod.reportAt then

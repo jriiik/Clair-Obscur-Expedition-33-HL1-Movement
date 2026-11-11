@@ -20,6 +20,7 @@ settings.DEFAULTS = {
     HideBody = true,
     PitchLimit = 89,
     BodyFollowsView = true,
+    BodyFollowsHop = true,
 
     Movement = true,
     AutoHop = true,
@@ -87,6 +88,7 @@ local RULES = {
     HideBody = BOOLEAN,
     PitchLimit = number(10, 89.9),
     BodyFollowsView = BOOLEAN,
+    BodyFollowsHop = BOOLEAN,
 
     Movement = BOOLEAN,
     AutoHop = BOOLEAN,

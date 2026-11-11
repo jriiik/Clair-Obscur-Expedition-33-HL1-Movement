@@ -24,6 +24,7 @@ return {
     HideBody = true,        -- hide your own character so it doesn't block the view
     PitchLimit = 89,        -- how far up and down you can look, in degrees
     BodyFollowsView = true, -- turn the character to face where you look
+    BodyFollowsHop = true,  -- in the air, turn the character towards where it is going (seen in third person)
 
     -- Movement. These are Half-Life 1's default values.
     Movement = true,        -- false: first person with the game's own movement

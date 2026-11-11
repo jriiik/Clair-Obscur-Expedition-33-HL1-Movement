@@ -48,6 +48,17 @@ Write down what happens for each one. "Nothing happened" is useful too.
    table? Hold Space: do you keep hopping? Do you keep your speed between hops?
 5. **Air strafing.** Run, hold Space for about 10 hops, let go of W, hold D and
    turn the mouse slowly and smoothly to the right. Do you get faster?
+   - **In third person.** Press **F6** and do the same, also switching between A
+     and D as you turn left and right. While it hops, does your character turn to
+     face where it is going, instead of flying sideways or backwards? Press **F8**
+     during the hops, then F6 again for first person.
+   - In the log, the hop lines now end with something like
+     `body +2 deg from where it headed`: how far, at the top of that hop, the
+     character was turned away from the way it was going (+ to the right, - to
+     the left). Close to 0 is right. Note it if the numbers are often above
+     about 10.
+   - If hopping looks worse than before in third person, set
+     `BodyFollowsHop = false` in `config.lua`, press **F7**, and compare.
 6. **Keys.** Does F6 switch between first and third person? Does F5 turn the mod
    off and back on?
 7. **The game's own systems.**

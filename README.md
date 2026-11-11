@@ -20,7 +20,8 @@ by holding the jump key.
 - **Half-Life 1 movement**: the same acceleration, friction, gravity and jump
   height as Half-Life, scaled to the game's world.
 - **Bunny hopping**: hold the jump key and you jump again the moment you land,
-  without losing speed. Steer in the air (air strafing) to build up speed.
+  without losing speed. Steer in the air (air strafing) to build up speed. In
+  third person (F6), your character turns in the air to face where it is going.
 - It **steps aside on its own** in battles and on the world map. When the game
   shows another camera (dialogue, cutscenes, sneaking, aiming), first person
   switches off. When the game locks your movement or moves the character itself
@@ -110,6 +111,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `CameraMethod` | `"auto"` | How first person is done: `"engine"` (Unreal's own first-person view), `"game"` (the game's camera moved to the eyes, which keeps its picture settings) or `"auto"` (the first, then the second if it doesn't work) |
 | `Movement` | `true` | `false` keeps the game's own movement |
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
+| `BodyFollowsHop` | `true` | In the air, your character turns to face where it is going (you see it in third person); `false` keeps it facing the way it jumped |
 | `JumpKeys` | `{ "SpaceBar", "Gamepad_FaceButton_Bottom" }` | Add `"MouseScrollDown"` to hop with the mouse wheel |
 | `MaxSpeed`, `Accelerate`, `AirAccelerate`, `Friction`, `Gravity` | Half-Life's values | The same as Half-Life's `sv_` console variables |
 | `JumpHeight` | `45` | How high a jump goes at `Gravity` 800; as in Half-Life, less gravity jumps higher |

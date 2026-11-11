@@ -203,7 +203,13 @@ function diagnostics.report(env)
                 field("Character", pawn, name)
             end
             line("  ALS: %s", values(pawn, { "Gait", "DesiredGait", "RotationMode", "MovementState", "MovementAction",
-                "Stance", "bHasMovementInput", "MovementInputAmount" }))
+                "Stance", "ViewMode", "bHasMovementInput", "MovementInputAmount", "Speed" }))
+            -- Where ALS turns the body (in the air towards InAirRotation), the body's
+            -- rotation, and the engine's own way of turning it, which ALS leaves off.
+            line("  ALS rotation: %s", values(pawn, { "TargetRotation", "InAirRotation", "LastVelocityRotation",
+                "AimYawRate" }))
+            result("Character", pawn, "K2_GetActorRotation")
+            field("Character", pawn, "bUseControllerRotationYaw")
             result("Character", pawn, "CanAddMovementInput")
             result("Character", pawn, "CanJump")
             result("Character", pawn, "IsPlayingRootMotion")
@@ -334,7 +340,7 @@ function diagnostics.report(env)
                     "MaxStepHeight", "bStayBasedInAir", "bMaintainHorizontalGroundVelocity", "MaxSimulationTimeStep",
                     "MaxSimulationIterations", "bRequestMovementSettingsChange", "AllowedGait",
                     "bForceUseNavMeshWalking", "bForcePositionOnNavMesh", "CustomDefaultMovementMode",
-                    "bUseMovementSettingsWhenFlying" }) do
+                    "bUseMovementSettingsWhenFlying", "bOrientRotationToMovement", "bUseControllerDesiredRotation" }) do
                     field("Movement", cmc, name)
                 end
                 result("Movement", cmc, "GetMaxBrakingDeceleration")
@@ -349,6 +355,19 @@ function diagnostics.report(env)
                     for _, name in ipairs({ "WalkSpeed", "RunSpeed", "SprintSpeed", "MovementCurve" }) do
                         line("  Movement.CurrentMovementSettings.%s = %s", name, show(ue.get(movementSettings, name)))
                     end
+                    -- How fast ALS turns the body on the ground: this curve at the mapped
+                    -- speed (1 walking, 2 running, 3 sprinting or faster), times 1 to 3 as
+                    -- the view turns faster (AimYawRate).
+                    local rotationCurve = ue.get(movementSettings, "RotationRateCurve")
+                    local rates = {}
+                    if ue.valid(rotationCurve) then
+                        for _, speed in ipairs({ 1.0, 2.0, 3.0 }) do
+                            local ok, rate = ue.call(rotationCurve, "GetFloatValue", speed)
+                            rates[#rates + 1] = ok and show(rate) or "?"
+                        end
+                    end
+                    line("  Movement.CurrentMovementSettings.RotationRateCurve = %s%s", show(rotationCurve),
+                        #rates > 0 and (", at 1, 2, 3: " .. table.concat(rates, ", ")) or "")
                 else
                     line("  Movement.CurrentMovementSettings: not found")
                 end

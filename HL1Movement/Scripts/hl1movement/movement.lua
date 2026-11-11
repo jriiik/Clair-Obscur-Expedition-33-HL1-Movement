@@ -65,6 +65,16 @@ local MIN_CHECKED_SPEED = 50 -- cm/s
 local MAX_CUT_LINES = 5
 local MAX_NOTE_LINES = 3 -- for each other kind of thing the game did
 local MAX_HOP_LINES = 20
+-- In the air the body turns towards where the character heads once it moves at
+-- least this fast (cm/s, apart from a moving platform it left): ALS's own jump
+-- (EventOnJumped) takes the velocity's direction above the same speed.
+local HEADING_SPEED = 100
+-- ALS turns the body in the air this share per second of the way that is left
+-- (UpdateInAirRotation, RInterpTo at 5), so a heading that turns is led by its turn
+-- rate times (1/5 - the frame's length), at most LEAD_LIMIT degrees either way:
+-- then the body keeps up with it.
+local ALS_AIR_TURN = 5
+local LEAD_LIMIT = 45
 
 local overrides = Overrides.new()
 local st = {
@@ -89,6 +99,16 @@ local st = {
     maxSpeed = nil, -- what GetMaxSpeed() said after the mod set MaxWalkSpeed
     gameWalkSpeed = nil, -- the MaxWalkSpeed the game wrote since the last frame, if it did
     stayBasedInAir = false, -- the movement component's bStayBasedInAir
+    airBaseX = 0, -- the moving platform's velocity that leaving it added, while in the air
+    airBaseY = 0,
+    headingFrame = nil, -- the frame of headingYaw (see movement.heading)
+    headingYaw = false, -- where the character heads in the air, in degrees (false: too slow)
+    headingTarget = false, -- headingYaw, led by its turn rate: what the body turns towards
+    headingRate = nil, -- that turn rate in degrees per second
+    headingRef = false, -- the heading after the last Half-Life update, and the time since
+    headingTime = 0,
+    facedFrame = nil, -- the last frame movement.faceHeading turned the body to where it heads
+    inAirRotation = nil, -- whether the character has ALS's InAirRotation (nil: not looked yet)
     counts = { cuts = 0, restores = 0, rewrites = 0, wakes = 0, leaks = 0, jumpChanges = 0 },
 }
 
@@ -310,6 +330,9 @@ function movement.apply(pawn, cmc, cfg, P, now)
         st.lastStepFrame = nil
         st.written = nil
         st.hop = nil
+        st.airBaseX, st.airBaseY = 0, 0
+        st.headingFrame, st.facedFrame = nil, nil
+        st.inAirRotation = nil
         if not st.worldGravity then
             log.once("gravity", "Could not read the game's gravity, so the game's own gravity stays.")
         end
@@ -514,11 +537,63 @@ local function hopLine(hop, landing, P)
             keys[#keys + 1] = key
         end
     end
+    local body = ""
+    if hop.bodyOff then
+        body = string.format(", body %+.0f deg from where it headed", math.abs(hop.bodyOff) < 0.5 and 0 or hop.bodyOff)
+    end
     log.info("Hop %d (%.0f fps, %.1f updates per frame): take-off %.0f u/s, landing %.0f u/s (%+.0f), %.2f s in "
-        .. "the air, view turned %.0f deg (%.0f deg/s), keys %s, speed cuts %d%s", hop.n, hop.frames / time,
+        .. "the air, view turned %.0f deg (%.0f deg/s), keys %s, speed cuts %d%s%s", hop.n, hop.frames / time,
         hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, gain, hop.time,
-        hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", st.counts.cuts - hop.cuts,
+        hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", st.counts.cuts - hop.cuts, body,
         st.hops == MAX_HOP_LINES and " (further hops aren't logged)" or "")
+end
+
+-- Where the character heads in the air (see movement.heading): the yaw of hx, hy,
+-- the horizontal velocity the mod hands to Unreal apart from the moving platform's
+-- that leaving it added, so that hopping in place on a moving platform doesn't turn
+-- the body to the platform's way. The body's target is led by how fast the heading
+-- turns. The heading only changes in Half-Life updates, so that rate is measured over
+-- the time since the last frame that ran one, and a frame that runs none keeps the
+-- last rate (above PhysicsRate frames per second, a rate from one frame alone read 0
+-- in such a frame and far too much in the next). It starts again whenever the run of
+-- air frames breaks.
+local function trackHeading(frame, hx, hy, dt, frameDt, steps)
+    local going = st.headingFrame == frame - 1 and st.headingYaw ~= false
+    local heading, target = false, false
+    if hx * hx + hy * hy > HEADING_SPEED * HEADING_SPEED then
+        heading = math.deg(math.atan(hy, hx))
+        target = heading
+        if going and dt > 0 then
+            st.headingTime = st.headingTime + dt
+            if steps > 0 then
+                st.headingRate = physics.turn(st.headingRef, heading) / st.headingTime
+                st.headingRef, st.headingTime = heading, 0
+            end
+            local lead = (st.headingRate or 0) * math.max(0, 1 / ALS_AIR_TURN - (frameDt or dt))
+            target = heading + math.max(-LEAD_LIMIT, math.min(LEAD_LIMIT, lead))
+        end
+    end
+    if not (heading and going) then
+        st.headingRate, st.headingRef, st.headingTime = nil, heading, 0
+    end
+    st.headingFrame, st.headingYaw, st.headingTarget = frame, heading, target
+end
+
+-- How far the body is from where the character headed in the frame before, in
+-- degrees (+: to the right of it), for the hop line. ALS's update in that frame
+-- turned the body towards that heading, led, so this shows how well it keeps up.
+-- Read once per logged hop, at its top, and only if movement.faceHeading turned the
+-- body to where it heads in that frame (not in first person, where it faces the view).
+local function bodyOffset(pawn, frame)
+    if st.hops >= MAX_HOP_LINES or st.facedFrame ~= frame - 1 or type(st.headingYaw) ~= "number" then
+        return nil
+    end
+    local ok, rotation = ue.call(pawn, "K2_GetActorRotation")
+    local yaw = ok and ue.number(rotation, "Yaw")
+    if not yaw then
+        return nil
+    end
+    return physics.turn(st.headingYaw, yaw)
 end
 
 --- One frame of Half-Life movement. yaw is the camera's yaw in degrees; frame is
@@ -536,6 +611,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         st.written = nil
         st.lastMode = nil
         st.hop = nil
+        st.airBaseX, st.airBaseY = 0, 0
     elseif st.written and st.written.afterMove then
         -- Only if the mod moved the character on the frame before that one too: the
         -- first frame after a pause, or after a frame the mod left alone, may have
@@ -584,6 +660,15 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     local okAt, at = ue.call(pawn, "K2_GetActorLocation")
     at = okAt and type(at) == "table" and at or nil
     local landed = st.lastMode == FALLING and onGround
+    if not onGround and st.lastMode and st.lastMode ~= FALLING then
+        -- Walked off a ledge in Unreal's last update: leaving a moving platform added
+        -- its velocity (not with bStayBasedInAir), as the mod's jump does.
+        local w = st.written
+        st.airBaseX, st.airBaseY = 0, 0
+        if w and not st.stayBasedInAir then
+            st.airBaseX, st.airBaseY = w.baseX, w.baseY
+        end
+    end
     local vx, vy = checkCut(cmc, cfg, P, rx, ry, rz, mode, landed, at)
     st.limiterWoke = false
     local vz = rz
@@ -647,6 +732,9 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         end
     end
     st.lastMode = jumped and FALLING or mode
+    if jumped then
+        st.airBaseX, st.airBaseY = bx, by -- none with bStayBasedInAir
+    end
     -- Over the ground at a jump (with the platform's velocity) and in the air, as a
     -- landing reads it; relative to the platform on it. With bStayBasedInAir, relative
     -- to it at a jump and in the air too: the platform goes on carrying the character.
@@ -665,6 +753,14 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         for key in keysHeld(forward, right):gmatch(".") do
             hop.keys[key] = true
         end
+        if not hop.top and nz <= 0 then
+            -- The top of the hop: the vertical speed the mod writes no longer goes up.
+            hop.top = true
+            hop.bodyOff = bodyOffset(pawn, frame)
+        end
+    end
+    if jumped or mode == FALLING then
+        trackHeading(frame, nx + bx - st.airBaseX, ny + by - st.airBaseY, dt, frameDt, steps)
     end
     if st.lastSpeed > stats.top then
         stats.top = st.lastSpeed
@@ -710,6 +806,53 @@ function movement.hold(frame)
     if st.lastStepFrame == frame - 1 then
         st.lastStepFrame = frame
         st.written = nil
+    end
+end
+
+--- Where the character heads in the air in this frame, for the body to face: the
+--- yaw in degrees for it to turn towards (where it heads, led by how fast that turns),
+--- and the yaw where it heads (that of the horizontal velocity the mod handed to
+--- Unreal, apart from a moving platform it left); false and false while that is
+--- slower than HEADING_SPEED. nil unless the mod moved the character in this frame
+--- and it is in the air after the mod's update (its jump included).
+function movement.heading(frame)
+    if st.headingFrame == frame then
+        return st.headingTarget, st.headingYaw
+    end
+    return nil
+end
+
+--- Has the game's locomotion system (ALS) turn the character towards yaw while it
+--- is in the air: in the character's update, after Unreal's movement, ALS turns it a
+--- little towards its InAirRotation on each frame in the air, and sets that to the
+--- character's own rotation whenever it leaves the ground (the mod's jump included),
+--- so this runs after the mod's jump. heading (where the character heads, not led)
+--- goes into TargetRotation: ALS's update in the air replaces that with InAirRotation,
+--- but the update of a landing frame starts from it. Without heading (first person,
+--- where camera.faceView sets TargetRotation to the view), only InAirRotation is set.
+--- Nothing to put back: ALS sets InAirRotation again at every take-off.
+function movement.faceHeading(pawn, yaw, heading)
+    if st.inAirRotation == nil then
+        st.inAirRotation = ue.typeOf(ue.get(pawn, "InAirRotation")) == "UScriptStruct"
+        if not st.inAirRotation then
+            log.once("in-air-rotation", "The character has no InAirRotation (ALS), so in third person it keeps "
+                .. "facing the way it took off while it hops.")
+        end
+    end
+    if not st.inAirRotation then
+        return
+    end
+    if heading then
+        log.first("in-air-heading", "Turning the character towards where it heads in the air (ALS's InAirRotation, "
+            .. "yaw %.0f)", yaw)
+    else
+        log.first("in-air-view", "Keeping the character turned to the view in the air too (ALS's InAirRotation, "
+            .. "yaw %.0f)", yaw)
+    end
+    pawn.InAirRotation = { Pitch = 0, Yaw = yaw, Roll = 0 }
+    if heading then
+        pawn.TargetRotation = { Pitch = 0, Yaw = heading, Roll = 0 }
+        st.facedFrame = st.headingFrame
     end
 end
 
