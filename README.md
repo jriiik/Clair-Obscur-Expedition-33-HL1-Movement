@@ -16,7 +16,8 @@ by holding the jump key.
 ## What it does
 
 - **First-person camera** while you walk around. Your own character is hidden so
-  it doesn't block the view, and you can look straight up and down.
+  it doesn't block the view, and you can look straight up and down. You still
+  hear its footsteps, jumps and other sounds, as in third person.
 - **Half-Life 1 movement**: the same acceleration, friction, gravity and jump
   height as Half-Life, scaled to the game's world.
 - **Bunny hopping**: hold the jump key and you jump again the moment you land,
@@ -114,6 +115,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `FieldOfView` | `100` | How wide the first-person view is, in degrees |
 | `FirstPerson` | `true` | `false` keeps the game's own camera |
 | `CameraMethod` | `"auto"` | How first person is done: `"engine"` (Unreal's own first-person view), `"game"` (the game's camera moved to the eyes, which keeps its picture settings) or `"auto"` (the first, then the second if it doesn't work) |
+| `BodySounds` | `true` | Keeps your hidden character animating in first person, so you still hear its footsteps, jumps and other sounds; it costs about what third person does. `false` lets the game stop them, as it does for a character nobody sees |
 | `Movement` | `true` | `false` keeps the game's own movement |
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
 | `BodyFollowsHop` | `true` | In the air, your character turns to face where it is going (you see it in third person); `false` keeps it facing the way it jumped |

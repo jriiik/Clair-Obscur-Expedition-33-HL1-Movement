@@ -473,6 +473,8 @@ local CONTROLLER = "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Controller_Worl
 local RESTART = "/Script/Engine.PlayerController:ClientRestart"
 
 local PRIMITIVE_CHAIN = { "PrimitiveComponent", "SceneComponent", "ActorComponent", "Object" }
+local SKINNED_CHAIN = { "SkinnedMeshComponent", "MeshComponent", "PrimitiveComponent", "SceneComponent",
+    "ActorComponent", "Object" }
 local CAMERA_CHAIN = { "CameraComponent", "SceneComponent", "ActorComponent", "Object" }
 local CINE_CHAIN = { "CineCameraComponent", "CameraComponent", "SceneComponent", "ActorComponent", "Object" }
 
@@ -635,6 +637,7 @@ function fake.newGame(options)
     g.statics = {
         ["/Script/Engine.PlayerController"] = fake.class("PlayerController"),
         ["/Script/Engine.PrimitiveComponent"] = fake.class("PrimitiveComponent"),
+        ["/Script/Engine.SkinnedMeshComponent"] = fake.class("SkinnedMeshComponent"),
         ["/Script/Engine.ActorComponent"] = fake.class("ActorComponent"),
         ["/Script/Engine.CameraComponent"] = fake.class("CameraComponent"),
         ["/Script/Engine.SpringArmComponent"] = fake.class("SpringArmComponent"),
@@ -815,7 +818,9 @@ function fake.newGame(options)
     -- The character, its parts and its movement component
     function g.buildCharacter()
         local c = { attach = {} }
-        local function primitive(className, owner, props, methods)
+        -- spec: chain, bytes, name, address and getters, as for fake.object.
+        local function primitive(className, owner, props, methods, spec)
+            spec = spec or {}
             props = props or {}
             props.AttachChildren = props.AttachChildren or fake.array({})
             if props.bOwnerNoSee == nil then
@@ -837,8 +842,41 @@ function fake.newGame(options)
                 assert(type(value) == "boolean")
                 fake.props(obj).bHiddenInGame = value
             end)
-            obj = fake.object({ className = className, world = world, chain = chainOf(className, PRIMITIVE_CHAIN),
-                props = props, methods = methods })
+            -- Drawn within the tolerance, in seconds of the world's time (see g.animTick).
+            methods.WasRecentlyRendered = ufunction("WasRecentlyRendered", 1, function(_, tolerance)
+                assert(type(tolerance) == "number")
+                local last = data[obj].lastRender
+                return last ~= nil and g.worldTime - last <= tolerance
+            end)
+            obj = fake.object({ className = className, name = spec.name, address = spec.address, world = world,
+                chain = chainOf(className, spec.chain or PRIMITIVE_CHAIN), props = props, methods = methods,
+                bytes = spec.bytes, getters = spec.getters })
+            return obj
+        end
+        --- An anim instance of E33's AnimBP, built on ALS's, which copies the character's
+        --- speed into CharacterInformation when its graph runs.
+        function c.newAnimInstance()
+            return fake.object({ className = "ALS_UE5_AnimBP_C", world = world,
+                chain = { "ALS_UE5_AnimBP_C", "ALSCharacterAnimInstance", "AnimInstance", "Object" },
+                props = { CharacterInformation = fake.struct({ Speed = 0, bIsMoving = false }) } })
+        end
+        --- A skeletal mesh. With anim (an anim instance) it runs an animation of its own,
+        --- as E33's Body does; without, it follows another mesh's pose. Its tick option
+        --- is an enum, which UE4SS writes as a byte. spec: name, address and getters, as
+        --- for fake.object (tests use them for new parts).
+        function c.skeletal(owner, props, anim, spec)
+            spec = spec or {}
+            props = props or {}
+            if props.VisibilityBasedAnimTickOption == nil then
+                props.VisibilityBasedAnimTickOption = 0 -- a plain skeletal mesh's default
+            end
+            local obj = primitive("SkeletalMeshComponent", owner, props, {
+                GetAnimInstance = ufunction("GetAnimInstance", 0, function()
+                    return anim or INVALID
+                end),
+            }, { chain = SKINNED_CHAIN, bytes = { "VisibilityBasedAnimTickOption" }, name = spec.name,
+                address = spec.address, getters = spec.getters })
+            data[obj].anim = anim
             return obj
         end
         local function scene(className, owner, props, methods)
@@ -968,14 +1006,18 @@ function fake.newGame(options)
         c.torchLight = fake.object({ className = "PointLightComponent", world = world,
             chain = { "PointLightComponent", "LightComponent", "SceneComponent", "ActorComponent", "Object" },
             props = { AttachChildren = fake.array({}), bHiddenInGame = false } })
-        c.skinMesh = primitive("SkeletalMeshComponent", function()
+        c.skinMesh = c.skeletal(function()
             return c.skinActor
         end)
         c.propMesh = primitive("StaticMeshComponent", function()
             return c.propActor
         end, { AttachChildren = fake.array({ c.torchLight }) })
-        c.mesh = primitive("SkeletalMeshComponent", thePawn,
-            { AttachChildren = fake.array({ c.skinMesh, c.propMesh }) })
+        -- The body that runs the character's AnimBP (E33's "Body"). Its tick option is a
+        -- guess at E33's: OnlyTickPoseWhenRendered, so it stops animating, and its
+        -- sounds with it, a second after it was last drawn (see g.animTick).
+        c.animInstance = c.newAnimInstance()
+        c.mesh = c.skeletal(thePawn, { AttachChildren = fake.array({ c.skinMesh, c.propMesh }),
+            VisibilityBasedAnimTickOption = options.bodyTickOption or 4 }, c.animInstance)
         c.dialogueCamera = camera("CineCameraComponent", "CineCamera_Dialogue1", CINE_CHAIN,
             { FocusSettings = fake.struct({ FocusMethod = 1, ManualFocusDistance = 200 }), CurrentFocalLength = 35 })
         c.cineCamera = camera("CineCameraComponent", "Main_CineCamera", CINE_CHAIN,
@@ -1515,6 +1557,50 @@ function fake.newGame(options)
         g.cameraLocation = target
     end
 
+    -- The end of a frame for the character's parts (see g.animTick).
+    g.footsteps = 0
+    local function endFrame(part, depth)
+        local d = data[part]
+        if depth > 24 or not d or not d.alive then
+            return
+        end
+        local p = d.props
+        if d.anim then
+            local drawn = d.lastRender ~= nil and d.lastRender > g.worldTime - 1
+            if p.VisibilityBasedAnimTickOption < 2 or drawn then
+                local info = fake.props(d.anim).CharacterInformation
+                info.Speed = g.speed()
+                info.bIsMoving = info.Speed > 1
+                if info.bIsMoving then
+                    g.footsteps = g.footsteps + 1
+                end
+            end
+        end
+        if d.drawnAt then
+            d.lastRender, d.drawnAt = d.drawnAt, nil
+        end
+        if p.bOwnerNoSee == false and p.bHiddenInGame == false and p.bVisible ~= false then
+            d.drawnAt = g.worldTime
+        end
+        for _, child in ipairs(p.AttachChildren or {}) do
+            endFrame(child, depth + 1)
+        end
+    end
+
+    --- The end of a frame the world ticks. Each mesh with an animation of its own runs
+    --- its graph, as Unreal 5.4 ticks it: always with the tick option 0 or 1, and from
+    --- 2 on only if it was drawn in the last second (bRecentlyRendered; an unseen mesh
+    --- then plays at most montages, none in the fake). The graph's anim notifies play
+    --- the footsteps, counted in g.footsteps while the character moves. Then the
+    --- renderer draws what the player's view shows: not what is hidden in game,
+    --- invisible, or hidden from its owner (the view, shadows included, is the
+    --- character's own). It draws a frame while the game thread works on the next one,
+    --- so what it draws counts as drawn (LastRenderTime, which WasRecentlyRendered
+    --- reads) only from the end of the next frame.
+    function g.animTick()
+        endFrame(fake.props(g.pawn).RootComponent, 0)
+    end
+
     --- One frame: input, the controller's tick (where the mod runs), the character's
     --- movement and the camera. Unreal decides at the start of the world's tick
     --- whether the frame runs paused (g.worldPaused, or else g.paused): then only the
@@ -1590,6 +1676,7 @@ function fake.newGame(options)
             end
             g.alsTick(dt) -- in the character's update, after its ReceiveTick
             g.updateCamera(dt) -- Unreal doesn't update the camera while the game is paused
+            g.animTick()
         end
         g.justPressed = {}
         g.time = g.time + dt

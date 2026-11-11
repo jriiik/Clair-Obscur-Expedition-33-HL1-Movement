@@ -140,10 +140,10 @@ function diagnostics.report(env)
 
     local cameraStatus = camera.status()
     local waitingFor = mod.cameraBlock or cameraStatus.waiting
-    line("First person: %s with %s%s, hidden parts=%d, camera to eyes=%s cm%s",
+    line("First person: %s with %s%s, hidden parts=%d (kept animating %d), camera to eyes=%s cm%s",
         cameraStatus.state, cameraStatus.methodName,
         cameraStatus.method == "engine" and (" (style set through " .. cameraStatus.styleRoute .. ")") or "",
-        cameraStatus.hiddenParts, show(cameraStatus.lastDistance),
+        cameraStatus.hiddenParts, cameraStatus.animatedParts, show(cameraStatus.lastDistance),
         waitingFor and (", waiting because: " .. waitingFor) or "")
     if cameraStatus.moved then
         line("  game camera at the eyes: %s, put back on its arm by the game %d times", cameraStatus.moved,
@@ -326,6 +326,45 @@ function diagnostics.report(env)
                     "SocketOffset", "TargetOffset", "RelativeLocation", "bUsePawnControlRotation", "bDoCollisionTest",
                     "bEnableCameraLag", "CameraLagSpeed", "bEnableCameraRotationLag", "bInheritPitch", "bInheritYaw",
                     "bIgnoreX", "bIgnoreY", "bIgnoreZ" }))
+            end)
+            -- The animated meshes: a mesh that isn't drawn stops its animation graph,
+            -- and its sounds, unless its tick option says otherwise (see camera.lua).
+            -- No weak or soft pointers are read (such as LeaderPoseComponent).
+            line("  Character.Mesh = %s", show(ue.get(pawn, "Mesh")))
+            local skin = ue.object(pawn, "BP_CharacterSkinComponent")
+            if skin then
+                line("  Skin: %s", values(skin, { "AttachedBodyOnCharacter", "AttachedFaceOnCharacter",
+                    "AnimInstanceClass" }))
+            end
+            line("  Skinned meshes on the character (BodySounds=%s):", tostring(cfg.BodySounds))
+            each("/Script/Engine.SkinnedMeshComponent", function(mesh)
+                local option = ue.number(mesh, "VisibilityBasedAnimTickOption")
+                local was = camera.tickToPutBack(mesh)
+                local okSeen, onScreen = ue.call(mesh, "WasRecentlyRendered", 0.2)
+                local okAnim, anim = ue.call(mesh, "GetAnimInstance")
+                local okLod, lod = ue.call(mesh, "GetPredictedLODLevel")
+                local okTick, ticking = ue.call(mesh, "IsComponentTickEnabled")
+                line("    %s, owner %s, attached to %s: tick option %s%s, seen recently=%s, ticking=%s, anim instance "
+                    .. "%s, %s, predicted LOD %s", ue.describe(mesh),
+                    ue.describe(select(2, ue.call(mesh, "GetOwner"))), parentOf(mesh),
+                    option and camera.tickName(option) or "?",
+                    was and (" [kept animating by the mod, was " .. camera.tickName(was) .. "]") or "",
+                    okSeen and tostring(onScreen) or "?", okTick and tostring(ticking) or "?",
+                    okAnim and ue.describe(anim) or "?",
+                    values(mesh, { "AnimClass", "AnimationMode", "bVisible", "bOwnerNoSee", "bHiddenInGame",
+                        "CastShadow", "bCastHiddenShadow", "bEnableUpdateRateOptimizations", "bPauseAnims",
+                        "bNoSkeletonUpdate" }),
+                    okLod and show(lod) or "?")
+                -- ALS's anim instance copies the character's speed when its graph runs:
+                -- a stale copy while moving means the graph isn't running.
+                local info = okAnim and ue.valid(anim) and ue.get(anim, "CharacterInformation")
+                if ue.typeOf(info) == "UScriptStruct" then
+                    local cmc = ue.object(pawn, "CharacterMovement")
+                    local x, y = ue.vector(cmc and ue.get(cmc, "Velocity"))
+                    line("       ALS animation: Speed=%s, the character's ALS Speed=%s, moving at %.0f cm/s, "
+                        .. "bIsMoving=%s", show(ue.get(info, "Speed")), show(ue.get(pawn, "Speed")),
+                        math.sqrt(x * x + y * y), show(ue.get(info, "bIsMoving")))
+                end
             end)
             local controller = ue.object(pawn, "BP_CameraControllerComponent")
             if controller then

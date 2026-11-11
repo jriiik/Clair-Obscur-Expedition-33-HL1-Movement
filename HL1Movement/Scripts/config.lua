@@ -22,6 +22,7 @@ return {
     FieldOfView = 100,      -- horizontal, in degrees (Half-Life's 90 on a 4:3 screen is about 106 on 16:9)
     EyeHeight = "auto",     -- "auto", or centimetres above the middle of the character
     HideBody = true,        -- hide your own character so it doesn't block the view
+    BodySounds = true,      -- keep the hidden character animating, so its footsteps and other sounds play
     PitchLimit = 89,        -- how far up and down you can look, in degrees
     BodyFollowsView = true, -- turn the character to face where you look
     BodyFollowsHop = true,  -- in the air, turn the character towards where it is going (seen in third person)

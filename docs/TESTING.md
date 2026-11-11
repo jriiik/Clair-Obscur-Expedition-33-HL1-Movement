@@ -46,6 +46,17 @@ Write down what happens for each one. "Nothing happened" is useful too.
    where you look?
 4. **Jumping.** Tap Space. Do your feet rise a little over a metre, well above a
    table? Hold Space: do you keep hopping? Do you keep your speed between hops?
+   - **Sounds.** In first person, walk, run and hop for a while, on stone, grass
+     or water if you can. Do you hear your footsteps, the jumps and the landings
+     (and breathing or the rustle of clothes) as in third person? Press **F6** to
+     compare in third person, then **F6** again. While walking in first person,
+     press **F8**: the report then shows whether your hidden character still
+     animates.
+   - Then open `config.lua` (in `Win64\ue4ss\Mods\HL1Movement\Scripts`), change
+     `BodySounds = true` to `BodySounds = false`, save it, press **F7** in the
+     game, and walk and hop in first person again for at least 10 seconds. Do
+     those sounds stop? Press **F8** while walking. Then set it back to `true`,
+     save, and press **F7**. Write down what you heard each time.
 5. **Air strafing.** Run, hold Space for about 10 hops, let go of W, hold D and
    turn the mouse slowly and smoothly to the right. Do you get faster?
    - **In third person.** Press **F6** and do the same, also switching between A
