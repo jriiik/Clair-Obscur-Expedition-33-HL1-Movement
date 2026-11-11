@@ -4,7 +4,7 @@ local t = require("testlib")
 local fake = require("fake_game")
 
 local root = TEST_ROOT
-local F5, F6, F7, F8 = 0x74, 0x75, 0x76, 0x77
+local F5, F6, F7, F8, F9 = 0x74, 0x75, 0x76, 0x77, 0x78
 local RESTART = "/Script/Engine.PlayerController:ClientRestart"
 local JOURNAL = "HL1Movement.changes"
 local SCALE = 2.5
@@ -123,8 +123,9 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.2.6 loaded")
-    for _, code in ipairs({ F5, F6, F7, F8 }) do
+    t.contains(g.log, "Version 0.3.0 loaded")
+    t.contains(g.log, "F9 shows the speedometer")
+    for _, code in ipairs({ F5, F6, F7, F8, F9 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
     end
     t.falsy(g.hooks[g.tickPath], "the frame hook needs the game's classes")
@@ -200,7 +201,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.2.6 diagnostics")
+    t.contains(g.log, "HL1Movement 0.3.0 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -2038,7 +2039,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.2.6 diagnostics")
+    t.contains(g.log, "HL1Movement 0.3.0 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")

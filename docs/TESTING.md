@@ -33,7 +33,7 @@ the mod doing anything:
 Write down what happens for each one. "Nothing happened" is useful too.
 
 1. **Loading.** In `Win64\ue4ss\UE4SS.log`, is there a line containing
-   `[HL1Movement] Version 0.2` and `loaded`? After loading a save, one containing
+   `[HL1Movement] Version 0.3` and `loaded`? After loading a save, one containing
    `[HL1Movement] Running every frame from`?
 2. **Camera.** Leave the controls alone for 10 seconds after you gain control:
    the mod waits three seconds, then switches to first person and writes its

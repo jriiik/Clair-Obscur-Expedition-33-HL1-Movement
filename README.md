@@ -4,20 +4,20 @@ A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
 Half-Life 1's movement: fast, slippery running, air strafing and bunny hopping
 by holding the jump key.
 
-> **Status: version 0.2.6, early testing.** In the first test, first person never
-> started and air strafing gained no speed. 0.2 fixes the most likely causes:
-> first person now follows the camera the game really shows, with a second way to
-> get to the eyes if the first doesn't work, and the Half-Life movement runs 100
-> times a second whatever the frame rate. If the game cuts your speed, the mod
-> undoes it and notes it in `UE4SS.log`. 0.2.1 to 0.2.6 fix what six code
-> reviews found. It hasn't been tested in the game yet:
-> see [docs/TESTING.md](docs/TESTING.md) and [Reporting problems](#reporting-problems).
+> **Status: version 0.3.0, early testing.** In the second test (0.2.6), first
+> person, bunny hopping and air strafing worked. 0.3 adds what that test asked
+> for: your character's footsteps and other sounds in first person, your
+> character turning to face where it hops (seen in third person), Half-Life's
+> slopes with slope boosting, and a speedometer (F9). These new parts haven't
+> been tested in the game yet: see [docs/TESTING.md](docs/TESTING.md) and
+> [Reporting problems](#reporting-problems).
 
 ## What it does
 
 - **First-person camera** while you walk around. Your own character is hidden so
-  it doesn't block the view, and you can look straight up and down. You still
-  hear its footsteps, jumps and other sounds, as in third person.
+  it doesn't block the view, and you can look straight up and down. It keeps
+  animating while hidden, so you still hear its footsteps, jumps and other
+  sounds, as in third person.
 - **Half-Life 1 movement**: the same acceleration, friction, gravity and jump
   height as Half-Life, scaled to the game's world.
 - **Bunny hopping**: hold the jump key and you jump again the moment you land,
@@ -122,6 +122,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `BodySounds` | `true` | Keeps your hidden character animating in first person, so you still hear its footsteps, jumps and other sounds; it costs about what third person does. `false` lets the game stop them, as it does for a character nobody sees |
 | `Movement` | `true` | `false` keeps the game's own movement |
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
+| `AirSpeedCap` | `30` | Half-Life's limit on air strafing, which is what makes it work; `35` or `40` gain about 20 or 40 % more speed per hop, but aren't Half-Life's |
 | `BodyFollowsHop` | `true` | In the air, your character turns to face where it is going (you see it in third person); `false` keeps it facing the way it jumped |
 | `JumpKeys` | `{ "SpaceBar", "Gamepad_FaceButton_Bottom" }` | Add `"MouseScrollDown"` to hop with the mouse wheel |
 | `MaxSpeed`, `Accelerate`, `AirAccelerate`, `Friction`, `Gravity` | Half-Life's values | The same as Half-Life's `sv_` console variables |
@@ -202,7 +203,7 @@ checks the game's own files. It isn't needed to uninstall either.
 
 ## Reporting problems
 
-This version hasn't been tested in the game yet, so reports help a lot.
+0.3's new parts haven't been tested in the game yet, so reports help a lot.
 [docs/TESTING.md](docs/TESTING.md) has a short list of things to try.
 
 1. Play until the problem happens, then press **F8**. This adds a status report to
@@ -215,7 +216,8 @@ This version hasn't been tested in the game yet, so reports help a lot.
 
 ## Known limitations
 
-- Not tested in the game yet (see the top).
+- The sounds in first person, the turning in the air, the slopes and the
+  speedometer are new in 0.3 and not tested in the game yet (see the top).
 - No crouch jumping, ducking, swimming or ladders the way Half-Life does them.
 - No surfing: a slope too steep to walk on stops you like a wall, where Half-Life
   lets you slide along it. Slopes otherwise follow Half-Life's rules closely but

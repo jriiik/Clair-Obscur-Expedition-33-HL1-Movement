@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.2.6"
+local VERSION = "0.3.0"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -984,5 +984,6 @@ if not restartHooked then
         .. "mod. If nothing happens, please report UE4SS.log.", tostring(restartError), tostring(cfg.ToggleKey))
 end
 
-log.info("Version %s loaded. %s turns it on and off, %s switches the camera, %s writes a report to this log.",
-    VERSION, tostring(cfg.ToggleKey), tostring(cfg.CameraKey), tostring(cfg.DiagnosticsKey))
+log.info("Version %s loaded. %s turns it on and off, %s switches the camera, %s writes a report to this log, "
+    .. "%s shows the speedometer.", VERSION, tostring(cfg.ToggleKey), tostring(cfg.CameraKey),
+    tostring(cfg.DiagnosticsKey), tostring(cfg.SpeedometerKey))
