@@ -8,8 +8,10 @@ read_globals = {
     "RegisterKeyBind",
     "ExecuteInGameThread",
     "StaticFindObject",
+    "StaticConstructObject",
     "FindFirstOf",
     "FName",
+    "FText",
     "Key",
 }
 
@@ -20,8 +22,10 @@ files["tests/"] = {
         "RegisterKeyBind",
         "ExecuteInGameThread",
         "StaticFindObject",
+        "StaticConstructObject",
         "FindFirstOf",
         "FName",
+        "FText",
         "Key",
         "ModRef",
         "TEST_ROOT",

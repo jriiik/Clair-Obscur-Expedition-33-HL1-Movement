@@ -1,7 +1,7 @@
 -- Settings for the Half-Life movement mod.
 --
 -- Change a value, save the file, and press F7 in the game to load it again.
--- New keys for the four hotkeys below only work after restarting the game.
+-- New keys for the five hotkeys below only work after restarting the game.
 -- Keep the commas at the ends of lines and the quotes around names.
 -- Speeds and distances are in Half-Life units, so the numbers match Half-Life's.
 
@@ -14,6 +14,13 @@ return {
     DiagnosticsKey = "F8",  -- writes a status report to UE4SS.log
 
     StartEnabled = true,    -- false: the mod starts switched off until you press ToggleKey
+
+    -- Speedometer: your speed across the ground in Half-Life units per second, like Bunnymod XT's
+    Speedometer = false,    -- true: shown from the start; SpeedometerKey shows and hides it either way
+    SpeedometerKey = "F9",  -- a hotkey like those above: shows and hides the speedometer
+    SpeedometerPosition = { 0.5, 0.75 }, -- where its middle goes, from 0 to 1: { across, down } the screen
+    SpeedometerSize = 32,   -- how big its digits are, from 8 to 200
+    SpeedometerColor = { 255, 160, 0 }, -- red, green and blue, from 0 to 255: Half-Life's HUD orange
 
     -- Camera
     FirstPerson = true,     -- false: keep the game's camera and only change the movement

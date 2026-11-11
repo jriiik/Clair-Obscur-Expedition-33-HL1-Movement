@@ -8,7 +8,9 @@ package.path = root .. "HL1Movement/Scripts/?.lua;" .. root .. "tests/?.lua;" ..
 local t = require("testlib")
 _G.TEST_ROOT = root
 
-for _, name in ipairs({ "test_physics", "test_settings", "test_mod", "test_facing", "test_slopes", "test_sounds" }) do
+local TESTS = { "test_physics", "test_settings", "test_mod", "test_facing", "test_slopes", "test_sounds",
+    "test_speedometer" }
+for _, name in ipairs(TESTS) do
     t.section(name)
     local ok, err = pcall(dofile, root .. "tests/" .. name .. ".lua")
     if not ok then

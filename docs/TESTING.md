@@ -75,6 +75,18 @@ Write down what happens for each one. "Nothing happened" is useful too.
      press **F7**, and compare the hop lines. Set them back to 100 and 30 after.
 6. **Keys.** Does F6 switch between first and third person? Does F5 turn the mod
    off and back on?
+   - **Speedometer.** Press **F9**. An orange number should appear, centred
+     across the screen, a quarter of the way up from the bottom: your speed.
+     It shows 0 standing still and about 320 running, and goes higher as you air
+     strafe. Does it follow your speed? Is it easy to read, and does it cover
+     anything (subtitles, prompts, the game's own displays)? Open the game's menu,
+     talk to someone and start a battle: does the number go away and come back
+     afterwards? Press **F8** while it shows, then **F9** again: does it go away?
+   - If the game crashes right after you press F9 (or right after the game
+     loads, with `Speedometer = true` in `config.lua`), look at the last lines
+     from `[HL1Movement]` in `UE4SS.log`. If the last one says `Putting the
+     speedometer on the screen`, send the log and the crash files (see below).
+     To play on, leave `Speedometer = false` in `config.lua` and don't press F9.
 7. **The game's own systems.**
    - Talk to someone: does the game's camera come back, and first person after
      the dialogue?

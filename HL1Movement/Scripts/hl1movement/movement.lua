@@ -161,6 +161,16 @@ function movement.isActive()
     return st.active
 end
 
+--- For the speedometer: the horizontal speed (cm/s) Unreal moved the character with,
+--- as the mod read it back on this frame (see st.readSpeed in movement.step), or nil
+--- if the mod didn't move the character on this frame.
+function movement.speed(frame)
+    if st.active and st.lastStepFrame == frame and st.written then
+        return st.readSpeed
+    end
+    return nil
+end
+
 local function horizontal(x, y)
     return math.sqrt(x * x + y * y)
 end
@@ -976,6 +986,11 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             end
         end
     end
+    -- For the speedometer: the speed Unreal moved the character with on the last
+    -- frame, as read back (against a wall, what the wall left of it), with a speed cut
+    -- undone and, at a landing, without the platform's velocity. Not the speed the
+    -- mod writes below, which has this frame's acceleration in it.
+    st.readSpeed = horizontal(vx, vy)
 
     -- Half-Life's slopes: whether Half-Life has the player on the ground (it is in the
     -- air while Unreal walks it up a slope), and how it leaves the ground off a slope.

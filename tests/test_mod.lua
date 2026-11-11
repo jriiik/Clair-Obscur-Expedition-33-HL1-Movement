@@ -2573,9 +2573,13 @@ t.test("the guard logs each different error once, and turns a failing step off",
 end)
 
 t.test("a steady frame is cheap: few game calls, and full names only on the half-second refresh", function()
-    local g = running()
+    -- With the speedometer on: at a steady speed it sends nothing, and only checks its
+    -- widget every 0.5 s (one IsInViewport and two full names), on frames of its own,
+    -- hence 6 frames with full names in a second instead of 4.
+    local g = running({ Speedometer = true })
     g.keys.W = true
     g.frames(70)
+    t.eq(#g.viewport, 1, "the speedometer is on the screen")
     local calls, reads = fake.counts.calls, fake.counts.reads
     local frames, withNames, names = 60, 0, 0
     for _ = 1, frames do
@@ -2591,7 +2595,7 @@ t.test("a steady frame is cheap: few game calls, and full names only on the half
     local readsPerFrame = (fake.counts.reads - reads) / frames
     t.truthy(perFrame <= 30, string.format("%.1f game function calls per frame", perFrame))
     t.truthy(readsPerFrame <= 45, string.format("%.1f property reads per frame", readsPerFrame))
-    t.truthy(withNames <= 4, string.format("full names on %d of %d frames", withNames, frames))
+    t.truthy(withNames <= 6, string.format("full names on %d of %d frames", withNames, frames))
     t.truthy(names <= 60, string.format("%d full names in %d frames", names, frames))
 end)
 

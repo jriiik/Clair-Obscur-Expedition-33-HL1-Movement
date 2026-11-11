@@ -11,6 +11,7 @@ local input = require("hl1movement.input")
 local view = require("hl1movement.view")
 local camera = require("hl1movement.camera")
 local movement = require("hl1movement.movement")
+local speedometer = require("hl1movement.speedometer")
 
 local diagnostics = {}
 
@@ -158,6 +159,13 @@ function diagnostics.report(env)
         seenView.mainCameraError and (" (" .. seenView.mainCameraError .. ")") or "", tostring(seenView.dialogue),
         tostring(seenView.cinematic), tostring(seenView.findCamera))
 
+    local meter = speedometer.status()
+    line("Speedometer: wanted=%s, on the screen=%s, shown=%s, number=%s u/s, made %d times%s, taken off the screen "
+        .. "by the game %d times%s", tostring(mod.speedometerOn), tostring(meter.onScreen), tostring(meter.visible),
+        tostring(meter.shown), meter.made, meter.made > 0 and string.format(" (the last with %s, a %s)", meter.how,
+            meter.numeric and "CommonNumericTextBlock" or "TextBlock") or "", meter.lost,
+        meter.failed and (", can't be shown: " .. meter.failed) or "")
+
     local moveStatus = movement.status()
     line("Movement: world gravity=%s, curve taken out=%s, curve failed=%s, speed limiter=%s, stays based in the "
         .. "air=%s", show(moveStatus.worldGravity), tostring(moveStatus.curveTaken), tostring(moveStatus.curveBroken),
@@ -191,6 +199,7 @@ function diagnostics.report(env)
         result("Controller", pc, "GetViewTarget")
         field("Controller", pc, "IsChangingArea")
         field("Controller", pc, "CameraOverrideActor")
+        field("Controller", pc, "MyHUD") -- class HUD: the engine's plain one, nothing to hook (see speedometer.lua)
         outResult("Controller", pc, "HasCameraOverride", "HasOverride")
         local dialogue = ue.object(pc, "BP_DialogueSystemComponent")
         if dialogue then

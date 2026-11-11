@@ -29,6 +29,7 @@ local view = require("hl1movement.view")
 local camera = require("hl1movement.camera")
 local movement = require("hl1movement.movement")
 local diagnostics = require("hl1movement.diagnostics")
+local speedometer = require("hl1movement.speedometer")
 
 local MAX_ERRORS_IN_A_ROW = 30
 local SETTLE_TIME = 3 -- seconds to leave a new level or character alone, while the game sets it up
@@ -51,6 +52,7 @@ local CAMERA_STEP = "the first-person camera"
 local MOVEMENT_STEP = "the Half-Life movement"
 local FACING_STEP = "turning the character to the view"
 local HEADING_STEP = "turning the character to where it heads"
+local SPEEDOMETER_STEP = "the speedometer"
 
 local function newWindow()
     return { frames = 0, time = 0, ticks = 0, cpu = 0, minDt = math.huge, maxDt = 0, turn = 0 }
@@ -60,6 +62,7 @@ local cfg, P
 local mod = {
     enabled = false,
     cameraOn = true,
+    speedometerOn = false,
     tickHook = nil,
     jumpHook = nil,
     hookError = nil,
@@ -150,6 +153,7 @@ end
 local function releaseAll()
     camera.release()
     movement.release()
+    speedometer.release()
 end
 
 -- For a new level: its loading destroyed the objects the mod had changed, so
@@ -157,6 +161,7 @@ end
 local function forgetAll()
     camera.forget()
     movement.forget()
+    speedometer.forget()
 end
 
 -- Calls a function that answers true or false, such as IsInBattle. Returns nil
@@ -305,6 +310,26 @@ local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
     end
 end
 
+-- What the game said on this frame about the character's movement input (see inputBlock).
+local inputAnswer = { frame = nil, block = nil }
+
+-- Whether the game takes the character's movement input away: "input-ignored",
+-- "input-blocked" or nil. Asked at most once a frame: the movement and the
+-- speedometer both want to know.
+local function inputBlock(pc, pawn)
+    if inputAnswer.frame ~= mod.frames then
+        inputAnswer.frame = mod.frames
+        if ask(pc, "IsMoveInputIgnored") == true then
+            inputAnswer.block = "input-ignored"
+        elseif ask(pawn, "CanAddMovementInput") == false then
+            inputAnswer.block = "input-blocked"
+        else
+            inputAnswer.block = nil
+        end
+    end
+    return inputAnswer.block
+end
+
 -- Why the Half-Life movement can't run right now: a short key and the text for the log.
 local function movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
     if not cfg.Movement then
@@ -325,9 +350,9 @@ local function movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
             return string.format("off (the game's movement mode is %s, %s%s)", tostring(mode),
                 MODE_NAMES[mode] or "unknown", custom)
         end
-    elseif ask(pc, "IsMoveInputIgnored") == true then
+    elseif inputBlock(pc, pawn) == "input-ignored" then
         return "input-ignored", "off (the game ignores movement input)"
-    elseif ask(pawn, "CanAddMovementInput") == false then
+    elseif inputBlock(pc, pawn) == "input-blocked" then
         return "input-blocked", "off (the game doesn't let the character take movement input)"
     end
     return nil
@@ -352,6 +377,31 @@ local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused, fram
     elseif ask(pawn, "IsPlayingRootMotion") ~= true then
         movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames, frameDt)
     end
+end
+
+-- First person waits for these while the game shows something else of its own.
+local SPEEDOMETER_HIDDEN_FOR = { dialogue = true, cinematic = true, ["view-target"] = true }
+
+-- The speedometer, while the player moves the character: not while the game is
+-- paused or in battle, or takes the character's movement input away, nor while
+-- first person waits for a dialogue, a cinematic or another view target. It stays
+-- in the movement modes the mod leaves to the game (a mantle or a climb, which run
+-- in mode None, swimming, flying). The speed is the horizontal speed Unreal moved
+-- the character with, in Half-Life units per second: what the mod read back on
+-- this frame, or else the movement component's velocity.
+local function speedometerStep(pc, pawn, cmc, inBattle, paused)
+    local show = mod.speedometerOn and not paused and not inBattle
+        and not SPEEDOMETER_HIDDEN_FOR[mod.cameraBlock or ""] and inputBlock(pc, pawn) == nil
+    local speed
+    if show then
+        speed = movement.speed(mod.frames)
+        if not speed and cmc then
+            local x, y = ue.vector(ue.get(cmc, "Velocity"))
+            speed = math.sqrt(x * x + y * y)
+        end
+        speed = speed and speed / P.unitScale
+    end
+    speedometer.update(pc, show, speed, mod.now, cfg)
 end
 
 local function report(title)
@@ -475,6 +525,7 @@ local function onFrame(pc, dt)
             releaseAll()
         end
         camera.retry()
+        speedometer.retry()
         view.reset()
         mod.restarted = false
         mod.pcAddr, mod.pawnAddr, mod.worldAddr = pcAddr, pawnAddr, worldAddr
@@ -565,6 +616,8 @@ local function onFrame(pc, dt)
             guard.run(HEADING_STEP, movement.faceHeading, pawn, target, heading)
         end
     end
+
+    guard.run(SPEEDOMETER_STEP, speedometerStep, pc, pawn, cmc, inBattle, paused)
 
     if mod.reportAt and mod.now >= mod.reportAt then
         mod.reportAt = nil
@@ -759,6 +812,7 @@ local function turnOn()
     mod.errorsInARow = 0
     guard.reset()
     camera.retry(true)
+    speedometer.retry()
     log.info("Half-Life movement on")
 end
 
@@ -786,9 +840,20 @@ local function toggleCamera()
     mod.announceCamera = true
 end
 
+local function toggleSpeedometer()
+    mod.speedometerOn = not mod.speedometerOn
+    if mod.speedometerOn then
+        speedometer.retry()
+    else
+        speedometer.release()
+    end
+    log.info("Speedometer %s", mod.speedometerOn and "on" or "off")
+end
+
 -- The part of reloading the settings that touches the game, on the next frame.
 local function applyReloadedSettings()
     releaseAll()
+    speedometer.retry() -- made again on this frame, with the new place, size and colour
     mod.recheck = true -- check the character again with the new settings
     guard.reset()
     camera.retry(true)
@@ -827,6 +892,9 @@ local KEYS = {
     end,
     report = function()
         return reportKey
+    end,
+    speedometer = function()
+        return toggleSpeedometer
     end,
 }
 
@@ -869,15 +937,18 @@ end
 loadSettings()
 mod.enabled = cfg.StartEnabled
 mod.cameraOn = true
+mod.speedometerOn = cfg.Speedometer
 
 guard.whenOff(CAMERA_STEP, camera.release)
 guard.whenOff(MOVEMENT_STEP, movement.release)
+guard.whenOff(SPEEDOMETER_STEP, speedometer.release)
 journal.load() -- what a previous copy of the mod left changed, if UE4SS restarted the mods
 
 bindKey(cfg.ToggleKey, KEYS.toggle)
 bindKey(cfg.CameraKey, KEYS.camera)
 bindKey(cfg.ReloadKey, KEYS.reload)
 bindKey(cfg.DiagnosticsKey, KEYS.report)
+bindKey(cfg.SpeedometerKey, KEYS.speedometer)
 
 -- Hooks in straight away if the game is already running, for example after UE4SS
 -- restarted its mods. The first frame then puts back what the previous copy of the

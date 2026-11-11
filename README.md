@@ -31,6 +31,9 @@ by holding the jump key.
   shows another camera (dialogue, cutscenes, sneaking, aiming), first person
   switches off. When the game locks your movement or moves the character itself
   (dialogue, cutscenes, climbing, ledge grabs), the game's own movement comes back.
+- A **speedometer** like Bunnymod XT's, on **F9**: your speed across the ground in
+  Half-Life units per second, in Half-Life's HUD orange, below the middle of the
+  screen. It hides itself in menus, battles, dialogue and cutscenes.
 - Everything can be turned on and off in the game with one key.
 
 ## What you need
@@ -86,6 +89,7 @@ you gain control, the mod writes a report to the log by itself.
 | **F6** | Switches between first and third person (the movement stays) |
 | **F7** | Loads the settings file again |
 | **F8** | Writes a status report to `UE4SS.log` |
+| **F9** | Shows and hides the speedometer |
 | W A S D, mouse | Move and look, as usual |
 | **Space** (held) | Jump, and keep hopping every time you land |
 
@@ -129,6 +133,8 @@ Each setting has a short explanation next to it. The most useful ones:
 | `SlopeLandings` | `true` | Landing on a slope turns part of the fall into speed along it: faster downhill, slower uphill, as in Half-Life; `false` keeps your speed at landings, as the game does |
 | `SlopeBoosts` | `true` | Running or landing fast against an upward slope lifts you off the ground: you slide up it without friction and fly off the top; `false` turns this off |
 | `ForwardKeys` and so on | `{ "W" }` … | The movement keys; add `"Up"`, `"Down"`, `"Left"`, `"Right"` for the arrow keys |
+| `Speedometer` | `false` | `true` shows the speedometer from the start; F9 (`SpeedometerKey`) shows and hides it either way |
+| `SpeedometerPosition`, `SpeedometerSize`, `SpeedometerColor` | `{ 0.5, 0.75 }`, `32`, `{ 255, 160, 0 }` | Where the middle of the speedometer goes (across and down the screen, from 0 to 1), how big its digits are, and its colour (red, green and blue, from 0 to 255) |
 
 New hotkeys only take effect after restarting the game.
 

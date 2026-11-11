@@ -13,6 +13,12 @@ settings.DEFAULTS = {
     ReloadKey = "F7",
     DiagnosticsKey = "F8",
 
+    Speedometer = false,
+    SpeedometerKey = "F9",
+    SpeedometerPosition = { 0.5, 0.75 },
+    SpeedometerSize = 32,
+    SpeedometerColor = { 255, 160, 0 },
+
     FirstPerson = true,
     CameraMethod = "auto",
     FieldOfView = 100,
@@ -77,12 +83,23 @@ local BOOLEAN = { kind = "boolean" }
 local HOTKEY = { kind = "hotkey" }
 local NAMES = { kind = "names" }
 
+-- A list of count numbers, each from min to max.
+local function numbers(count, min, max)
+    return { kind = "numbers", count = count, min = min, max = max }
+end
+
 local RULES = {
     StartEnabled = BOOLEAN,
     ToggleKey = HOTKEY,
     CameraKey = HOTKEY,
     ReloadKey = HOTKEY,
     DiagnosticsKey = HOTKEY,
+
+    Speedometer = BOOLEAN,
+    SpeedometerKey = HOTKEY,
+    SpeedometerPosition = numbers(2, 0, 1),
+    SpeedometerSize = number(8, 200),
+    SpeedometerColor = numbers(3, 0, 255),
 
     FirstPerson = BOOLEAN,
     CameraMethod = { kind = "choice", choices = { auto = true, engine = true, game = true } },
@@ -148,7 +165,7 @@ local function describe(value)
     if type(value) == "table" then
         local parts = {}
         for i, v in ipairs(value) do
-            parts[i] = string.format("%q", tostring(v))
+            parts[i] = type(v) == "number" and tostring(v) or string.format("%q", tostring(v))
         end
         return "{ " .. table.concat(parts, ", ") .. " }"
     elseif type(value) == "string" then
@@ -202,6 +219,27 @@ local function check(rule, value, keyTable)
             return false, string.format("%q is not a UE4SS key name", value)
         end
         return true, name
+    elseif kind == "numbers" then
+        local wrong = string.format("must be a list of %d numbers from %s to %s", rule.count, rule.min, rule.max)
+        if type(value) ~= "table" or #value ~= rule.count then
+            return false, wrong
+        end
+        local result, notes = {}, {}
+        for i = 1, rule.count do
+            local n = value[i]
+            if type(n) ~= "number" or n ~= n then
+                return false, wrong
+            end
+            if n < rule.min then
+                n = rule.min
+                notes[#notes + 1] = string.format("entry %d raised to the lowest allowed value, %s", i, rule.min)
+            elseif n > rule.max then
+                n = rule.max
+                notes[#notes + 1] = string.format("entry %d lowered to the highest allowed value, %s", i, rule.max)
+            end
+            result[i] = n
+        end
+        return true, result, #notes > 0 and table.concat(notes, "; ") or nil
     elseif kind == "names" then
         if type(value) ~= "table" then
             return false, 'must be a list such as { "SpaceBar" }'

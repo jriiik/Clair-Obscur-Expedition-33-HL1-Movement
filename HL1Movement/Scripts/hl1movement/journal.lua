@@ -68,8 +68,9 @@ end
 
 --- Notes a change the mod must put back. kind is "prop" (id: the property name),
 --- "hide" (id: "owner" or "hidden"), "tick", "curve" (value: the curve's full name),
---- "style" (value: the camera style name) or "attach" (a camera moved to the eyes;
---- value: see journal.attachValue); value is what to put back.
+--- "style" (value: the camera style name), "attach" (a camera moved to the eyes;
+--- value: see journal.attachValue) or "widget" (a widget the mod put on the screen,
+--- taken off); value is what to put back.
 function journal.note(kind, fullName, id, value)
     if type(fullName) ~= "string" or fullName:find("[\t\n]") then
         return
@@ -191,6 +192,9 @@ local restorers = {
     end,
     style = function(obj, _, value)
         obj:ClientSetCameraMode(FName(value))
+    end,
+    widget = function(obj)
+        obj:RemoveFromParent() -- the speedometer
     end,
     attach = function(obj, _, value)
         local f = attachFields(value)

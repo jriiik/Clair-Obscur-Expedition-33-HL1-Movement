@@ -7,7 +7,7 @@
 -- take integers (a Lua boolean becomes 0), game functions check how many
 -- parameters they get, out parameters are filled into the table passed for them,
 -- and using an object after it was destroyed raises an error (in the real game
--- that would crash).
+-- that would crash). A struct inside a struct reads as a view too.
 -- The fake character movement follows Unreal's closely enough (input acceleration,
 -- braking, curve-driven ground values, gravity, landing, and with g.terrain walking
 -- along slopes, with the floor in CurrentFloor) to check that the mod's speeds
@@ -124,8 +124,12 @@ function fake.array(list)
     return a
 end
 
+local function isStruct(value)
+    return type(value) == "table" and getmetatable(value) == nil and value.__fields ~= nil
+end
+
 local function structView(s)
-    local views = {}
+    local views = {} -- views of the structs inside this one, by struct
     return newUserdata({
         __index = function(_, key)
             if key == "type" then
@@ -137,8 +141,8 @@ local function structView(s)
                 error("[handle_unreal_property_value]: Was unable to retrieve property '" .. tostring(key) .. "'", 2)
             end
             local value = s[key]
-            if type(value) == "table" and value.__fields and getmetatable(value) == nil then
-                -- A struct inside a struct reads as a view too, as in UE4SS.
+            if isStruct(value) then
+                -- A struct inside a struct reads as a view too, onto the same memory, as in UE4SS.
                 views[value] = views[value] or structView(value)
                 return views[value]
             end
@@ -149,7 +153,15 @@ local function structView(s)
                 error("[push_objectproperty] this struct can't be written", 2)
             end
             if s.__fields[key] then
-                s[key] = value
+                if isStruct(s[key]) and type(value) == "table" then
+                    for field, v in pairs(value) do
+                        if s[key].__fields[field] then
+                            s[key][field] = v
+                        end
+                    end
+                else
+                    s[key] = value
+                end
             end
         end,
     })
@@ -644,6 +656,248 @@ function fake.newGame(options)
         ["/Script/Engine.Default__GameplayStatics"] = statics,
         ["/Script/SandFall.Default__InputBlueprintHelpers"] = helpers,
     }
+
+    -- UMG and CommonUI, for the widget the mod puts on the screen. As in the engine,
+    -- a widget on the screen stays alive, one taken off is destroyed by the next
+    -- garbage collection (g.collectGarbage), and a level change takes the old
+    -- level's widgets off the screen (g.removeWorldWidgets).
+    g.viewport = {} -- widgets on the screen, in the order they were added
+    g.umg = { made = 0, ftexts = 0, textSets = 0, valueSets = 0, offScreen = {} }
+    g.gameInstance = fake.object({ className = "BP_GameInstance_C", name = "BP_GameInstance_C_1",
+        path = "/Engine/Transient.GameEngine_1:BP_GameInstance_C_1" })
+    for name, path in pairs({ UserWidget = "/Script/UMG.UserWidget", WidgetTree = "/Script/UMG.WidgetTree",
+        CanvasPanel = "/Script/UMG.CanvasPanel", TextBlock = "/Script/UMG.TextBlock",
+        CommonNumericTextBlock = "/Script/CommonUI.CommonNumericTextBlock" }) do
+        if not (name == "CommonNumericTextBlock" and options.noCommonUI) then
+            g.statics[path] = fake.class(name)
+        end
+    end
+    local ftexts = setmetatable({}, { __mode = "k" })
+    local ftextMeta = { __index = {
+        type = function()
+            return "FText"
+        end,
+        ToString = function(self)
+            return ftexts[self]
+        end,
+    } }
+    -- UE4SS's FText(string), which builds 848 and later have.
+    _G.FText = not options.noFText and function(text)
+        assert(type(text) == "string", "FText takes a string")
+        local ftext = newUserdata(ftextMeta)
+        ftexts[ftext] = text
+        g.umg.ftexts = g.umg.ftexts + 1
+        return ftext
+    end or nil
+    local function onScreen(widget)
+        for _, w in ipairs(g.viewport) do
+            if same(w, widget) then
+                return true
+            end
+        end
+        return false
+    end
+    local function newWidget(className, outer, spec)
+        g.umg.made = g.umg.made + 1
+        spec.className = className
+        spec.name = string.format("%s_%d", className, 2147470000 + g.umg.made)
+        spec.path = data[outer].path .. "." .. spec.name
+        spec.world = world
+        return fake.object(spec)
+    end
+    local function makeTree(outer)
+        return newWidget("WidgetTree", outer, { declared = { "RootWidget" } })
+    end
+    local function makeUserWidget(outer)
+        return newWidget("UserWidget", outer, { chain = { "UserWidget", "Widget", "Visual", "Object" },
+            declared = { "WidgetTree" }, props = { Visibility = 4 }, methods = {
+            AddToViewport = ufunction("AddToViewport", 1, function(self, z)
+                assert(math.type(z) == "integer", "ZOrder is an int32")
+                if options.addFails then
+                    return -- AddToScreen refused (no world, no viewport client ...): a Kismet warning only
+                end
+                assert(not onScreen(self), "AddToViewport: the widget is already on the screen")
+                local tree = assert(fake.props(self).WidgetTree, "a widget tree")
+                assert(fake.props(tree).RootWidget, "a root widget, before Slate builds the widget")
+                g.viewport[#g.viewport + 1] = self
+                fake.props(self).ZOrder = z
+            end),
+            RemoveFromParent = ufunction("RemoveFromParent", 0, function(self)
+                for i = #g.viewport, 1, -1 do
+                    if same(g.viewport[i], self) then
+                        g.umg.offScreen[#g.umg.offScreen + 1] = table.remove(g.viewport, i)
+                    end
+                end
+            end),
+            SetVisibility = ufunction("SetVisibility", 1, function(self, visibility)
+                assert(math.type(visibility) == "integer", "ESlateVisibility is a number")
+                fake.props(self).Visibility = visibility
+            end),
+            IsInViewport = ufunction("IsInViewport", 0, function(self)
+                return onScreen(self)
+            end),
+            SetOwningPlayer = ufunction("SetOwningPlayer", 1, function(_, player)
+                assert(data[player], "SetOwningPlayer needs a player controller")
+            end),
+        } })
+    end
+    local function makeCanvas(outer)
+        return newWidget("CanvasPanel", outer, { declared = { "Child", "Slot" }, methods = {
+            AddChildToCanvas = ufunction("AddChildToCanvas", 1, function(self, content)
+                assert(data[content] and data[content].alive, "AddChildToCanvas needs a widget")
+                fake.props(self).Child = content
+                local function set(field, check)
+                    return ufunction("Set" .. field, 1, function(slot, value)
+                        assert(check(value), "Set" .. field .. ": wrong kind of value")
+                        fake.props(slot)[field] = value
+                    end)
+                end
+                local function isTable(v)
+                    return type(v) == "table"
+                end
+                local slot = newWidget("CanvasPanelSlot", self, { props = {}, methods = {
+                    SetAnchors = set("Anchors", function(v)
+                        return isTable(v) and isTable(v.Minimum) and isTable(v.Maximum)
+                    end),
+                    SetAlignment = set("Alignment", isTable),
+                    SetPosition = set("Position", isTable),
+                    SetAutoSize = set("AutoSize", function(v)
+                        return type(v) == "boolean"
+                    end),
+                } })
+                fake.props(self).Slot = slot
+                return slot
+            end),
+        } })
+    end
+    local function makeText(className, outer)
+        local numeric = className == "CommonNumericTextBlock"
+        local props = {
+            Font = fake.struct({ Size = 24, LetterSpacing = 0, OutlineSettings = fake.struct({ OutlineSize = 0,
+                OutlineColor = fake.struct({ R = 0, G = 0, B = 0, A = 1 }) }) }),
+            Visibility = 4,
+            Shown = "", -- what Slate draws
+        }
+        if options.textWithoutOutline then
+            -- An engine whose font settings have no outline: reading it raises, as in UE4SS.
+            props.Font = fake.struct({ Size = 24, LetterSpacing = 0 })
+        end
+        if numeric then
+            props.FormattingSpecification = fake.struct({ RoundingMode = 0, UseGrouping = true,
+                MinimumIntegralDigits = 1, MaximumIntegralDigits = 324, MinimumFractionalDigits = 0,
+                MaximumFractionalDigits = 0 })
+        end
+        local function isTable(v)
+            return type(v) == "table"
+        end
+        local function setter(name, check)
+            return ufunction(name, 1, function(self, value)
+                assert(check(value), name .. ": wrong kind of value")
+                fake.props(self)[name] = value
+            end)
+        end
+        local methods = {
+            SetText = ufunction("SetText", 1, function(self, text)
+                assert(ftexts[text], "SetText takes an FText")
+                fake.props(self).Shown = ftexts[text]
+                g.umg.textSets = g.umg.textSets + 1
+            end),
+            SetColorAndOpacity = setter("SetColorAndOpacity", function(v)
+                return isTable(v) and isTable(v.SpecifiedColor) and math.type(v.ColorUseRule) == "integer"
+            end),
+            SetShadowOffset = setter("SetShadowOffset", isTable),
+            SetShadowColorAndOpacity = setter("SetShadowColorAndOpacity", isTable),
+            SetJustification = setter("SetJustification", function(v)
+                return math.type(v) == "integer"
+            end),
+        }
+        if numeric then
+            -- FText::AsNumber with the formatting options: HalfFromZero, no fraction.
+            methods.SetCurrentValue = ufunction("SetCurrentValue", 1, function(self, value)
+                assert(type(value) == "number", "SetCurrentValue takes a float")
+                local p = fake.props(self)
+                local n = math.floor(math.abs(value) + 0.5) * (value < 0 and -1 or 1)
+                local text = string.format("%d", n)
+                if p.FormattingSpecification.UseGrouping then
+                    text = text:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+                end
+                p.Shown = text
+                g.umg.valueSets = g.umg.valueSets + 1
+            end)
+        end
+        return newWidget(className, outer, { props = props, methods = methods })
+    end
+    _G.StaticConstructObject = function(class, outer, ...)
+        local d = data[class]
+        assert(d and d.typeName == "UClass", "StaticConstructObject needs a class")
+        assert(data[outer] and data[outer].alive, "StaticConstructObject needs an outer that exists")
+        -- With a name, the engine would make the object again in place of a live one of that name.
+        assert(select("#", ...) == 0, "StaticConstructObject with a fixed name")
+        if d.name == "UserWidget" then
+            return makeUserWidget(outer)
+        elseif d.name == "WidgetTree" then
+            return makeTree(outer)
+        elseif d.name == "CanvasPanel" then
+            return makeCanvas(outer)
+        elseif d.name == "TextBlock" or d.name == "CommonNumericTextBlock" then
+            return makeText(d.name, outer)
+        end
+        error("the fake can't make a " .. tostring(d.name))
+    end
+    if not options.noWidgetLibrary then
+        g.statics["/Script/UMG.Default__WidgetBlueprintLibrary"] = fake.object({ className = "WidgetBlueprintLibrary",
+            name = "Default__WidgetBlueprintLibrary", path = "/Script/UMG.Default__WidgetBlueprintLibrary", methods = {
+            Create = ufunction("Create", 3, function(_, context, class, owner)
+                assert(data[context] and data[class] and data[owner], "Create(context, class, owning player)")
+                if options.createFails then
+                    return INVALID
+                end
+                -- CreateWidget for a player controller: the game instance is the outer.
+                local widget = makeUserWidget(g.gameInstance)
+                fake.set(widget, "WidgetTree", makeTree(widget))
+                return widget
+            end),
+        } })
+    end
+
+    --- What the speedometer shows: the text of the shown widget on the screen, or nil.
+    function g.shownText()
+        for _, w in ipairs(g.viewport) do
+            local p = fake.props(w)
+            if p.Visibility ~= 1 and p.Visibility ~= 2 then
+                local canvas = fake.props(p.WidgetTree).RootWidget
+                local text = canvas and fake.props(canvas).Child
+                return text and fake.props(text).Shown
+            end
+        end
+        return nil
+    end
+
+    --- Garbage collection: widgets taken off the screen are destroyed, with their tree.
+    function g.collectGarbage()
+        local function destroy(obj)
+            if obj and data[obj] and data[obj].alive then
+                fake.destroy(obj)
+                local p = data[obj].props
+                destroy(p.WidgetTree)
+                destroy(p.RootWidget)
+                destroy(p.Child)
+                destroy(p.Slot)
+            end
+        end
+        for _, w in ipairs(g.umg.offScreen) do
+            destroy(w)
+        end
+        g.umg.offScreen = {}
+    end
+
+    --- The engine removing the old level's widgets from the screen (HandleRemoveWorld),
+    --- or something in the game removing every widget (RemoveAllViewportWidgets).
+    function g.removeWorldWidgets()
+        for i = #g.viewport, 1, -1 do
+            g.umg.offScreen[#g.umg.offScreen + 1] = table.remove(g.viewport, i)
+        end
+    end
 
     -- The game's dialogue and cinematic systems, on the controller
     g.dialogueSystem = fake.object({ className = "BP_DialogueSystemComponent_C", world = world, methods = {
