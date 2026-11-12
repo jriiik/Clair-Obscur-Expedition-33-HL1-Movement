@@ -7,6 +7,27 @@ local settings = require("hl1movement.settings")
 
 local P = settings.physics(settings.load({ UnitScale = 1 }))
 
+t.test("t.near, which these tests use, fails a value that isn't a number (NaN)", function()
+    local nan = 0 / 0
+    t.falsy(pcall(t.near, nan, 800, 1), "a speed that came out as NaN")
+    t.falsy(pcall(t.near, nan, 0), "with the default tolerance")
+    t.falsy(pcall(t.near, 800, nan, 1), "NaN expected")
+    t.falsy(pcall(t.near, 800, 800, nan), "NaN tolerance")
+    t.falsy(pcall(t.near, 802, 800, 1), "too far off")
+    t.truthy(pcall(t.near, 800.5, 800, 1), "near enough")
+    local _, message = pcall(t.near, 1, 0)
+    t.truthy(tostring(message):find("(+-1e-09)", 1, true), "the message gives the default tolerance: " .. message)
+end)
+
+t.test("t.max, for the tests' running maximums, fails a value that isn't a number (NaN)", function()
+    -- math.max(0, NaN) is 0: a NaN would drop out of the maximum, and its check pass.
+    local nan = 0 / 0
+    t.falsy(pcall(t.max, 0, nan), "a NaN")
+    t.falsy(pcall(t.max, 0, nil), "nothing")
+    t.eq(t.max(0, 2.5), 2.5)
+    t.eq(t.max(3, 2.5), 3)
+end)
+
 t.test("default parameters match Half-Life's", function()
     t.eq(P.maxSpeed, 320)
     t.eq(P.airSpeedCap, 30)
@@ -230,6 +251,45 @@ t.test("updates at 100 a second air strafe the same at any frame rate", function
     end
 end)
 
+t.test("each update gets the view of its own time, so air strafing gains what Half-Life's does from the same "
+    .. "hand at any frame rate", function()
+    -- Half-Life at fps_max 100: an update every 10 ms, each with the view of its time.
+    local function halfLife(from, turnRate, updates)
+        local vx, vy, vz = from, 0, 0
+        for j = 1, updates do
+            local wx, wy, speed = physics.wish(turnRate * j / 100, 0, 1, P.inputSpeed, P.maxSpeed)
+            vx, vy, vz = physics.step(vx, vy, vz, false, wx, wy, speed, false, P, 0.01)
+        end
+        return math.sqrt(vx * vx + vy * vy)
+    end
+    -- Frames that run different numbers of updates (at 80 fps 1, 1, 1 and 2) once gave
+    -- the updates an even share of each frame's turn, so a steady turn reached them
+    -- unevenly (1.25, 1.25, 1.25, 0.62 and 0.62 updates' worth at 80 fps), and from 500
+    -- u/s at 300 deg/s strafing gained 75 % of Half-Life's. Compared after the same
+    -- number of updates; the last case has uneven frames.
+    local uneven = { 0.009, 0.016, 0.0125, 0.011, 0.0145 }
+    for _, case in ipairs({ { 320, 150 }, { 500, 200 }, { 500, 300 }, { 700, 200 } }) do
+        local from, turnRate = case[1], case[2]
+        for _, fps in ipairs({ 30, 60, 72, 80, 90, 144, 240, 0 }) do
+            local sim = { yaw = 0 } -- the view before the first frame
+            local vx, vy, vz, time, updates, i = from, 0, 0, 0, 0, 0
+            while updates < 60 do
+                i = i + 1
+                local dt = fps > 0 and 1 / fps or uneven[(i - 1) % #uneven + 1]
+                time = time + dt
+                local _, steps
+                vx, vy, vz, _, steps = physics.simulate(sim, vx, vy, vz, false, turnRate * time,
+                    { forward = 0, right = 1 }, false, P, dt, 100)
+                updates = updates + steps
+            end
+            local gain = halfLife(from, turnRate, updates) - from
+            t.near(math.sqrt(vx * vx + vy * vy) - from, gain, 0.01, string.format("from %d u/s at %d deg/s, %s: "
+                .. "the gain after %d updates, against Half-Life's %.2f u/s", from, turnRate,
+                fps > 0 and fps .. " fps" or "uneven frames", updates, gain))
+        end
+    end
+end)
+
 t.test("ground running still settles at the max speed with updates at 100 a second", function()
     local sim = {}
     local vx, vy, vz = 0, 0, 0
@@ -298,4 +358,88 @@ t.test("a rate of 0 is one update per frame", function()
     t.near(vx, ex, 1e-9)
     t.near(vy, ey, 1e-9)
     t.near(vz, ez, 1e-9)
+end)
+
+-- A slide up a slope: the player is in the air for Half-Life on a floor the game walks
+-- it up, so each update takes its gravity off here and clips against the floor again.
+-- The floor rises along +X at 20 degrees; the velocities run along it.
+local SLOPE = { nx = -math.sin(math.rad(20)), ny = 0, nz = math.cos(math.rad(20)) }
+local function along(rise)
+    return rise / math.tan(math.rad(20)), 0, rise
+end
+
+t.test("a slide's update takes the update's gravity off and clips against the slope again", function()
+    local vx, vy, vz = along(300)
+    local slide = { nx = SLOPE.nx, ny = SLOPE.ny, nz = SLOPE.nz }
+    local nx, ny, nz, jumped, steps = physics.simulate({}, vx, vy, vz, false, 0, nil, false, P, 0.03, 100, slide)
+    t.eq(steps, 3)
+    t.falsy(jumped)
+    t.falsy(slide.ended, "still sliding")
+    -- Along the slope the speed falls by gravity times the slope's sine: 8 u/s an update
+    -- times sin 20, of which the rise is sin 20 again and the level part cos 20.
+    local sin, cos = math.sin(math.rad(20)), math.cos(math.rad(20))
+    t.near(nz, 300 - 3 * 8 * sin * sin, 1e-9, "the rise after three updates")
+    t.near(nx, vx - 3 * 8 * sin * cos, 1e-9, "the speed over the ground")
+    t.near(ny, 0, 1e-12)
+    t.near(nz / nx, math.tan(math.rad(20)), 1e-12, "it still runs along the slope")
+end)
+
+t.test("a slide ends at the update that finds the rise at 180 u/s or less, half an update of gravity after its "
+    .. "last clip", function()
+    -- From a rise of 186.5 u/s the clips leave 185.56, 184.63 and 183.69 u/s. The ground
+    -- check at the fourth update's start finds 183.69 - 4 = 179.69: on the ground, with
+    -- the velocity the third clip left, and no fourth clip. (Compared with 180 after
+    -- another update's gravity and clip, as until 0.3.0, it would have slid on for four
+    -- more updates and lost 10 u/s more.)
+    local vx, vy, vz = along(186.5)
+    local sin, cos = math.sin(math.rad(20)), math.cos(math.rad(20))
+    local slide = { nx = SLOPE.nx, ny = SLOPE.ny, nz = SLOPE.nz }
+    local nx, _, nz, jumped, steps = physics.simulate({}, vx, vy, vz, false, 0, nil, false, P, 0.05, 100, slide)
+    t.eq(steps, 5)
+    t.truthy(slide.ended, "the slide is over")
+    t.near(slide.endZ, 186.5 - 3 * 8 * sin * sin, 1e-9, "the rise its last clip left")
+    t.truthy(slide.endZ > 180 and slide.endZ - 4 <= 180, "over 180 u/s at the clip, not half an update on: "
+        .. slide.endZ)
+    t.near(slide.endX, vx - 3 * 8 * sin * cos, 1e-9, "the speed its last clip left")
+    t.falsy(jumped)
+    -- The fourth and fifth updates were on the ground: no vertical speed, and friction.
+    t.eq(nz, 0)
+    t.near(nx, slide.endX * 0.96 * 0.96, 1e-9, "two updates of ground friction")
+    -- A rise that is over 180 u/s half an update on keeps sliding: 184.1 does, 183.9 doesn't.
+    for _, case in ipairs({ { 184.1, false }, { 183.9, true } }) do
+        slide = { nx = SLOPE.nx, ny = SLOPE.ny, nz = SLOPE.nz }
+        vx, vy, vz = along(case[1])
+        physics.simulate({}, vx, vy, vz, false, 0, nil, false, P, 0.01, 100, slide)
+        t.eq(slide.ended == true, case[2], "a rise of " .. case[1] .. " u/s")
+    end
+end)
+
+t.test("with a jump held, it starts on the update a slide ends on, and no friction is taken", function()
+    local vx, vy, vz = along(186.5)
+    local slide = { nx = SLOPE.nx, ny = SLOPE.ny, nz = SLOPE.nz, jump = true }
+    -- (The jump argument is false: Half-Life has the player in the air as the frame starts.)
+    local nx, _, nz, jumped = physics.simulate({}, vx, vy, vz, false, 0, nil, false, P, 0.05, 100, slide)
+    t.truthy(slide.ended)
+    t.truthy(jumped, "jumped on the fourth update")
+    t.near(nz, P.jumpSpeed, 1e-9)
+    t.near(nx, slide.endX, 1e-9, "the speed the slide ended with")
+end)
+
+t.test("a slide on a floor without a normal to clip against only loses its rise to gravity", function()
+    local vx, vy, vz = along(300)
+    local slide = {}
+    local nx, _, nz = physics.simulate({}, vx, vy, vz, false, 0, nil, false, P, 0.02, 100, slide)
+    t.near(nz, 300 - 16, 1e-9)
+    t.eq(nx, vx)
+    t.falsy(slide.ended)
+end)
+
+t.test("a slide in a frame too short for an update stays as it is", function()
+    local vx, vy, vz = along(183)
+    local slide = { nx = SLOPE.nx, ny = SLOPE.ny, nz = SLOPE.nz }
+    local nx, _, nz, _, steps = physics.simulate({}, vx, vy, vz, false, 0, nil, false, P, 0.004, 100, slide)
+    t.eq(steps, 0)
+    t.eq(nx, vx)
+    t.eq(nz, vz)
+    t.falsy(slide.ended, "the ground check comes with the next update")
 end)

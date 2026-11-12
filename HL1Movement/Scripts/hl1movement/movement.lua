@@ -32,9 +32,11 @@
 --
 -- On slopes, Unreal keeps the horizontal speed, walking or landing. With SlopeLandings
 -- and SlopeBoosts the mod goes by Half-Life's rules instead (see slopeStep): a landing
--- on a slope turns part of the fall into speed along it, and a player rising faster
--- than 180 u/s is in the air, so running or landing fast against an upward slope
--- slides up it without friction and flies off the top.
+-- that runs into a slope turns part of the fall into speed along it (one that
+-- Half-Life's ground check catches just above the slope keeps its speed: see
+-- landingKind, which tells the two apart), and a player rising faster than 180 u/s is
+-- in the air, so running or landing fast against an upward slope slides up it without
+-- friction and flies off the top.
 --
 -- When the mod hands the movement back, every value goes back to the last one the
 -- game set (see overrides.lua), including the walking speed. The mod doesn't ask
@@ -68,9 +70,13 @@ local CUT_MIN, CUT_MAX, CUT_COS = 0.2, 0.97, math.cos(math.rad(2))
 -- own motion is taken out first, as far as Unreal reports its velocity.
 local MOVED_MIN, MOVED_MAX = 0.9, 2
 local MIN_CHECKED_SPEED = 50 -- cm/s
-local MAX_CUT_LINES = 5
+-- The log takes so many lines of each kind, then no more until the reload key starts
+-- the counts again (see movement.logAgain): a test presses it before each part it
+-- wants in the log. One part of docs/TESTING.md fits in 30: 10 hops and 20 strafing
+-- ones; a hill hopped down; a slide or two up a rough slope.
+local MAX_CUT_LINES = 5 -- the game's speed cuts
 local MAX_NOTE_LINES = 3 -- for each other kind of thing the game did
-local MAX_HOP_LINES = 20
+local MAX_HOP_LINES = 30
 -- In the air the body turns towards where the character heads once it moves at
 -- least this fast (cm/s, apart from a moving platform it left): ALS's own jump
 -- (EventOnJumped) takes the velocity's direction above the same speed.
@@ -81,21 +87,52 @@ local HEADING_SPEED = 100
 -- then the body keeps up with it.
 local ALS_AIR_TURN = 5
 local LEAD_LIMIT = 45
--- Slopes (SlopeLandings, SlopeBoosts). Floors flatter than 1 degree count as flat. The
--- floor's normal is only used when the capsule's contact normal agrees with the
--- surface's within 8 degrees: on a step's edge they differ, and the edge isn't a slope.
+-- Slopes (SlopeLandings, SlopeBoosts). Floors flatter than 1 degree count as flat (a
+-- step's edge with a flat tread too: its surface normal is flat). A sloped floor's
+-- normal is only used when the capsule's contact normal agrees with the surface's
+-- within 8 degrees: where the capsule rests on an edge or a crease of sloped ground
+-- (the lip of a ramp, a ridge) they differ, and that isn't a slope to slide on.
 local FLAT_NZ = math.cos(math.rad(1))
 local CONTACT_AGREES = math.cos(math.rad(8))
 local MAX_UNREADABLE_FLOORS = 30 -- reads in a row of a floor whose normal can't be read
-local MAX_SLIDE_LINES = 10 -- slides up a slope and flights off one
+-- Slides up a slope and flights off one: a boost takes three lines, a slide up a rough
+-- slope from 2 to over 20 (more the faster it starts).
+local MAX_SLIDE_LINES = 30
 -- Landings on a slope are logged only on one of LOGGED_SLOPE degrees or more, or if
--- the speed changed by LOGGED_CHANGE u/s or more: most ground is a little uneven.
-local MAX_LANDING_LINES = 5
+-- the speed changed by LOGGED_CHANGE u/s or more: most ground is a little uneven. Those
+-- that ran into the slope and those that kept their speed have a budget each, so the
+-- log shows both kinds, and each as many as hop lines: whichever kind a logged hop's
+-- landing is, the log has its slope and how it came down.
+local MAX_LANDING_LINES = 30
+local MAX_KEPT_LINES = 30
 local LOGGED_SLOPE = 3
 local LOGGED_CHANGE = 10
 -- After a slide, rising faster than this share of the jump speed is the game's own jump.
 local GAME_JUMP_SHARE = 0.5
-local DEFAULT_MAX_STEP = 0.05 -- s, Unreal's MaxSimulationTimeStep if it can't be read
+-- Walking down a slope, the floor is read once the character went down, in the frame
+-- before, by this share of the ground check's reach in one Half-Life update: from there
+-- on an update may leave the floor (with some room for a speed that grew since).
+local DESCENT_SHARE = 0.75
+-- Unreal keeps a character it walks 1.9 to 2.4 cm above the floor. So a character still
+-- in the air on the frame before a landing can't have been further below where it stands
+-- now than that: if it was, it didn't come down on this floor's plane (see landingKind).
+-- A CurrentFloor.FloorDist outside 0 to this isn't taken for that gap either (see floorGap).
+local FLOOR_GAP = 3 -- cm
+-- For the report, landings are counted by how far their floor leaned, in degrees: under
+-- the first limit (flat for the mod, see FLAT_NZ), up to each next one, and beyond the
+-- last. A landing's clip changes the speed by about the speed times the lean's sine
+-- squared, so each band stands for about four times the one before.
+local FLOOR_BANDS = { 1, 2, 4, 8, 16 }
+
+-- What was read of the floor in this frame, so that nothing is read twice: the
+-- movement component's CurrentFloor, if it is a floor the character walks on, and how
+-- steep the mod takes it to be (its normal's Z, see floorNormal); and how far above it
+-- the character stands (see floorGap; false: not asked yet). walkFloor: a sloped floor
+-- that falls away under the character as it walks on it in this frame, for Half-Life's
+-- updates on the ground to leave (see slopeStep, physics.simulate). leaveFall: where the
+-- character leaves such a floor in this frame, the second half of the gravity of the
+-- Half-Life update that left it (cm/s), for the leap's landing (see slopeLanding).
+local seenFloor, seenNz, seenGap, walkFloor, leaveFall = nil, nil, false, nil, nil
 
 local overrides = Overrides.new()
 local st = {
@@ -116,36 +153,69 @@ local st = {
     lastSpeed = 0,
     emptyInputFrames = 0,
     hop = nil, -- the jump in progress, for the hop lines
-    hops = 0,
+    hops = 0, -- hops landed in this session: the hop lines' numbers
+    hopLines = 0, -- hop lines written since the count last started (see movement.logAgain)
     maxSpeed = nil, -- what GetMaxSpeed() said after the mod set MaxWalkSpeed
     gameWalkSpeed = nil, -- the MaxWalkSpeed the game wrote since the last frame, if it did
     stayBasedInAir = false, -- the movement component's bStayBasedInAir
     airBaseX = 0, -- the moving platform's velocity that leaving it added, while in the air
     airBaseY = 0,
+    airNext = nil, -- how long the character will have been in the air at the next frame's hook (s)
+    -- How far above the floor the character stood where the flight in progress took off
+    -- (cm, see floorGap); nil if the mod didn't start it or couldn't read it.
+    takeoffGap = nil,
+    -- How far above its floor's plane Half-Life's player rested where that flight took
+    -- off, and rests since the landing just decided or during the slide it began (cm,
+    -- straight up, see landingKind); nil: its usual 1/32 unit off the plane.
+    takeoffRest = nil,
+    landRest = nil,
     headingFrame = nil, -- the frame of headingYaw (see movement.heading)
     headingYaw = false, -- where the character heads in the air, in degrees (false: too slow)
-    headingTarget = false, -- headingYaw, led by its turn rate: what the body turns towards
+    headingTarget = false, -- headingYaw, led by its turn rate: what the body turns towards (see trackHeading)
     headingRate = nil, -- that turn rate in degrees per second
     headingRef = false, -- the heading after the last Half-Life update, and the time since
     headingTime = 0,
     facedFrame = nil, -- the last frame movement.faceHeading turned the body to where it heads
     inAirRotation = nil, -- whether the character has ALS's InAirRotation (nil: not looked yet)
-    slide = nil, -- { vz = cm/s }: sliding up a slope, in the air for Half-Life while Unreal walks
+    -- { vz = cm/s }: sliding up a slope, in the air for Half-Life while Unreal walks (away:
+    -- it began at a landing that didn't go into the floor, see slopeLanding; nx, ny, nz:
+    -- the floor's normal in this frame, if it has one; edge: for how many frames in a row
+    -- the floor wasn't used because the capsule was on an edge, see edgeNote; jump, ended,
+    -- endX, endY, endZ, h, rise, push, time, clipped, dx, dy: see physics.simulate, which
+    -- runs the slide update by update; floorZ: where the floor is under Half-Life's path,
+    -- and ox, oy: how far the path is ahead of the character, see slopeStep and
+    -- movement.step)
+    slide = nil,
     flight = nil, -- { takeoff, time }: in the air after flying off a slope (not a hop)
+    groundSteps = 0, -- Half-Life updates run on the ground since the character last left it (see slopeStep)
     slopeBroken = false, -- the floor's normal can't be read: slopes are left to Unreal
+    -- Such reads in a row. Only a floor that reads starts the count again, not a take-over
+    -- (the reload key, a battle, the game taking the input away): with fewer than
+    -- MAX_UNREADABLE_FLOORS reads between two of those, the log would never say so.
     unreadableFloors = 0,
     slideLines = 0,
     landingLines = 0,
-    maxStep = DEFAULT_MAX_STEP, -- the movement component's MaxSimulationTimeStep
+    keptLines = 0,
+    noteLines = {}, -- by kind: lines about what the game did, since the count last started (see noted)
+    slopeGained = 0, -- what landings on slopes added to the horizontal speed in all (cm/s), for the report,
+    slopeLost = 0, -- and what they took: kept apart, since hopping down a hill and up it again cancels out
+    -- The floors at the landings so far, for the report (how rough the game's ground
+    -- is): how many leaned by each of FLOOR_BANDS, and how many the mod couldn't use.
+    floors = { 0, 0, 0, 0, 0, 0, unusable = 0, bands = FLOOR_BANDS },
+    -- slopeLandings: landings on a slope with SlopeLandings, of which slopeHits ran into it
+    -- (Half-Life clips those) and slopeUnknown couldn't be told; the rest were caught by
+    -- Half-Life's ground check and kept their speed. groundedJumps: jumps of the mod's that
+    -- Unreal landed again within the frame they started in (not hops, see movement.step).
     counts = { cuts = 0, restores = 0, rewrites = 0, wakes = 0, leaks = 0, jumpChanges = 0, slopeLandings = 0,
-        slides = 0, launches = 0, stoppedJumps = 0 },
+        slopeHits = 0, slopeUnknown = 0, slides = 0, launches = 0, stoppedJumps = 0, groundedJumps = 0 },
 }
 
 -- What happened since the last status line (see movement.takeStats).
 local function newStats()
     return { frames = 0, keys = 0, stick = 0, game = 0, none = 0, hops = 0, landings = 0, top = 0, topGround = 0,
         airHops = 0, airGain = 0, airTurn = 0, landingLoss = 0, steps = 0, cuts = 0, restores = 0, rewrites = 0,
-        wakes = 0, leaks = 0, slopeLandings = 0, slopeGain = 0, slides = 0, launches = 0 }
+        wakes = 0, leaks = 0, slopeLandings = 0, slopeHits = 0, slopeGain = 0, slides = 0, launches = 0,
+        groundedJumps = 0 }
 end
 local stats = newStats()
 
@@ -155,6 +225,36 @@ local function count(name)
         stats[name] = stats[name] + 1
     end
     return st.counts[name]
+end
+
+-- Counts one more thing the game did (a speed cut, its limiter started again ...), and
+-- returns how many of that kind there have been since the reload key last started the
+-- log's counts (see movement.logAgain): only the first few of each get a line.
+local function noted(name)
+    count(name)
+    st.noteLines[name] = (st.noteLines[name] or 0) + 1
+    return st.noteLines[name]
+end
+
+-- A landing on a slope, counted for the status line (since the last one) and for the
+-- report (since the mod loaded). kind: "hit" (it ran into the slope, which changed the
+-- horizontal speed by change cm/s), "caught" (Half-Life's ground check set it down
+-- first: the speed stays) or "unknown" (the mod couldn't tell: the speed stays).
+local function countSlopeLanding(kind, change)
+    count("slopeLandings")
+    if kind == "unknown" then
+        count("slopeUnknown")
+    end
+    if kind ~= "hit" then
+        return
+    end
+    count("slopeHits")
+    stats.slopeGain = stats.slopeGain + change
+    if change > 0 then
+        st.slopeGained = st.slopeGained + change
+    else
+        st.slopeLost = st.slopeLost - change
+    end
 end
 
 function movement.isActive()
@@ -291,7 +391,7 @@ local function pauseLimiter(pawn, cmc, refresh)
     if ok and enabled == true then
         -- The game started it again, so it is on when the mod hands back.
         st.limiterWoke = true
-        local wakes = count("wakes")
+        local wakes = noted("wakes")
         if wakes <= MAX_NOTE_LINES then
             log.info("The game turned its speed limiter on again (movement mode %s); pausing it again%s",
                 tostring(ue.number(cmc, "MovementMode")), wakes == MAX_NOTE_LINES and " (not logged again)" or "")
@@ -370,12 +470,10 @@ function movement.apply(pawn, cmc, cfg, P, now)
         st.written = nil
         st.hop = nil
         st.airBaseX, st.airBaseY = 0, 0
+        st.airNext, st.takeoffGap, st.takeoffRest, st.landRest = nil, nil, nil, nil
         st.headingFrame, st.facedFrame = nil, nil
         st.inAirRotation = nil
         st.slide, st.flight = nil, nil
-        st.unreadableFloors = 0
-        local maxStep = ue.number(cmc, "MaxSimulationTimeStep")
-        st.maxStep = maxStep and maxStep > 0 and maxStep or DEFAULT_MAX_STEP
         if not st.worldGravity then
             log.once("gravity", "Could not read the game's gravity, so the game's own gravity stays.")
         end
@@ -405,7 +503,7 @@ function movement.apply(pawn, cmc, cfg, P, now)
         -- What the game wrote since the last frame: its speed cap may have cut the
         -- speed to it meanwhile (see atMaxSpeed).
         st.gameWalkSpeed = overrides:saved(cmc, "MaxWalkSpeed")
-        local rewrites = count("rewrites")
+        local rewrites = noted("rewrites")
         if rewrites <= MAX_NOTE_LINES then
             log.info("The game set MaxWalkSpeed to %s; the mod sets it back to %d%s",
                 tostring(overrides:saved(cmc, "MaxWalkSpeed")), SPEED_LIMIT,
@@ -528,7 +626,7 @@ local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
     if ratio < CUT_MIN and not (st.limiterWoke or atMaxSpeed(cmc, vx, vy, vz)) then
         return vx, vy
     end
-    local cuts = count("cuts")
+    local cuts = noted("cuts")
     if cuts <= MAX_CUT_LINES then
         local okMax, max = ue.call(cmc, "GetMaxSpeed")
         local limiter
@@ -562,10 +660,12 @@ end
 -- The floor Unreal's walking found under the character (the movement component's
 -- CurrentFloor, updated while it walks): the unit normal of its surface, or (0, 0, 1)
 -- for a flat one. nil when there is no floor the mod can use: none, one found by a
--- line trace, or a step's edge (where the capsule's contact normal leans while the
--- surface's doesn't). Returns false as the 4th value if the floor can't be read
--- (every character movement component has one). Field by field: in UE4SS, reading a
--- field a struct doesn't have raises an error.
+-- line trace, or a sloped one the capsule only touches with an edge or a crease (its
+-- contact normal is more than 8 degrees off the surface's). Returns false as the 4th
+-- value if the floor can't be read (every character movement component has one), and
+-- true as the 5th if the floor isn't used because of its contact normal: the capsule is
+-- on an edge. Field by field: in UE4SS, reading a field a struct doesn't have raises an
+-- error.
 local function floorNormal(cmc)
     local floor = ue.get(cmc, "CurrentFloor")
     local walkable
@@ -578,6 +678,7 @@ local function floorNormal(cmc)
     if not walkable or ue.bool(floor, "bLineTrace") == true then
         return nil
     end
+    seenFloor = floor
     local hit = ue.get(floor, "HitResult")
     local surface = ue.get(hit, "ImpactNormal")
     local nz = ue.number(surface, "Z")
@@ -585,6 +686,7 @@ local function floorNormal(cmc)
         return nil, nil, nil, false
     end
     if nz >= FLAT_NZ then
+        seenNz = 1
         return 0, 0, 1
     end
     local nx, ny = ue.number(surface, "X"), ue.number(surface, "Y")
@@ -599,9 +701,49 @@ local function floorNormal(cmc)
     end
     nx, ny, nz = nx / length, ny / length, nz / length
     if nx * cx + ny * cy + nz * cz < CONTACT_AGREES * math.sqrt(cx * cx + cy * cy + cz * cz) then
-        return nil
+        return nil, nil, nil, nil, true
     end
+    seenNz = nz
     return nx, ny, nz
+end
+
+-- ", after 2 frames on its edge" for the slide lines: how many frames in a row, just
+-- before, the floor wasn't used because the capsule was on an edge (see floorNormal).
+-- Unreal's capsule may round the edge at the end of a slope before it leaves it; the
+-- slide then has gravity and no clip, and the character doesn't rise.
+local function edgeNote(frames)
+    if not frames or frames < 1 then
+        return ""
+    end
+    return string.format(", after %d frame%s on its edge", frames, frames == 1 and "" or "s")
+end
+
+-- How far above the floor Unreal holds the character while it walks, measured straight
+-- down (CurrentFloor.FloorDist: 1.9 to 2.4 cm, and their middle right after a landing),
+-- or nil if it stands on no such floor or the number can't be read. Half-Life's player
+-- stands on its floor, so its hop is the character's less this gap where it took off:
+-- the mod reads it where its jump or launch starts and at a landing on a slope (see
+-- slopeLanding), once a frame at most. At a landing the floor has been read already
+-- (one more number of it); at a take-off from a floor not read in that frame it costs
+-- one read of CurrentFloor and three of its fields.
+local function floorGap(cmc)
+    if seenGap ~= false then
+        return seenGap
+    end
+    seenGap = nil
+    local floor = seenFloor
+    if not floor then
+        floor = ue.get(cmc, "CurrentFloor")
+        if ue.typeOf(floor) ~= "UScriptStruct" or ue.bool(floor, "bWalkableFloor") ~= true
+            or ue.bool(floor, "bLineTrace") == true then
+            return nil
+        end
+    end
+    local dist = ue.number(floor, "FloorDist")
+    if dist and dist >= 0 and dist <= FLOOR_GAP then
+        seenGap = dist
+    end
+    return seenGap
 end
 
 -- The slope lines, with a budget each: slides up a slope and flights off one, and
@@ -614,11 +756,19 @@ local function slideLine(fmt, ...)
     end
 end
 
-local function landingLine(fmt, ...)
-    st.landingLines = st.landingLines + 1
-    if st.landingLines <= MAX_LANDING_LINES then
+-- hit: the landing ran into the slope; otherwise it kept its speed.
+local function landingLine(hit, fmt, ...)
+    local lines, most, rest
+    if hit then
+        st.landingLines = st.landingLines + 1
+        lines, most, rest = st.landingLines, MAX_LANDING_LINES, "that run into a slope"
+    else
+        st.keptLines = st.keptLines + 1
+        lines, most, rest = st.keptLines, MAX_KEPT_LINES, "on slopes that keep their speed"
+    end
+    if lines <= most then
         log.info("Slope: %s%s", string.format(fmt, ...),
-            st.landingLines == MAX_LANDING_LINES and " (further landings on slopes aren't logged)" or "")
+            lines == most and string.format(" (further landings %s aren't logged)", rest) or "")
     end
 end
 
@@ -626,67 +776,429 @@ local function degrees(nz)
     return math.deg(math.acos(math.max(-1, math.min(1, nz))))
 end
 
+-- Counts a landing's floor for the report (see st.floors): by its lean if the mod can
+-- use it (nx, nz as floorNormal gave them), or as one it can't use (found by a line
+-- trace, touched with an edge, or not walkable). A floor that can't be read at all has
+-- its own warning and isn't counted.
+local function noteFloor(nx, nz, readable)
+    local floors = st.floors
+    if not nx then
+        if readable ~= false then
+            floors.unusable = floors.unusable + 1
+        end
+        return
+    end
+    local lean, band = degrees(nz), #FLOOR_BANDS + 1
+    for i, limit in ipairs(FLOOR_BANDS) do
+        if lean < limit then
+            band = i
+            break
+        end
+    end
+    floors[band] = floors[band] + 1
+end
+
 -- "falling 158 u/s" or "rising 40 u/s", for a vertical speed in cm/s.
 local function vertical(vz, P)
     return string.format(vz < 0 and "falling %.0f u/s" or "rising %.0f u/s", math.abs(vz) / P.unitScale)
 end
 
+-- How Half-Life would have landed where Unreal just did. Half-Life looks for the ground
+-- once per update: a player not rising faster than 180 u/s, with a walkable floor within
+-- 2 units below, is put on it with its velocity as it is, and a held jump starts at once.
+-- Only if no update ends that close to the floor does the next one's move run into it,
+-- and only then is the velocity clipped against it. Which of the two happens depends on
+-- where the updates fall along the path. In Half-Life a hop starts on an update, from
+-- the floor, so the mod counts the updates from the take-off (w.air: how long the
+-- character had been in the air at the last frame's hook), 1/PhysicsRate s apart,
+-- whatever the game's frame rate. With one update per frame (PhysicsRate 0) the hooks
+-- are the updates.
+--
+-- Where the character was at the last update before it came down follows from what the
+-- mod has anyway: where it was at the last hook (w.at), the velocity written there, the
+-- frame's length (w.dt), where it stands now (at) and the floor's normal. Unreal's fall
+-- is a parabola (it moves a falling character with the average of the old and the new
+-- velocity), and after touching down it walks on along the floor for the rest of the
+-- frame, so the plane it stands on goes through `at`. Measured straight down, as the
+-- ground check measures, the height above that plane t seconds after the last hook was
+-- h0 + a t - g t^2 / 2. Half-Life's player is `lift` higher than that above its floor's
+-- plane (see slopeLanding): Unreal walks the character 1.9 to 2.4 cm above the floor, so
+-- if it took off from the same height, the plane through `at` is where Half-Life's
+-- player would stand, 1/32 unit off its floor's plane; and a walking height that differs
+-- between the take-off and here is taken out. Unreal lands the character when it touches
+-- the real floor, a moment after Half-Life's player came down to its floor, so that
+-- time, tc, can lie before the last hook; the path is followed back as far as needed.
+-- (fx, fy, fz): the velocity of the floor, if it is a moving platform; (rx, ry, rz): the
+-- velocity written at the last hook, relative to the floor.
+--
+-- Returns "caught" (the ground check found the floor: nothing is clipped) or "hit" (an
+-- update ran into it); the vertical speed of the update that hit (cm/s: Half-Life moves
+-- with the speed half an update on); the height above the floor's plane where the last
+-- update before the landing ended (cm; for a caught one, the update that caught it),
+-- and the vertical speed there; and how far above that plane Half-Life's player rests
+-- afterwards (cm, straight up: 1/32 unit off it, or as low as the ground check found
+-- it). Or nil and why, if it can't be told.
+local function landingKind(P, w, at, nx, ny, nz, fx, fy, fz, rx, ry, rz, lift)
+    local from, length, g = w.at, w.dt, P.gravity
+    if not (from and at) then
+        return nil, "the mod has no position for it"
+    elseif w.long then
+        return nil, "the frame was longer than the mod counts"
+    elseif not st.worldGravity then
+        return nil, "the game's gravity isn't known" -- the fall isn't the mod's parabola then
+    end
+    local dx, dy, dz = from.X - at.X + fx * length, from.Y - at.Y + fy * length, from.Z - at.Z + fz * length
+    local h0 = dz + (dx * nx + dy * ny) / nz
+    local a = rz + (rx * nx + ry * ny) / nz
+    local tc
+    if h0 < -FLOOR_GAP then
+        tc = nil -- under this plane while still in the air: it came down on something else
+    else
+        h0 = h0 + lift
+        if g > 0 then
+            -- (No root: inside Unreal's walking gap and never above the plane. The top of the path.)
+            local root = a * a + 2 * g * h0
+            tc = root > 0 and (a + math.sqrt(root)) / g or a / g
+        elseif a < 0 then
+            tc = -h0 / a
+        end
+    end
+    if not tc or tc > length + 1e-6 then
+        return nil, "the floor isn't the plane it came down on"
+    end
+    -- The last update that began at or before tc: when (tb), and how long it is.
+    local tb, step
+    if P.rate > 0 then
+        local air = w.air or 0
+        step = 1 / P.rate
+        tb = math.floor((air + tc) * P.rate + 1e-9) * step - air
+    else
+        step = w.prevDt or length
+        local back = math.ceil(-tc / step - 1e-9) -- frames before the last hook
+        if back > 0 then
+            tb = -back * step
+        else
+            tb, step = 0, length
+        end
+    end
+    local above = h0 + a * tb - 0.5 * g * tb * tb
+    local rising = rz - g * tb
+    local resting = P.restHeight / nz -- where a player rests above the plane, straight up
+    -- (The check's 2 units end short of a floor exactly 2 units below.)
+    if rising <= P.airborneSpeed and above < P.groundCheck then
+        -- Coming down on the floor by less than 2 units an update, an earlier update may
+        -- have ended within reach too: the first that did is where the player was set
+        -- down from. (Not looked for with one update per frame: the lengths of the frames
+        -- before the last two aren't kept. The height returned, which the log names, is
+        -- then the last such update's, up to nearly 2 units lower, and the resting height
+        -- up to 1/32 unit lower. The kind is the same.)
+        if P.rate > 0 then
+            for _ = 1, 64 do
+                local t = tb - step
+                local h, v = h0 + a * t - 0.5 * g * t * t, rz - g * t
+                if (w.air or 0) + t < step - 1e-9 or v > P.airborneSpeed or h >= P.groundCheck or h < 0 then
+                    break
+                end
+                tb, above, rising = t, h, v
+            end
+        end
+        -- The ground check moves the player down to its resting height, never up.
+        return "caught", nil, above, rising, math.max(0, math.min(above, resting))
+    end
+    -- The move stops where the player rests, or stays as low as it started.
+    return "hit", rising - 0.5 * g * step, above, rising, math.max(0, math.min(above, resting))
+end
+
+-- A landing's height above the slope (cm, see landingKind) in units, for the log: to 0.1
+-- unit, but where that would read the ground check's 2.0, to 0.01 and cut, not rounded,
+-- so that a height within its reach never reads 2 or more, nor one out of it less.
+local function heightText(P, above)
+    local h = math.max(above, 0) / P.unitScale
+    local text = string.format("%.1f", h)
+    if text == string.format("%.1f", P.groundCheck / P.unitScale) then
+        text = string.format("%.2f", math.floor(h * 100) / 100)
+    end
+    return text
+end
+
+-- Why a landing ran into the slope instead of being set down by the ground check, for
+-- the log. above, rising: from landingKind (nil if it couldn't tell).
+local function whyHit(P, above, rising)
+    local u = P.unitScale
+    if not above then
+        return "it was still rising faster than 180 u/s, so Half-Life has you in the air"
+    elseif rising > P.airborneSpeed then
+        return string.format("at the Half-Life update before it you were rising %.0f u/s, over the ground check's "
+            .. "180", rising / u)
+    end
+    return string.format("the Half-Life update before it ended %s units above the slope, out of the ground "
+        .. "check's reach of %.0f", heightText(P, above), P.groundCheck / u)
+end
+
+-- Whether a rise a clip left (cm/s) keeps Half-Life's player in the air, sliding up the
+-- slope. Its ground check at the start of the next update has the player on the ground
+-- once it rises no faster than 180 u/s, and that is half an update of gravity after the
+-- clip: so the rise must be over 180 u/s then (184 at the clip, at 100 updates a
+-- second). dt: this frame's length, which is the update with PhysicsRate 0.
+local function staysUp(P, rise, dt)
+    local step = P.rate > 0 and 1 / P.rate or dt
+    return rise - 0.5 * P.gravity * step > P.airborneSpeed
+end
+
+-- A slide up a slope from a clip against the floor (unit normal nx, ny, nz) that left the
+-- rise vz: Half-Life's player rests 1/32 unit off the floor's plane after it, or lower
+-- where a landing left it lower (st.landRest; see physics.simulate, which follows the
+-- path's height above the floor).
+local function newSlide(P, vz, nx, ny, nz, away)
+    return { vz = vz, away = away, nx = nx, ny = ny, nz = nz, h = st.landRest or P.restHeight / nz, rise = 0,
+        push = 0, time = 0, clipped = true, dx = 0, dy = 0, ox = 0, oy = 0 }
+end
+
+-- The end of a slide up a slope, at that ground check: with the horizontal velocity its
+-- last clip left (vx, vy) and the rise it had then.
+local function slideOver(P, vx, vy, rise)
+    local onEdge = st.slide and st.slide.edge
+    st.slide = nil
+    slideLine("the slide up the slope ended at %.0f u/s (rising %.0f u/s, not more than 180 at Half-Life's next "
+        .. "ground check)%s", horizontal(vx, vy) / P.unitScale, rise / P.unitScale, edgeNote(onEdge))
+end
+
+-- For a slide, the part of a frame that Half-Life's updates don't count (extra seconds,
+-- in a frame over 0.1 s): Unreal walks all of the frame, so the slide's gravity covers
+-- that part too, in one piece. Returns the horizontal velocity, and whether the slide
+-- is over.
+local function slideRest(P, slide, vx, vy, extra, dt)
+    local up = slide.vz - P.gravity * extra
+    if slide.nx then
+        local cx, cy
+        cx, cy, up = physics.clip(vx, vy, up, slide.nx, slide.ny, slide.nz)
+        if cx * vx + cy * vy < 0 then
+            -- So long that its gravity would turn the slide back down the slope: it
+            -- stops there (Half-Life's slide ends long before it turns).
+            cx, cy, up = 0, 0, 0
+        end
+        vx, vy = cx, cy
+    end
+    slide.vz = up
+    return vx, vy, not staysUp(P, up, dt)
+end
+
 -- A landing on a slope (see slopeStep), with (nx, ny, nz) the floor's normal and
 -- (vx, vy) the horizontal velocity, relative to a moving platform it landed on.
-local function slopeLanding(cfg, P, nx, ny, nz, vx, vy)
-    local w = st.written
-    -- Unreal's landing stands with no usable floor or a flat one; with nothing written
-    -- in the air on the frame before (after a pause, for one); and after a frame longer
-    -- than Unreal's MaxSimulationTimeStep, which Unreal moves in several steps and
-    -- lands in one of them: how fast the character fell then can't be told.
-    if not nx or nz >= 1 or not w or w.dt > st.maxStep then
+-- touchdown: where the character stands now (at), the platform's velocity (x, y, z) and
+-- how far above the floor it stands (gap, see floorGap). dt: this frame's length.
+-- The last value returned describes the landing for the hop line: how much the
+-- horizontal speed changed (change, cm/s), and without a slide its kind and the
+-- height above the slope where the last update before it ended (see landingKind).
+local function slopeLanding(cfg, P, nx, ny, nz, vx, vy, touchdown, dt)
+    -- Unreal's landing stands with no usable floor or a flat one.
+    if not nx or nz >= 1 then
         return true, vx, vy, 0
     end
-    -- The velocity it hit the floor with: what the mod wrote, plus Unreal's gravity in
-    -- the frame (it landed somewhere in it).
-    local fall = w.z - P.gravity * w.dt
-    local before = horizontal(vx, vy)
-    local cx, cy, cz = physics.clip(vx, vy, fall, nx, ny, nz)
-    local after = horizontal(cx, cy)
+    local w = st.written
     local u = P.unitScale
-    if cz > P.airborneSpeed and cfg.SlopeBoosts then
-        st.slide = { vz = cz }
-        count("slides")
-        count("slopeLandings")
-        stats.slopeGain = stats.slopeGain + (after - before)
-        slideLine("landed on a %.0f degree slope at %.0f u/s, %s: sliding up it at %.0f u/s, rising %.0f u/s "
-            .. "(Half-Life keeps you in the air above 180)", degrees(nz), before / u, vertical(fall, P), after / u,
-            cz / u)
-        return false, cx, cy, cz, nil, after - before
+    -- How Half-Life would have landed here. With nothing written in the air on the frame
+    -- before (after a pause, for one) it can't be told.
+    local kind, fall, above, rising
+    local why = "the mod has nothing from the frame before, as after a pause"
+    if w then
+        local fx, fy, fz = touchdown.x, touchdown.y, touchdown.z
+        local rx, ry, rz = w.x - fx, w.y - fy, w.z - fz
+        if st.stayBasedInAir then
+            -- The platform carried the character in the air, up and down too, and the
+            -- velocity stayed relative to it.
+            fx, fy, fz = w.baseX, w.baseY, w.baseZ
+            rx, ry, rz = w.x, w.y, w.z
+        end
+        -- How much higher Half-Life's player is above its floor's plane than the character
+        -- above the plane it now stands on. Half-Life's player took off from where it
+        -- rested: 1/32 unit off its floor's plane, at right angles to it, or lower if its
+        -- last landing left it lower (st.takeoffRest). And Unreal holds the character 1.9
+        -- to 2.4 cm above the floor it walks on, not always the same: Half-Life's hop
+        -- starts on the floor, so it is the character's less the gap at the take-off, and
+        -- the floor lies the gap at the landing below where the character now stands.
+        -- (Without both gaps they are taken as equal: half a centimetre between them is
+        -- 0.2 units of the ground check's 2, as much as a hop on the spot has to spare.)
+        local lift = st.takeoffRest or P.restHeight / nz
+        if touchdown.gap and st.takeoffGap then
+            lift = lift + touchdown.gap - st.takeoffGap
+        end
+        kind, fall, above, rising, st.landRest = landingKind(P, w, touchdown.at, nx, ny, nz, fx, fy, fz, rx, ry, rz,
+            lift)
+        if not kind then
+            -- Still rising faster than 180 u/s after the whole frame's gravity, it was in
+            -- the air for Half-Life on every update of the frame, whatever the floor: the
+            -- ground check can't have caught it. (Unreal also lands a character that rises
+            -- away from the floor, see below.)
+            why = fall -- (landingKind's reason)
+            fall = rz - P.gravity * w.dt
+            kind = fall > P.airborneSpeed and "hit" or nil
+        end
+    end
+    local before = horizontal(vx, vy)
+    if fall and touchdown.leaveFall then
+        -- A leap down a slope (see slopeStep). Half-Life's update that left the floor moved
+        -- straight ahead and ended in the air, c/rate above the slope (c: how fast the floor
+        -- falls under the velocity), with the second half of its gravity on; the mod's flight
+        -- starts from the floor without either. On an even slope the heights differ by
+        -- (c - g t / 2) / rate, t seconds into the flight, which is nothing where they come
+        -- down (t = 2 c / g): the last update above the slope is as high as Half-Life's, within
+        -- g / (2 rate^2), and the landing comes out the same kind. But Half-Life's player comes
+        -- down that half update of gravity faster, and a landing that runs into the slope
+        -- clips that fall. (Correcting the height too was tried: see CLAUDE.md, "Slopes".)
+        fall = fall - touchdown.leaveFall
+    end
+    if kind == "hit" then
+        local cx, cy, cz = physics.clip(vx, vy, fall, nx, ny, nz)
+        local after = horizontal(cx, cy)
+        if staysUp(P, cz, dt) and cfg.SlopeBoosts then
+            -- Unreal also lands a character that still rises away from the floor: its capsule
+            -- caught the edge of a ledge, or it came down on a steeper part and the frame
+            -- ended on this one. The clip leaves that velocity as it is. Half-Life has this
+            -- player in the air too, so the rules of a slide apply: no jump, and on the next
+            -- frame it flies off if its path leaves the floor far enough. If not, Unreal walks
+            -- it, and within 0.1 s the rise is down to 180 u/s (a held jump fires then) or
+            -- the path is back on the slope, a slide like any other. The line tells the two
+            -- kinds of landing apart.
+            local away = vx * nx + vy * ny + fall * nz >= 0
+            st.slide = newSlide(P, cz, nx, ny, nz, away)
+            count("slides")
+            countSlopeLanding("hit", after - before)
+            if away then
+                slideLine("the game landed you on a %.0f degree slope at %.0f u/s while still %s, away from it: "
+                    .. "Half-Life keeps you in the air above 180", degrees(nz), before / u, vertical(fall, P))
+            else
+                slideLine("landed on a %.0f degree slope at %.0f u/s, %s: sliding up it at %.0f u/s, rising %.0f u/s "
+                    .. "(Half-Life keeps you in the air above 180)", degrees(nz), before / u, vertical(fall, P),
+                    after / u, cz / u)
+            end
+            return false, cx, cy, cz, nil, { change = after - before }
+        end
+        if not cfg.SlopeLandings then
+            return true, vx, vy, 0
+        end
+        countSlopeLanding("hit", after - before)
+        if degrees(nz) >= LOGGED_SLOPE or math.abs(after - before) >= LOGGED_CHANGE * u then
+            landingLine(true, "landed on a %.0f degree slope at %.0f u/s, %s: %.0f u/s (%+.0f). It ran into the "
+                .. "slope: %s", degrees(nz), before / u, vertical(fall, P), after / u, (after - before) / u,
+                whyHit(P, above, rising))
+        end
+        return true, cx, cy, 0, nil, { change = after - before, kind = "hit", above = above }
     end
     if not cfg.SlopeLandings then
         return true, vx, vy, 0
     end
-    count("slopeLandings")
-    stats.slopeGain = stats.slopeGain + (after - before)
-    if degrees(nz) >= LOGGED_SLOPE or math.abs(after - before) >= LOGGED_CHANGE * u then
-        landingLine("landed on a %.0f degree slope at %.0f u/s, %s: %.0f u/s (%+.0f)", degrees(nz), before / u,
-            vertical(fall, P), after / u, (after - before) / u)
+    -- Caught by Half-Life's ground check, or not to be told: the speed stays, as Unreal
+    -- landed it.
+    kind = kind or "unknown"
+    countSlopeLanding(kind, 0)
+    if degrees(nz) >= LOGGED_SLOPE then
+        if kind == "caught" then
+            landingLine(false, "landed on a %.0f degree slope at %.0f u/s: the speed stays. A Half-Life update "
+                .. "ended %s units above the slope, within the ground check's reach of %.0f, which sets you down "
+                .. "before you run into it", degrees(nz), before / u, heightText(P, above), P.groundCheck / u)
+        else
+            landingLine(false, "landed on a %.0f degree slope at %.0f u/s: the speed stays. The mod can't tell "
+                .. "whether a Half-Life update would have run into it (%s)", degrees(nz), before / u, why)
+        end
     end
-    return true, cx, cy, 0, nil, after - before
+    return true, vx, vy, 0, nil, { change = 0, kind = kind, above = above }
+end
+
+-- Whether the character walked down so steeply in the frame before that one of
+-- Half-Life's updates on the ground may leave the floor (see physics.leavesFloor), at any
+-- speed: then the floor is read, also below the speed at which one could slide up a
+-- slope. It goes by where the character was at the last hook and is now (read every
+-- frame anyway), so it costs no game call.
+local function descends(P, at, dt)
+    local w = st.written
+    if not (w and w.at and at and w.mode == WALKING and w.dt and w.dt > 0) then
+        return false
+    end
+    local step = P.rate > 0 and 1 / P.rate or dt
+    return (w.at.Z - at.Z) / w.dt * step + P.restHeight >= DESCENT_SHARE * P.groundCheck
+end
+
+-- A flight off a slope that the mod starts gets its line from movement.step, once the
+-- take-off speed over the ground is known (with the velocity of the moving platform the
+-- character left, as the flight's landing line and the hop lines count it). flewLine and
+-- leaveLine give the function that writes it, called with that speed in u/s.
+
+-- Flying off the top of a slide: rise, the vertical speed it flies off with (cm/s);
+-- tail, the end of the line.
+local function flewLine(P, rise, tail)
+    return function(speed)
+        slideLine("flew off the slope at %.0f u/s, rising %.0f u/s%s", speed, rise / P.unitScale, tail)
+    end
+end
+
+-- Leaving a slope that falls away under the character (see slopeStep): (vx, vy), the
+-- velocity on the floor (relative to a moving platform, as the floor moves with it).
+local function leaveLine(P, nx, ny, nz, vx, vy, dt)
+    local u = P.unitScale
+    count("launches")
+    local falls = (vx * nx + vy * ny) / nz * (P.rate > 0 and 1 / P.rate or dt) / u
+    return function(speed)
+        slideLine("flew off a %.0f degree slope going down it at %.0f u/s (the floor falls %.1f units in one "
+            .. "Half-Life update, out of the ground check's reach of %.0f)", degrees(nz), speed, falls,
+            P.groundCheck / u)
+    end
+end
+
+-- A sloped floor the character walks on, for this frame's Half-Life updates on the
+-- ground (see walkFloor): if it falls away under the velocity (vx, vy), one of them
+-- may leave it.
+local function walkOn(cfg, nx, ny, nz, vx, vy)
+    if cfg.SlopeBoosts and nx and nz < 1 and vx * nx + vy * ny > 0 then
+        walkFloor = { nx = nx, ny = ny, nz = nz }
+    end
 end
 
 -- Half-Life's slopes, on the velocity this frame starts from (relative to a moving
 -- platform the character stands on; vz is Unreal's vertical speed). Unreal walks a
 -- character along any walkable floor keeping its horizontal speed, and lands it
 -- keeping its horizontal speed. Half-Life clips the velocity against a surface it runs
--- into (overbounce 1): at a landing (SlopeLandings), and on the ground running into an
+-- into (overbounce 1): at a landing whose move reaches the floor before the ground
+-- check does (SlopeLandings, see landingKind), and on the ground running into an
 -- upward slope. A player rising faster than 180 u/s is in the air even on a slope
 -- (SlopeBoosts): it slides up the slope without friction and flies off where the slope
 -- falls away. While it slides, Unreal still walks the character along the slope (so
 -- the game doesn't land it again every frame); the mod keeps the vertical speed
--- Half-Life would have. jumpReady: a jump would start now if on the ground; Half-Life
--- jumps before its ground move, so it runs up a slope only without one.
+-- Half-Life would have, with the gravity Unreal doesn't apply while it walks. The slide
+-- runs update by update with the rest of Half-Life's movement (physics.simulate): each
+-- update takes its gravity off and clips against the slope again if its move reaches the
+-- slope's plane (Half-Life's player rests 1/32 unit off it; the path is followed above
+-- the floor, which is measured again each frame where Unreal walked the character), and
+-- the slide is over at the start of the update that finds the rise at 180 u/s or less,
+-- half an update of gravity after the last move (see staysUp), with the speed it left,
+-- if the floor is within the ground check's 2 units of the path; where the floor fell
+-- away under the path (a top that rounds off), it flies on instead. (0.3.0 took
+-- a frame's gravity off, clipped again and then compared with 180 u/s: its slides ended
+-- later and slower than Half-Life's.) A frame longer than the updates count (0.1 s)
+-- has the slide's gravity for all of it, as Unreal walks all of it (see slideRest). A
+-- flight off the slope starts with the rise the slide had, not that less this frame's
+-- gravity: Unreal's falling update takes the frame's gravity off itself, in the same
+-- frame. jumpReady: a jump would start now if on the ground; Half-Life jumps before
+-- its ground move, so it runs up a slope only without one.
+-- Running down a slope (SlopeBoosts), Half-Life's ground move goes straight ahead and
+-- its ground check after it reaches 2 units down: where the floor falls further than
+-- that under one update's move, the player is in the air from the end of that update,
+-- without friction, until it comes down on the slope again (a landing like any other).
+-- Unreal walks a character down any walkable slope, so the mod has it leave, as at the
+-- top of a slide (SetMovementMode, no vertical speed): at the start of a frame if the
+-- last update ran on the ground and its velocity leaves this floor, or at one of the
+-- frame's updates (see walkFloor and physics.simulate, and movement.step). Not while
+-- the game's own jump is pressed (bPressedJump): Unreal does that jump. The half update
+-- of gravity Half-Life's leaving update ends with is kept for the leap's landing
+-- (leaveFall, see slopeLanding).
+-- landed: at a landing, where the character stands and the velocity of the floor (see
+-- slopeLanding); nil otherwise. pawn: the character. at: where it is now.
 -- Returns whether Half-Life has the player on the ground; the velocity; how it leaves
 -- the ground off a slope ("launch": the mod has it leave now; "off the end": Unreal
--- walked it off the end of the slope); and, at a landing on a slope, how much the
--- horizontal speed changed (cm/s).
-local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady)
+-- walked it off the end of the slope); at a landing on a slope, what it did to the
+-- horizontal speed (see slopeLanding); and at a launch, what writes its line (see
+-- flewLine: movement.step writes it once the platform's velocity is known).
+local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady, pawn, at)
     local slide = st.slide
     local u = P.unitScale
     if mode == FALLING then
@@ -694,11 +1206,12 @@ local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady)
         if not slide then
             return false, vx, vy, vz
         end
-        local up = slide.vz - P.gravity * dt
         if vz > GAME_JUMP_SHARE * P.jumpSpeed then
             -- The game's own jump, which Unreal does whenever it walks the character and
-            -- the mod couldn't hold back (see holdGameJump): the higher rise stays.
-            up = math.max(vz, up)
+            -- the mod couldn't hold back (see holdGameJump): the higher rise stays. The
+            -- game's jump has had a frame of Unreal's gravity, so the slide's rise is
+            -- compared after one too.
+            local up = math.max(vz, slide.vz - P.gravity * dt)
             slideLine("the game jumped while sliding up the slope, at %.0f u/s, rising %.0f u/s",
                 horizontal(vx, vy) / u, up / u)
             return false, vx, vy, up
@@ -706,15 +1219,16 @@ local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady)
         -- Unreal walked the character off the end of the slope: it flies on, rising as
         -- it slid.
         count("launches")
-        slideLine("off the end of the slope at %.0f u/s, rising %.0f u/s", horizontal(vx, vy) / u, up / u)
-        return false, vx, vy, up, "off the end"
+        slideLine("off the end of the slope at %.0f u/s, rising %.0f u/s%s", horizontal(vx, vy) / u, slide.vz / u,
+            edgeNote(slide.edge))
+        return false, vx, vy, slide.vz, "off the end"
     end
     local fast = vx * vx + vy * vy > (2 * P.airborneSpeed) ^ 2 -- slower can't slide up a walkable slope
-    if mode ~= WALKING or not (landed or slide or (fast and cfg.SlopeBoosts)) then
+    if mode ~= WALKING or not (landed or slide or (cfg.SlopeBoosts and (fast or descends(P, at, dt)))) then
         st.slide = nil
         return true, vx, vy, 0
     end
-    local nx, ny, nz, readable = floorNormal(cmc)
+    local nx, ny, nz, readable, edge = floorNormal(cmc)
     if readable == false then
         st.unreadableFloors = st.unreadableFloors + 1
         if st.unreadableFloors >= MAX_UNREADABLE_FLOORS then
@@ -728,44 +1242,101 @@ local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady)
         st.unreadableFloors = 0
     end
     if landed then
-        return slopeLanding(cfg, P, nx, ny, nz, vx, vy)
+        noteFloor(nx, nz, readable)
+        if nx and nz < 1 then
+            landed.gap = floorGap(cmc)
+        end
+        local ground, cx, cy, cz, leave, slope = slopeLanding(cfg, P, nx, ny, nz, vx, vy, landed, dt)
+        if ground then
+            walkOn(cfg, nx, ny, nz, cx, cy)
+        end
+        return ground, cx, cy, cz, leave, slope
     end
     if slide then
-        local up = slide.vz - P.gravity * dt
+        -- Frames in a row on an edge, for the log (see edgeNote).
+        local onEdge = slide.edge
+        slide.edge = edge and (onEdge or 0) + 1 or nil
+        -- Half-Life's velocity: as the last frame's updates left it, unless the floor fell
+        -- away under them (see below).
+        local hx, hy, hz = vx, vy, slide.vz
+        if slide.floorZ and at then
+            -- How far Half-Life's path is above the floor now (slide.h, straight up). Last
+            -- frame's updates followed it against the plane of the floor read then; Unreal
+            -- walked the character on along the real floor, which may have fallen away
+            -- under the path (the top of the slope rounding off). The path is ahead of the
+            -- character by (slide.ox, slide.oy), see movement.step.
+            local floorZ = at.Z - (floorGap(cmc) or 0) - (nx and (nx * slide.ox + ny * slide.oy) / nz or 0)
+            local drop = slide.floorZ + slide.rise - floorZ -- how far the floor lies below that plane
+            slide.h, slide.floorZ = math.max(0, slide.h + drop), floorZ
+            if slide.clipped and drop > 0 and nx and slide.nx and slide.push > 0 and slide.time > 0 then
+                -- The updates ended against that plane, but the floor bent away under them:
+                -- the clips after the path left it (their share by how far it fell, as if
+                -- it bent in one place) were the plane's, not the floor's. Taken back.
+                local was = -(vx * slide.nx + vy * slide.ny) / slide.nz
+                local now = -(vx * nx + vy * ny) / nz
+                if was > now then
+                    local back = math.min(1, drop / ((was - now) * slide.time)) * slide.push
+                    hx, hy, hz = vx - back * slide.nx, vy - back * slide.ny, slide.vz - back * slide.nz
+                end
+            end
+        end
+        slide.rise, slide.push, slide.time = 0, 0, 0
+        if not staysUp(P, hz, dt) then
+            if slide.h >= P.groundCheck then
+                -- Not rising faster than 180 u/s any more, but out of the ground check's
+                -- reach above the floor, which fell away under the slide: Half-Life's player
+                -- is in the air, and flies on, with the velocity the slide had.
+                st.slide = nil
+                count("launches")
+                return false, hx, hy, hz, "launch", nil, flewLine(P, hz, string.format(": the slide ended %.1f units "
+                    .. "above it, out of the ground check's reach of %.0f%s", slide.h / u, P.groundCheck / u,
+                    edgeNote(onEdge)))
+            end
+            -- Over at this frame's first update: on the ground from here on.
+            slideOver(P, hx, hy, hz)
+            return true, hx, hy, 0
+        end
+        slide.nx, slide.ny, slide.nz = nx, ny, nz
         if nx then
             -- Half-Life's player only touches the floor while its velocity goes into it.
             -- Where the floor falls away (the top of the slope, or a steeper part going
             -- down), it flies off if it would rise more than leaveHeight above the floor.
-            local away = vx * nx + vy * ny + up * nz
+            -- (Decided from the rise after this frame's gravity, counted over dt also in
+            -- a long frame; the flight itself starts with the rise before it, see above.)
+            local away = vx * nx + vy * ny + (slide.vz - P.gravity * dt) * nz
             if away > 0 and away * away > 2 * P.gravity * nz * P.leaveHeight then
                 st.slide = nil
                 count("launches")
-                slideLine("flew off the slope at %.0f u/s, rising %.0f u/s", horizontal(vx, vy) / u, up / u)
-                return false, vx, vy, up, "launch"
+                return false, vx, vy, slide.vz, "launch", nil, flewLine(P, slide.vz, edgeNote(onEdge))
             end
-            vx, vy, up = physics.clip(vx, vy, up, nx, ny, nz)
         end
-        if up <= P.airborneSpeed then
-            st.slide = nil
-            slideLine("the slide up the slope ended at %.0f u/s (rising %.0f u/s, not more than 180)",
-                horizontal(vx, vy) / u, up / u)
-            return true, vx, vy, 0
-        end
-        slide.vz = up
-        return false, vx, vy, up
+        -- (The frame's updates of the slide run in physics.simulate, see movement.step.)
+        slide.vz = hz
+        return false, hx, hy, hz
     end
-    if nx and nz < 1 and not jumpReady then
-        -- Running into an upward slope, Half-Life's ground move clips the velocity
-        -- against it and keeps its vertical part: rising faster than 180 u/s, the
-        -- player is in the air on the next update.
-        local _, _, up = physics.clip(vx, vy, 0, nx, ny, nz)
-        if up > P.airborneSpeed then
-            st.slide = { vz = up }
-            count("slides")
-            slideLine("ran into a %.0f degree slope at %.0f u/s: sliding up it, rising %.0f u/s (Half-Life keeps "
-                .. "you in the air above 180)", degrees(nz), horizontal(vx, vy) / u, up / u)
-            return false, vx, vy, up
+    if nx and nz < 1 then
+        -- Running down a slope: the last update ran on the ground, and its ground move
+        -- left the floor (a jump can't start then: the player is in the air).
+        if st.groundSteps > 0 and physics.leavesFloor(vx, vy, nx, ny, nz, P.rate > 0 and 1 / P.rate or dt,
+            P.groundCheck, P.restHeight) and ue.bool(pawn, "bPressedJump") ~= true then
+            -- (With PhysicsRate 0 the update that left was the frame before.)
+            leaveFall = 0.5 * P.gravity * (P.rate > 0 and 1 / P.rate or (st.written and st.written.dt or dt))
+            return false, vx, vy, 0, "launch", nil, leaveLine(P, nx, ny, nz, vx, vy, dt)
         end
+        if not jumpReady then
+            -- Running into an upward slope, Half-Life's ground move clips the velocity
+            -- against it and keeps its vertical part: if that still rises faster than 180
+            -- u/s at the next update's ground check, the player is in the air from then on.
+            local _, _, up = physics.clip(vx, vy, 0, nx, ny, nz)
+            if staysUp(P, up, dt) then
+                st.slide = newSlide(P, up, nx, ny, nz)
+                count("slides")
+                slideLine("ran into a %.0f degree slope at %.0f u/s: sliding up it, rising %.0f u/s (Half-Life "
+                    .. "keeps you in the air above 180)", degrees(nz), horizontal(vx, vy) / u, up / u)
+                return false, vx, vy, up
+            end
+        end
+        walkOn(cfg, nx, ny, nz, vx, vy)
     end
     return true, vx, vy, 0
 end
@@ -799,12 +1370,15 @@ local function keysHeld(forward, right)
         .. (right > 0 and "D" or "")
 end
 
--- slope: how much a landing on a slope changed the horizontal speed (cm/s), if it did.
+-- slope: at a landing on a slope, what it did to the horizontal speed (see slopeLanding).
+-- The line says which kind of landing it was, so a reader can tell why one landing on
+-- a hill changed the speed and the next didn't.
 local function hopLine(hop, landing, P, slope)
     st.hops = st.hops + 1
-    if st.hops > MAX_HOP_LINES then
+    if st.hopLines >= MAX_HOP_LINES then
         return
     end
+    st.hopLines = st.hopLines + 1
     local u = P.unitScale
     local time = math.max(hop.time, 1e-6)
     local gain = (landing - hop.takeoff) / u
@@ -813,9 +1387,19 @@ local function hopLine(hop, landing, P, slope)
     end
     local onSlope = ""
     if slope then
-        local change = slope / u
-        onSlope = string.format(", slope %+.0f%s", math.abs(change) <= 0.5 and 0 or change,
-            st.slide and " (sliding up it)" or "")
+        local change = slope.change / u
+        change = math.abs(change) <= 0.5 and 0 or change
+        local from = slope.above and string.format(" from %s u up", heightText(P, slope.above)) or ""
+        if st.slide then
+            onSlope = string.format(", slope %+.0f (%s)", change, st.slide.away and "still in the air"
+                or "sliding up it")
+        elseif slope.kind == "hit" then
+            onSlope = string.format(", slope %+.0f (ran into it%s)", change, from)
+        elseif slope.kind == "caught" then
+            onSlope = string.format(", slope: speed kept (set down%s)", from)
+        else
+            onSlope = ", slope: speed kept (can't tell how it landed)"
+        end
     end
     local keys = {}
     for _, key in ipairs({ "W", "A", "S", "D" }) do
@@ -831,19 +1415,27 @@ local function hopLine(hop, landing, P, slope)
         .. "the air, view turned %.0f deg (%.0f deg/s), keys %s, speed cuts %d%s%s", hop.n, hop.frames / time,
         hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, gain, onSlope, hop.time,
         hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", st.counts.cuts - hop.cuts, body,
-        st.hops == MAX_HOP_LINES and " (further hops aren't logged)" or "")
+        st.hopLines == MAX_HOP_LINES and " (further hops aren't logged)" or "")
 end
 
 -- Where the character heads in the air (see movement.heading): the yaw of hx, hy,
 -- the horizontal velocity the mod hands to Unreal apart from the moving platform's
 -- that leaving it added, so that hopping in place on a moving platform doesn't turn
 -- the body to the platform's way. The body's target is led by how fast the heading
--- turns. The heading only changes in Half-Life updates, so that rate is measured over
--- the time since the last frame that ran one, and a frame that runs none keeps the
--- last rate (above PhysicsRate frames per second, a rate from one frame alone read 0
--- in such a frame and far too much in the next). It starts again whenever the run of
--- air frames breaks.
-local function trackHeading(frame, hx, hy, dt, frameDt, steps)
+-- turns. The heading only changes in Half-Life updates, each with the view of its own
+-- time (physics.simulate), so that rate is the heading's turn over the time the
+-- frame's updates stand for (updateTime: their number over PhysicsRate; with
+-- PhysicsRate 0, the time since the last frame that ran one), and a frame that runs
+-- none keeps the last rate. A frame with two updates then turns the heading and the
+-- target twice as far as one with one, while ALS turns the body evenly, within about
+-- an update's turn of the heading. (Over the frames' time the rate read 0.6 to 1.6
+-- times the real one, by the frame's number of updates, and the target jumped by
+-- about 20 degrees from frame to frame.)
+-- It starts again whenever the run of air frames breaks. When a run ends because the
+-- character got too slow, the body's target is once more the last heading, without
+-- the lead. The rate isn't averaged: an average leaves the body further behind after
+-- every change between A and D (see "Facing" in CLAUDE.md).
+local function trackHeading(frame, hx, hy, dt, frameDt, steps, updateTime)
     local going = st.headingFrame == frame - 1 and st.headingYaw ~= false
     local heading, target = false, false
     if hx * hx + hy * hy > HEADING_SPEED * HEADING_SPEED then
@@ -852,12 +1444,20 @@ local function trackHeading(frame, hx, hy, dt, frameDt, steps)
         if going and dt > 0 then
             st.headingTime = st.headingTime + dt
             if steps > 0 then
-                st.headingRate = physics.turn(st.headingRef, heading) / st.headingTime
+                st.headingRate = physics.turn(st.headingRef, heading) / (updateTime or st.headingTime)
                 st.headingRef, st.headingTime = heading, 0
             end
             local lead = (st.headingRate or 0) * math.max(0, 1 / ALS_AIR_TURN - (frameDt or dt))
             target = heading + math.max(-LEAD_LIMIT, math.min(LEAD_LIMIT, lead))
         end
+    elseif going then
+        -- Too slow from here on (a wall hit head on, braking in the air). The target
+        -- of the frame before was led, and nothing is written while it is slow: ALS
+        -- would go on turning the body to that target, up to LEAD_LIMIT degrees past
+        -- where the character last headed, and leave it there on the ground (it turns
+        -- a body there only above 150 cm/s, or with movement input, which the mod
+        -- takes). So the body gets the last heading once, to settle on.
+        target = st.headingYaw
     end
     if not (heading and going) then
         st.headingRate, st.headingRef, st.headingTime = nil, heading, 0
@@ -871,7 +1471,7 @@ end
 -- Read once per logged hop, at its top, and only if movement.faceHeading turned the
 -- body to where it heads in that frame (not in first person, where it faces the view).
 local function bodyOffset(pawn, frame)
-    if st.hops >= MAX_HOP_LINES or st.facedFrame ~= frame - 1 or type(st.headingYaw) ~= "number" then
+    if st.hopLines >= MAX_HOP_LINES or st.facedFrame ~= frame - 1 or type(st.headingYaw) ~= "number" then
         return nil
     end
     local ok, rotation = ue.call(pawn, "K2_GetActorRotation")
@@ -888,6 +1488,7 @@ end
 function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     local mode = cmc.MovementMode
     local onGround = mode == WALKING or mode == NAVWALKING
+    seenFloor, seenNz, seenGap, walkFloor, leaveFall = nil, nil, false, nil, nil
 
     -- What carries over from the last frame only does so if the mod moved the
     -- character on the frame just before.
@@ -898,6 +1499,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         st.lastMode = nil
         st.hop = nil
         st.airBaseX, st.airBaseY = 0, 0
+        st.airNext, st.takeoffGap, st.takeoffRest = nil, nil, nil
         st.slide, st.flight = nil, nil
     elseif st.written and st.written.afterMove then
         -- Only if the mod moved the character on the frame before that one too: the
@@ -949,9 +1551,11 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     local landed = st.lastMode == FALLING and onGround
     if not onGround and st.lastMode and st.lastMode ~= FALLING then
         -- Walked off a ledge in Unreal's last update: leaving a moving platform added
-        -- its velocity (not with bStayBasedInAir), as the mod's jump does.
+        -- its velocity (not with bStayBasedInAir), as the mod's jump does. (How far above
+        -- the floor it stood there wasn't read: the mod reads that at its own take-offs.)
         local w = st.written
         st.airBaseX, st.airBaseY = 0, 0
+        st.takeoffGap, st.takeoffRest = nil, nil
         if w and not st.stayBasedInAir then
             st.airBaseX, st.airBaseY = w.baseX, w.baseY
         end
@@ -959,30 +1563,58 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     local vx, vy = checkCut(cmc, cfg, P, rx, ry, rz, mode, landed, at)
     st.limiterWoke = false
     local vz = rz
+    if not onGround and st.lastMode and st.lastMode ~= FALLING and not st.slide
+        and rz <= GAME_JUMP_SHARE * P.jumpSpeed then
+        -- Walked off a ledge: Half-Life's update that walked off ended in the air, so the
+        -- second half of its gravity stayed on the vertical speed (it is zeroed only on the
+        -- ground), where Unreal starts the fall from 0. (Not the game's own jump, nor the
+        -- end of a slide, whose rise slopeStep keeps.)
+        vz = vz - 0.5 * P.gravity * (P.rate > 0 and 1 / P.rate or (st.written and st.written.dt or dt))
+    end
 
     local landingSpeed
+    -- At a landing: where the character stands now, and the velocity of the floor it
+    -- landed on (a moving platform's), for the slopes (see slopeLanding).
+    local touchdown
     if landed then
         landingSpeed = horizontal(vx, vy)
         stats.landings = stats.landings + 1
         stats.landingLoss = stats.landingLoss + math.max(0, st.lastSpeed - horizontal(rx, ry))
+        if st.hop and st.hop.frames == 0 then
+            -- Unreal landed the jump again within the frame it started in: the floor
+            -- rose faster than the jump (a steep slope taken fast). With SlopeBoosts such
+            -- a landing starts a slide; without (or on a floor the mod can't use) a held
+            -- jump key jumps again on every frame. Not a hop: it was never in the air on
+            -- a frame of the mod's, so it has no hop line and isn't in the strafing
+            -- numbers. It is counted, for the status line and the report.
+            st.hop = nil
+            count("groundedJumps")
+            log.first("grounded-jump", "A jump landed again within the frame it started in (at %.0f u/s): the floor "
+                .. "rises faster than the jump here. Such jumps aren't hops: the status lines and the report count "
+                .. "them.", landingSpeed / P.unitScale)
+        end
         if st.hop then
             stats.airHops = stats.airHops + 1
             stats.airGain = stats.airGain + (st.lastSpeed - st.hop.takeoff)
             stats.airTurn = stats.airTurn + st.hop.turn
         end
+        local leftWith -- (a leap down a slope: see slopeLanding)
         if st.flight then
             flightLine(st.flight, landingSpeed, P)
+            leftWith = st.flight.leaveFall
             st.flight = nil
         end
+        touchdown = { at = at, x = 0, y = 0, z = 0, leaveFall = leftWith }
         -- Landed on a moving platform: from now on Unreal carries the character with
         -- it, apart from its velocity, but leaves the velocity as it was in the air,
         -- so the platform's motion would count twice (and each hop on the platform
         -- would add its speed again). Take the platform's velocity out, as leaving it
         -- put it in. (With bStayBasedInAir the velocity stayed relative to the platform.)
         if not st.stayBasedInAir then
-            local baseX, baseY = platformVelocity(cmc)
+            local baseX, baseY, baseZ = platformVelocity(cmc)
             if baseX then
                 vx, vy = vx - baseX, vy - baseY
+                touchdown.x, touchdown.y, touchdown.z = baseX, baseY, baseZ or 0
             end
         end
     end
@@ -994,10 +1626,14 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
 
     -- Half-Life's slopes: whether Half-Life has the player on the ground (it is in the
     -- air while Unreal walks it up a slope), and how it leaves the ground off a slope.
-    local hlGround, leave, slope = onGround, nil, nil
-    if (cfg.SlopeLandings or cfg.SlopeBoosts) and not st.slopeBroken then
-        hlGround, vx, vy, vz, leave, slope = slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt,
-            jumpHeld and (cfg.AutoHop or not st.jump.latched))
+    local hlGround, leave, slope, launchLine = onGround, nil, nil, nil
+    local slopes = (cfg.SlopeLandings or cfg.SlopeBoosts) and not st.slopeBroken
+    if not st.slide then
+        st.landRest = nil -- (a landing in this frame sets it; a slide keeps its landing's)
+    end
+    if slopes then
+        hlGround, vx, vy, vz, leave, slope, launchLine = slopeStep(cmc, cfg, P, mode, touchdown, vx, vy, vz, dt,
+            jumpHeld and (cfg.AutoHop or not st.jump.latched), pawn, at)
     end
     local launch = leave == "launch"
     if landed then
@@ -1006,15 +1642,58 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         end
         st.hop = nil
     end
-    if st.slide then
+    local slide = st.slide
+    if slide then
+        if not slide.floorZ and at then
+            -- Half-Life's path starts on the floor under the character.
+            slide.floorZ, slide.ox, slide.oy = at.Z - (floorGap(cmc) or 0), 0, 0
+        end
         holdGameJump(pawn)
+        -- With auto hop a held jump starts on the update the slide ends on (a press
+        -- without it was used up in the air, as in Half-Life).
+        slide.jump = jumpHeld and cfg.AutoHop
     end
     local doJump = physics.wantJump(st.jump, jumpHeld, hlGround, cfg.AutoHop)
 
+    local floor = hlGround and not slide and walkFloor or nil
     local nx, ny, nz, jumped, steps = physics.simulate(st.sim, vx, vy, vz, hlGround, yaw, wish, doJump, P, dt,
-        P.rate)
+        P.rate, slide, floor)
     stats.steps = stats.steps + steps
+    if floor and floor.left and floor.left < steps and ue.bool(pawn, "bPressedJump") ~= true then
+        -- Running down a slope, one of this frame's updates on the ground left the floor
+        -- (see slopeStep): in the air for the rest of them, and from now on. (After the
+        -- frame's last update, the next frame's start decides it, as Unreal walks on.)
+        launchLine = leaveLine(P, floor.nx, floor.ny, floor.nz, nx, ny, dt)
+        hlGround, leave, launch = false, "launch", true
+        leaveFall = 0.5 * P.gravity * (P.rate > 0 and 1 / P.rate or dt)
+    end
+    if slide then
+        if slide.ended then
+            -- Over at one of this frame's updates: the rest of them were on the ground.
+            slideOver(P, slide.endX, slide.endY, slide.endZ)
+            hlGround = true
+        else
+            slide.vz = nz
+            -- How far Half-Life's path is ahead of the character: the updates moved it, and
+            -- Unreal walks the character with the velocity they left, for the whole frame.
+            slide.ox = slide.ox + slide.dx - nx * (frameDt or dt)
+            slide.oy = slide.oy + slide.dy - ny * (frameDt or dt)
+            slide.dx, slide.dy = 0, 0
+            if frameDt and frameDt > dt then
+                local over
+                -- (The path starts again from the floor: the updates don't count the rest
+                -- of this frame, which Unreal walks, clipped against the floor.)
+                slide.h, slide.clipped, slide.floorZ = P.restHeight / (slide.nz or 1), true, nil
+                nx, ny, over = slideRest(P, slide, nx, ny, frameDt - dt, dt)
+                if over then
+                    slideOver(P, nx, ny, slide.vz)
+                    hlGround = true
+                end
+            end
+        end
+    end
     local leaving = jumped or launch
+    st.groundSteps = (hlGround and not leaving) and st.groundSteps + steps or 0
 
     local bx, by, bz = 0, 0, 0
     if leaving then
@@ -1023,6 +1702,12 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         else
             log.first("launch", "First flight off a slope by the mod (speed %.0f cm/s)", horizontal(nx, ny))
         end
+        -- How far above the floor it stands as it takes off, and where Half-Life's
+        -- player rests there (as its landing left it, or 1/32 unit off this floor's
+        -- plane if the floor was read in this frame), for the landing (see
+        -- slopeLanding): read before the floor is gone.
+        st.takeoffGap = slopes and floorGap(cmc) or nil
+        st.takeoffRest = st.landRest or (seenNz and P.restHeight / seenNz) or nil
         -- With bStayBasedInAir, Unreal keeps carrying the character with the
         -- platform in the air and adds nothing when it leaves the ground, so the
         -- mod keeps nothing either.
@@ -1040,7 +1725,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             bx, by, bz = platformX, platformY, platformZ
             local ux, uy, uz = cx - bx, cy - by, cz - bz
             if ux * ux + uy * uy + uz * uz > 25 then
-                local changes = count("jumpChanges")
+                local changes = noted("jumpChanges")
                 if changes <= MAX_NOTE_LINES then
                     log.info("Something in the game changed the velocity by (X=%.0f Y=%.0f Z=%.0f) cm/s when %s", ux,
                         uy, uz, jumped and "the jump started; the mod's jump ignores it"
@@ -1059,13 +1744,23 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     -- landing reads it; relative to the platform on it. With bStayBasedInAir, relative
     -- to it at a jump and in the air too: the platform goes on carrying the character.
     st.lastSpeed = horizontal(nx + bx, ny + by)
+    if launchLine then
+        -- A flight off a slope the mod started: its line, with its take-off speed as the
+        -- landing line after it (flightLine) and the hop lines count it: with the velocity
+        -- of the moving platform it left.
+        launchLine(st.lastSpeed / P.unitScale)
+    end
     if jumped then
-        stats.hops = stats.hops + 1
         st.hop = { n = st.hops + 1, takeoff = st.lastSpeed, time = 0, turn = 0, frames = 0, steps = 0,
             cuts = st.counts.cuts, keys = {}, yaw = yaw }
     elseif st.hop and not onGround then
         local hop = st.hop
-        hop.time = hop.time + dt
+        if hop.frames == 0 then
+            -- A hop from its first frame in the air on: a jump that Unreal lands again
+            -- within its own frame isn't one (see the landing above).
+            stats.hops = stats.hops + 1
+        end
+        hop.time = hop.time + (frameDt or dt) -- (all of a long frame: Unreal moves all of it)
         hop.frames = hop.frames + 1
         hop.steps = hop.steps + steps
         hop.turn = hop.turn + math.abs(physics.turn(hop.yaw, yaw))
@@ -1081,12 +1776,13 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     end
     -- A flight off a slope isn't a hop: it has no hop line and isn't in the strafing stats.
     if leave then
-        st.flight = { takeoff = st.lastSpeed, time = 0 }
+        st.flight = { takeoff = st.lastSpeed, time = 0, leaveFall = leaveFall }
     elseif st.flight and not onGround then
-        st.flight.time = st.flight.time + dt
+        st.flight.time = st.flight.time + (frameDt or dt)
     end
     if leaving or mode == FALLING then
-        trackHeading(frame, nx + bx - st.airBaseX, ny + by - st.airBaseY, dt, frameDt, steps)
+        trackHeading(frame, nx + bx - st.airBaseX, ny + by - st.airBaseY, dt, frameDt, steps,
+            P.rate > 0 and steps > 0 and steps / P.rate or nil)
     end
     if st.lastSpeed > stats.top then
         stats.top = st.lastSpeed
@@ -1115,15 +1811,35 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     -- (none after the mod's jump, unless bStayBasedInAir), read while it still
     -- stands on it: that update starts by moving it along with the platform, and
     -- adds the platform's velocity if it walks off.
-    local baseX, baseY = 0, 0
+    local baseX, baseY, baseZ = 0, 0, 0
     if (onGround and not leaving) or st.stayBasedInAir then
-        baseX, baseY = platformVelocity(cmc)
+        baseX, baseY, baseZ = platformVelocity(cmc)
     end
+    -- How long the character has been in the air at this hook, for its landing (see
+    -- landingKind): Half-Life's updates of a hop count from its take-off. A flight that
+    -- the mod first sees now began in Unreal's last update. The game's own jump started
+    -- at the hook before, so it counts from there. Walking off a ledge, Unreal walked
+    -- that whole frame along the floor and the fall starts here, as Half-Life's starts
+    -- at the end of the update that left the ground (with the second half of that
+    -- update's gravity on it, see above): it counts from now. Unreal doesn't
+    -- move a paused frame, so a pause in the middle of a hop doesn't count (st.airNext
+    -- stays through movement.hold).
+    local was, air = st.written, nil
+    if leaving then
+        air = 0
+    elseif mode == FALLING then
+        air = st.airNext
+        if not air then
+            air = (rz > GAME_JUMP_SHARE * P.jumpSpeed and was and was.dt) or 0
+        end
+    end
+    st.airNext = air and air + (frameDt or dt)
     -- What the game should hand back next frame, once its braking took the extra,
-    -- and where the character was before this frame's move.
+    -- and where the character was before this frame's move. long: a frame longer than
+    -- the Half-Life updates count; prevDt: the length of the frame before this one.
     st.written = { x = nx + bx, y = ny + by, z = writtenZ, mode = leaving and FALLING or mode, jumped = jumped,
-        launched = launch, at = at, dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0,
-        afterMove = afterMove }
+        launched = launch, at = at, dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0, baseZ = baseZ or 0,
+        afterMove = afterMove, air = air, prevDt = was and was.dt, long = frameDt ~= nil and frameDt > dt }
 end
 
 --- A frame Unreal runs as paused (see main.lua's isPaused). Unreal doesn't move the
@@ -1142,12 +1858,14 @@ end
 --- Where the character heads in the air in this frame, for the body to face: the
 --- yaw in degrees for it to turn towards (where it heads, led by how fast that turns),
 --- and the yaw where it heads (that of the horizontal velocity the mod handed to
---- Unreal, apart from a moving platform it left); false and false while that is
---- slower than HEADING_SPEED. nil unless the mod moved the character in this frame
---- and it is in the air after the mod's update (its jump included).
+--- Unreal, apart from a moving platform it left). While that is slower than
+--- HEADING_SPEED: on the first such frame after one with a heading, both are that
+--- last heading, for the body to settle on instead of the led target; after that,
+--- false and false. nil unless the mod moved the character in this frame and it is
+--- in the air after the mod's update (its jump included).
 function movement.heading(frame)
     if st.headingFrame == frame then
-        return st.headingTarget, st.headingYaw
+        return st.headingTarget, st.headingYaw or st.headingTarget
     end
     return nil
 end
@@ -1201,6 +1919,7 @@ function movement.release()
     st.written = nil
     st.hop = nil
     st.slide, st.flight = nil, nil
+    seenFloor, seenNz, seenGap = nil, nil, false
     log.debug("Movement given back to the game")
 end
 
@@ -1222,6 +1941,16 @@ function movement.forget()
     st.written = nil
     st.hop = nil
     st.slide, st.flight = nil, nil
+    seenFloor, seenNz, seenGap = nil, nil, false
+end
+
+--- Starts the counts of this file's lines again (hops, landings on slopes of both
+--- kinds, slides and flights, and what the game did: speed cuts, its limiter,
+--- MaxWalkSpeed, a changed jump), so that what comes next is logged like a session's
+--- first: for the reload key, which a test presses before each part it wants in the log.
+function movement.logAgain()
+    st.hopLines, st.slideLines, st.landingLines, st.keptLines = 0, 0, 0, 0
+    st.noteLines = {}
 end
 
 --- What happened since the last call: frames moved, where the input came from,
@@ -1252,11 +1981,14 @@ function movement.status()
         maxSpeed = st.maxSpeed,
         stayBasedInAir = st.stayBasedInAir,
         slopeBroken = st.slopeBroken,
+        floors = st.floors,
+        slopeGained = st.slopeGained,
+        slopeLost = st.slopeLost,
         sliding = st.slide ~= nil,
-        maxStep = st.maxStep,
         gameMaxWalkSpeed = st.cmc and overrides:saved(st.cmc, "MaxWalkSpeed"),
         counts = st.counts,
         hops = st.hops,
+        hopLinesLeft = math.max(0, MAX_HOP_LINES - st.hopLines),
     }
 end
 

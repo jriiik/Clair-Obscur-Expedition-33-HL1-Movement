@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.3.0"
+local VERSION = "0.3.1"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -37,7 +37,9 @@ local REPORT_DELAY = 3 -- seconds after first taking over a character, before th
 local CAMERA_REPORT_DELAY = 10 -- seconds after taking over: a camera report if first person still waits
 local REPORT_WAIT = 10 -- seconds the report key's report waits at most for the game to finish loading
 local STATUS_INTERVAL = 10 -- seconds between status lines while the mod acts
-local MAX_STATUS_LINES = 30 -- per session
+-- Status lines until the reload key starts them again (see applyReloadedSettings):
+-- five minutes in which something happens (see statusLine).
+local MAX_STATUS_LINES = 30
 local MODE_NAMES = { [0] = "none", [1] = "walking", [2] = "nav-mesh walking", [3] = "falling",
     [4] = "swimming", [5] = "flying", [6] = "custom" }
 -- First person waiting for these is expected, so it doesn't get a camera report.
@@ -119,11 +121,26 @@ local function state(topic, key, text, force)
     log.state(topic, text or key, force)
 end
 
+-- Runs config.lua and returns its table. Like dofile, but with globals of its own
+-- (env, see settings.environment), which note the words Lua doesn't know.
+local function runConfig(path, env)
+    local chunk, problem = loadfile(path, "t", env)
+    if not chunk then
+        error(problem, 0)
+    end
+    return chunk()
+end
+
 local function loadSettings()
-    local user, problem
+    local user, problem, unknown
     if DIR ~= "" then
-        local ok, result = pcall(dofile, DIR .. "config.lua")
-        if ok then
+        local env
+        env, unknown = settings.environment(_G)
+        local ok, result = pcall(runConfig, DIR .. "config.lua", env)
+        if ok and result == nil then
+            -- It ran and gave nothing: an empty file, only comments, or a table it doesn't return.
+            problem = "it gives no settings (it has to start its list with return {, as the shipped one does)"
+        elseif ok then
             user = result
         else
             problem = result
@@ -137,7 +154,7 @@ local function loadSettings()
         end
     end
     local warnings
-    cfg, warnings = settings.load(user, rawget(_G, "Key"))
+    cfg, warnings = settings.load(user, rawget(_G, "Key"), unknown)
     P = settings.physics(cfg)
     log.debugEnabled = cfg.Debug
     if problem then
@@ -299,6 +316,8 @@ local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
                 status.lastDistance or 0)
         elseif status.state == "waiting" and status.waiting == "blend" then
             return "waiting (the game's camera is still blending over to your character)"
+        elseif status.state == "waiting" and status.waiting == "body" then
+            return "waiting (the game hasn't drawn your character's body yet; a few frames at most)"
         elseif status.state == "waiting" or status.state == "off" then
             return "waiting (the game shows no camera to move to the eyes)"
         end
@@ -388,7 +407,9 @@ local SPEEDOMETER_HIDDEN_FOR = { dialogue = true, cinematic = true, ["view-targe
 -- in the movement modes the mod leaves to the game (a mantle or a climb, which run
 -- in mode None, swimming, flying). The speed is the horizontal speed Unreal moved
 -- the character with, in Half-Life units per second: what the mod read back on
--- this frame, or else the movement component's velocity.
+-- this frame, or else the movement component's velocity (0 during an ALS mantle:
+-- entering mode None stops the velocity, and the mantle moves the character
+-- without one).
 local function speedometerStep(pc, pawn, cmc, inBattle, paused)
     local show = mod.speedometerOn and not paused and not inBattle
         and not SPEEDOMETER_HIDDEN_FOR[mod.cameraBlock or ""] and inputBlock(pc, pawn) == nil
@@ -449,6 +470,13 @@ local function statusLine()
     if mod.statusLines >= MAX_STATUS_LINES or (moved.frames == 0 and not camera.isActive()) then
         return
     end
+    -- Ten seconds in which nothing happened get no line and don't count: the game
+    -- paused in its menu, or the character standing still with the view at rest. (A
+    -- test has many such breaks, and 0.3.0 spent most of its status lines on them.)
+    if moved.hops == 0 and moved.top < 1 and window.turn < 1
+        and moved.cuts + moved.wakes + moved.rewrites + moved.leaks == 0 then
+        return
+    end
     mod.statusLines = mod.statusLines + 1
     local u = P.unitScale
     local fps = window.frames / math.max(window.time, 1e-6)
@@ -459,8 +487,11 @@ local function statusLine()
         parts[#parts + 1] = string.format("moved on %d frames with %.1f Half-Life updates each (input from keys %d, "
             .. "stick %d, game %d, none %d)", moved.frames, moved.steps / moved.frames, moved.keys, moved.stick,
             moved.game, moved.none)
-        parts[#parts + 1] = string.format("%d hops, top speed %.0f u/s (%.0f on the ground)", moved.hops,
-            moved.top / u, moved.topGround / u)
+        -- (A jump that Unreal landed again within the frame it started in isn't a hop,
+        -- see movement.step: counted apart, so the per-jump numbers are about hops.)
+        parts[#parts + 1] = string.format("%d hops%s, top speed %.0f u/s (%.0f on the ground)", moved.hops,
+            moved.groundedJumps > 0 and string.format(" (and %d jumps that landed again within their own frame)",
+                moved.groundedJumps) or "", moved.top / u, moved.topGround / u)
         if moved.airHops > 0 then
             local gain = moved.airGain / moved.airHops / u
             if math.abs(gain) <= 0.5 then
@@ -470,10 +501,12 @@ local function statusLine()
                 moved.airTurn / moved.airHops)
         end
         if moved.slopeLandings + moved.slides + moved.launches > 0 then
+            -- Only the landings a Half-Life update ran into change the speed; the others
+            -- were set down first by its ground check (or couldn't be told) and keep it.
             local slopeGain = moved.slopeGain / u
-            parts[#parts + 1] = string.format("slopes: %d landings on one (%+.0f u/s in all), %d slides up one, "
-                .. "%d flights off one", moved.slopeLandings, math.abs(slopeGain) <= 0.5 and 0 or slopeGain,
-                moved.slides, moved.launches)
+            parts[#parts + 1] = string.format("slopes: %d landings on one (%d ran into it: %+.0f u/s in all), "
+                .. "%d slides up one, %d flights off one", moved.slopeLandings, moved.slopeHits,
+                math.abs(slopeGain) <= 0.5 and 0 or slopeGain, moved.slides, moved.launches)
         end
         if moved.landings > 0 then
             parts[#parts + 1] = string.format("at landing the game took %.0f u/s on average%s",
@@ -717,7 +750,9 @@ local function tick(context, deltaSeconds)
     end
     if late and not mod.lateHook then
         log.warn("Only the character's update could be hooked. It runs after the game has moved the character, "
-            .. "so the Half-Life movement stays off; first person still works. Please report UE4SS.log.")
+            .. "so the Half-Life movement stays off; first person still works. It doesn't run while the game is "
+            .. "paused: the speedometer stays on the screen then, and the mod's keys act once the game runs again. "
+            .. "Please report UE4SS.log.")
     end
     mod.lateHook = late
     local started = clock()
@@ -847,17 +882,36 @@ local function toggleSpeedometer()
     else
         speedometer.release()
     end
-    log.info("Speedometer %s", mod.speedometerOn and "on" or "off")
+    -- With the mod off nothing shows: the log says so, since the player sees no change.
+    local note = ""
+    if mod.speedometerOn and not mod.enabled then
+        note = cfg.ToggleKey and string.format(" (it shows once the mod is on: %s)", cfg.ToggleKey)
+            or " (it shows once the mod is on)"
+    end
+    log.info("Speedometer %s%s", mod.speedometerOn and "on" or "off", note)
 end
 
 -- The part of reloading the settings that touches the game, on the next frame.
-local function applyReloadedSettings()
+-- changed: what the reload changed (settings.changes), for the log. The counts of the
+-- lines the log only takes so many of start again too (hops, slopes, status, what the
+-- game did to the speed, changes of state, errors): a test presses the reload key
+-- before each part it wants in the log.
+local function applyReloadedSettings(changed)
     releaseAll()
     speedometer.retry() -- made again on this frame, with the new place, size and colour
     mod.recheck = true -- check the character again with the new settings
     guard.reset()
     camera.retry(true)
-    log.info("Settings reloaded (new hotkeys take effect after restarting the game)")
+    movement.logAgain()
+    log.again()
+    mod.statusLines = 0
+    local texts = {}
+    for i, change in ipairs(changed) do
+        texts[i] = string.format("%s = %s (was %s)", change.name, change.value, change.was)
+    end
+    log.info("Settings reloaded (new hotkeys take effect after restarting the game). Changed: %s. The log's counts "
+        .. "start again: it has room for the next hops, slopes, status lines and changes of state.",
+        #texts > 0 and table.concat(texts, ", ") or "nothing")
 end
 
 local function reportKey()
@@ -886,9 +940,13 @@ local KEYS = {
         return toggleCamera
     end,
     reload = function()
+        local before = cfg
         loadSettings() -- only reads config.lua
         ensureHooks() -- JumpInput may need the jump hook now
-        return applyReloadedSettings
+        local changed = settings.changes(cfg, before)
+        return function()
+            applyReloadedSettings(changed)
+        end
     end,
     report = function()
         return reportKey
@@ -939,7 +997,12 @@ mod.enabled = cfg.StartEnabled
 mod.cameraOn = true
 mod.speedometerOn = cfg.Speedometer
 
-guard.whenOff(CAMERA_STEP, camera.release)
+guard.whenOff(CAMERA_STEP, function()
+    -- First: the release may be what keeps failing. The camera step no longer says
+    -- why first person waits, so the speedometer doesn't stay hidden for its last answer.
+    mod.cameraBlock = nil
+    camera.release()
+end)
 guard.whenOff(MOVEMENT_STEP, movement.release)
 guard.whenOff(SPEEDOMETER_STEP, speedometer.release)
 journal.load() -- what a previous copy of the mod left changed, if UE4SS restarted the mods

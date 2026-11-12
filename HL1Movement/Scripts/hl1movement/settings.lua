@@ -261,19 +261,60 @@ local function check(rule, value, keyTable)
     return false, "has an unknown type"
 end
 
+local MAX_UNKNOWN_WORDS = 8 -- named in the warning; the rest are counted
+
+--- The globals to run config.lua with: Lua's own (`globals`, read through the table
+--- returned), and a note of every word that isn't one of them. Lua reads such a word
+--- (flase, False, a name without its quotes) as a global that isn't set, which is nil,
+--- and a table entry set to nil doesn't exist: the setting would keep its default
+--- without a word in the log. Returns the table and the list of notes ({ name, line }),
+--- filled while config.lua runs, for settings.load.
+function settings.environment(globals)
+    local unknown = {}
+    local env = setmetatable({}, {
+        __index = function(_, name)
+            local value = globals[name]
+            if value == nil then
+                -- Level 2 is config.lua itself: the line the word is on.
+                local info = debug and debug.getinfo and debug.getinfo(2, "l")
+                local line = info and info.currentline
+                unknown[#unknown + 1] = { name = tostring(name), line = line and line > 0 and line or nil }
+            end
+            return value
+        end,
+    })
+    return env, unknown
+end
+
 --- Merges the table config.lua returned into the defaults. keyTable is UE4SS's
---- `Key` table, used to check hotkey names (pass nil to skip that check).
+--- `Key` table, used to check hotkey names (pass nil to skip that check). unknown:
+--- the words in config.lua that Lua didn't know (see settings.environment), if any.
 --- Returns the settings and a list of warnings for the log.
-function settings.load(user, keyTable)
+function settings.load(user, keyTable, unknown)
     local cfg, warnings = {}, {}
     for name, default in pairs(settings.DEFAULTS) do
         cfg[name] = copy(default)
+    end
+    if unknown and #unknown > 0 then
+        local words = {}
+        for i = 1, math.min(#unknown, MAX_UNKNOWN_WORDS) do
+            local word = unknown[i]
+            words[i] = word.line and string.format("%s (line %d)", word.name, word.line) or word.name
+        end
+        if #unknown > MAX_UNKNOWN_WORDS then
+            words[#words + 1] = string.format("and %d more", #unknown - MAX_UNKNOWN_WORDS)
+        end
+        local one = #unknown == 1
+        warnings[#warnings + 1] = string.format("config.lua has %s Lua doesn't know: %s. %s counts as \"not set\", "
+            .. "so the setting there keeps its default (a list ends there). Write true and false in small letters, "
+            .. "and put names in quotes", one and "a word" or "words", table.concat(words, ", "),
+            one and "It" or "Each")
     end
     if user == nil then
         return cfg, warnings
     end
     if type(user) ~= "table" then
-        warnings[1] = "config.lua must return a table of settings; using the defaults"
+        warnings[#warnings + 1] = "config.lua must return a table of settings; using the defaults"
         return cfg, warnings
     end
     local names = {}
@@ -303,6 +344,41 @@ function settings.load(user, keyTable)
     return cfg, warnings
 end
 
+-- Whether two settings' values are the same (a value is a boolean, a number, a
+-- string, or a list of numbers or strings).
+local function same(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return a == b
+    end
+    if #a ~= #b then
+        return false
+    end
+    for i = 1, #a do
+        if a[i] ~= b[i] then
+            return false
+        end
+    end
+    return true
+end
+
+--- The settings in cfg that differ from those in `from` (the defaults if nil), for the
+--- log: a list, sorted by name, of { name, value, was }, with value and was as texts.
+function settings.changes(cfg, from)
+    from = from or settings.DEFAULTS
+    local names = {}
+    for name in pairs(settings.DEFAULTS) do
+        if not same(cfg[name], from[name]) then
+            names[#names + 1] = name
+        end
+    end
+    table.sort(names)
+    local changes = {}
+    for i, name in ipairs(names) do
+        changes[i] = { name = name, value = describe(cfg[name]), was = describe(from[name]) }
+    end
+    return changes
+end
+
 -- Half-Life's default sv_gravity. Its jump speed is fixed (the speed that reaches
 -- 45 units at this gravity), so with less gravity you jump higher, as in Half-Life.
 local HALF_LIFE_GRAVITY = 800
@@ -328,6 +404,15 @@ function settings.physics(cfg)
         -- Half-Life counts a player rising faster than 180 u/s as in the air, even on
         -- the ground: it is what lets slopes launch you.
         airborneSpeed = 180 * s,
+        -- Half-Life's ground check looks this far below the player, once per update: a
+        -- floor within it puts the player on the ground with its velocity as it is, so
+        -- only a landing that no update ends this close to runs into the floor.
+        groundCheck = 2 * s,
+        -- Half-Life's player rests this far off a floor's plane, at right angles to it (its
+        -- moves stop 1/32 unit short of a surface), and both the ground check's 2 units
+        -- and whether a move reaches the floor are counted from that plane. Seen in
+        -- Half-Life itself: on a level floor the player rests 0.03125 units above it.
+        restHeight = s / 32,
         -- A slide up a slope flies off where the slope falls away under it, if it would
         -- rise this far above the new floor. Half-Life's ground layer is 2 units; on
         -- bumpy slopes that made strings of tiny launches and landings.

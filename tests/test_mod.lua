@@ -44,9 +44,37 @@ local function count(lines, text)
     return n
 end
 
+-- Whether log line i is one of a report's, from its first line to its last (such as the
+-- automatic report's, 3 s after the mod took over).
+local function inReport(lines, i)
+    for k = i, 1, -1 do
+        if lines[k]:find("==== HL1Movement ", 1, true) then
+            return true
+        end
+        if k < i and lines[k]:find("==== end of diagnostics ====", 1, true) then
+            return false
+        end
+    end
+    return false
+end
+
 local function distance(a, b)
     local dx, dy, dz = a.X - b.X, a.Y - b.Y, a.Z - b.Z
     return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Runs frames up to and with first person's next half-second refresh, which goes over
+-- the body. (31 frames hold one at most frame phases, but two when they start on one.)
+local function untilPass(g)
+    local camera = package.loaded["hl1movement.camera"]
+    local due = camera.nextRefresh()
+    for _ = 1, 40 do
+        g.frame()
+        if camera.nextRefresh() ~= due then
+            return
+        end
+    end
+    error("no pass over the body in 40 frames")
 end
 
 -- The game's own camera, on its arm with its own settings, at location (0, 0, 0)
@@ -123,7 +151,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.3.0 loaded")
+    t.contains(g.log, "Version 0.3.1 loaded")
     t.contains(g.log, "F9 shows the speedometer")
     for _, code in ipairs({ F5, F6, F7, F8, F9 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
@@ -135,6 +163,25 @@ t.test("loads, binds its keys and waits for a save", function()
     t.truthy(g.hooks[g.tickPath], "frame hook after loading a save")
     t.truthy(g.hooks[g.jumpPath], "jump hook after loading a save")
     t.contains(g.log, "Running every frame from")
+    noErrors(g)
+end)
+
+t.test("each game gets fresh copies of the mod's modules, though the fake game compiles each file once", function()
+    local g = running()
+    g.keys.W = true
+    g.frames(60)
+    local compiles = fake.compiles
+    t.truthy(type(compiles) == "number" and compiles >= 14, "main.lua and its 13 modules: " .. tostring(compiles))
+    local before = package.loaded["hl1movement.movement"]
+    before.leftOver = true
+    g = start()
+    t.eq(fake.compiles, compiles, "nothing compiled again for the next game")
+    t.truthy(package.loaded["hl1movement.movement"] ~= before, "a new copy of each module")
+    t.eq(package.loaded["hl1movement.movement"].leftOver, nil, "nothing left from the last game")
+    t.falsy(g.hooks[g.tickPath], "the new copy waits for a save")
+    g.loadSave()
+    g.frames(SETTLE_FRAMES)
+    t.eq(styleOf(g), "FirstPerson")
     noErrors(g)
 end)
 
@@ -201,7 +248,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.3.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.3.1 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -302,14 +349,55 @@ t.test("a new part at a hidden part's address waits a pass like any new part, an
         } })
     fake.reuseAddress(c.skinMesh, newSkin)
     fake.set(c.mesh, "AttachChildren", fake.array({ newSkin, c.propMesh }))
-    g.frames(31)
+    untilPass(g)
     t.eq(fake.props(newSkin).bOwnerNoSee, false, "not touched on the pass it first appears")
-    g.frames(31)
+    untilPass(g)
     t.eq(fake.props(newSkin).bOwnerNoSee, true, "hidden on the next pass")
     g.press(F6)
     t.eq(fake.props(newSkin).bOwnerNoSee, false, "and shown again when first person turns off")
     noErrors(g)
 end)
+
+t.test("a component that can't be hidden, at a hidden part's address, is taken for a new part without an error",
+    function()
+        -- The new object isn't a primitive: it has no bOwnerNoSee to read and no
+        -- SetOwnerNoSee to call. UE4SS gives an invalid object for a name an object
+        -- doesn't have (nil in its build 1003). The full names are compared on every
+        -- 4th pass, so this is tried before each of four passes in a row.
+        for _, missing in ipairs({ "an invalid object", "nil" }) do
+            for wait = 0, 3 do
+                local what = string.format("a missing name reads as %s, %d passes before the swap", missing, wait)
+                local g = running()
+                local c = g.c
+                local camera = package.loaded["hl1movement.camera"]
+                g.frames(30 * wait)
+                local hiddenParts = camera.status().hiddenParts
+                local function nothing()
+                    return nil
+                end
+                local arm = fake.object({ className = "SpringArmComponent", name = "NewArm",
+                    address = fake.addressOf(c.skinMesh),
+                    chain = { "SpringArmComponent", "SceneComponent", "ActorComponent", "Object" },
+                    props = { AttachChildren = fake.array({}), bHiddenInGame = false },
+                    getters = missing == "nil" and { bOwnerNoSee = nothing, SetOwnerNoSee = nothing } or nil,
+                    methods = {
+                        GetOwner = fake.ufunction("GetOwner", 0, function()
+                            return c.pawn
+                        end),
+                    } })
+                fake.reuseAddress(c.skinMesh, arm)
+                fake.set(c.mesh, "AttachChildren", fake.array({ arm, c.propMesh }))
+                g.frames(31)
+                t.eq(camera.status().hiddenParts, hiddenParts - 1, "no longer taken for the hidden part: " .. what)
+                noErrors(g)
+                g.frames(120) -- four more passes, one of them with the names
+                t.eq(next(fake.writes(arm)), nil, "nothing written to it: " .. what)
+                g.press(F6)
+                t.eq(next(fake.writes(arm)), nil, "nor as first person ends: " .. what)
+                noErrors(g)
+            end
+        end
+    end)
 
 t.test("a part the game shows during first person stays shown afterwards, though it was hidden before", function()
     local g = start()
@@ -351,9 +439,9 @@ t.test("a part attached while in first person is hidden one pass later", functio
         } })
     local children = fake.props(c.mesh).AttachChildren
     children[#children + 1] = gear
-    g.frames(31)
+    untilPass(g)
     t.eq(fake.props(gear).bOwnerNoSee, false, "not touched on the pass it first appears")
-    g.frames(31)
+    untilPass(g)
     t.eq(fake.props(gear).bOwnerNoSee, true, "hidden on the next pass")
     noErrors(g)
 end)
@@ -815,7 +903,7 @@ end)
 t.test("while the game is paused, first person isn't given up", function()
     local g = start()
     g.loadSave()
-    g.frames(SETTLE_FRAMES - 20)
+    g.frames(170) -- within the 3 s (180 frames) the mod leaves a new character alone
     g.paused = true -- paused just before first person starts, so the camera can't follow
     g.frames(300)
     t.absent(g.log, "doesn't work")
@@ -1012,6 +1100,33 @@ t.test("the walking speed the game sets while the mod runs is the one put back",
     g.press(F5)
     t.eq(p.MaxWalkSpeed, 200, "the game's latest speed comes back")
     t.eq(p.BrakingDecelerationWalking, 2048, "values the game didn't touch come back as they were")
+    noErrors(g)
+end)
+
+t.test("a value the game writes after the mod's last write, just before it hands back, stays", function()
+    local g = running()
+    local p = fake.props(g.cmc)
+    -- ALS writes its gait's speed in the movement update, after the mod's frame
+    -- hook, and the battle starts on the next frame: the mod never set its value again.
+    p.bRequestMovementSettingsChange = 1
+    g.frame()
+    t.eq(p.MaxWalkSpeed, 375, "ALS wrote its speed during the game's movement update")
+    g.inBattle = true
+    g.frame()
+    t.eq(p.MaxWalkSpeed, 375, "ALS's latest speed stays")
+    t.eq(p.BrakingDecelerationWalking, 2048, "values the game didn't touch come back as they were")
+    g.inBattle = false
+    g.frame()
+    t.eq(p.MaxWalkSpeed, 100000, "taken over again after the battle")
+    t.eq(styleOf(g), "FirstPerson", "first person again after the battle")
+    -- The game writes the eye height and a walking speed just before F5.
+    fake.props(g.pawn).BaseEyeHeight = 50
+    p.MaxWalkSpeed = 200
+    g.press(F5)
+    t.eq(fake.props(g.pawn).BaseEyeHeight, 50, "the game's eye height stays")
+    t.eq(p.MaxWalkSpeed, 200, "the game's walking speed stays")
+    t.eq(fake.props(g.pcm).DefaultFOV, 90, "the field of view the game didn't touch comes back")
+    t.eq(p.BrakingDecelerationWalking, 2048)
     noErrors(g)
 end)
 
@@ -1401,7 +1516,10 @@ t.test("a pause around a landing on a moving platform doesn't add its speed", fu
         g.keys.SpaceBar = true
         while landings < 6 and moved < 600 do
             local v = fake.props(g.cmc).Velocity
-            local landsNow = g.mode() == 3 and g.position.Z + (v.Z + g.cmc:GetGravityZ() / 60) / 60 <= 0
+            -- (The fake moves a falling character with the average of the velocity before
+            -- and after the frame's gravity, as Unreal does, and lands it when it touches
+            -- the floor, here at Z = 0.)
+            local landsNow = g.mode() == 3 and g.position.Z + (v.Z + g.cmc:GetGravityZ() / 60 / 2) / 60 <= 0
             if not paused and landings == 2 and (fromInput and landsNow or not fromInput and lastMode == 1) then
                 paused = true
                 if fromInput then
@@ -1625,7 +1743,7 @@ t.test("a pause after root motion doesn't bring back the movement's state from b
     local p = fake.props(g.cmc)
     p.MovementMode = 1
     p.Velocity.X, p.Velocity.Y, p.Velocity.Z = 0, 0, 0
-    g.position.Z = 0
+    g.position.Z = fake.FLOOR_DIST -- standing on the ground at Z = 0
     g.rootMotion = false
     g.paused = true
     g.frames(5)
@@ -1675,7 +1793,9 @@ t.test("KeepSpeed: a mild cap at a landing early in the frame is undone too", fu
     g.moveTick = function(dt)
         local p = fake.props(g.cmc)
         if not early and p.MovementMode == 3 and p.Velocity.Z < 0 then
-            local fall = (p.Velocity.Z + g.cmc:GetGravityZ() * dt) * dt
+            -- (How far this frame falls: the fake moves with the average of the velocity
+            -- before and after the frame's gravity, as Unreal does.)
+            local fall = (p.Velocity.Z + g.cmc:GetGravityZ() * dt / 2) * dt
             if g.position.Z + fall <= 0 then
                 g.position.Z = -0.05 * fall -- touchdown a twentieth of the way through
                 early = true
@@ -2006,14 +2126,48 @@ t.test("F6 switches first person off and keeps the movement", function()
     t.eq(styleOf(g), "FirstPerson")
 end)
 
-t.test("F7 reloads the settings", function()
+t.test("F7 reloads the settings, and the log says what that changed", function()
     local g = running()
     fake.useConfig({ FieldOfView = 110 })
     g.press(F7)
     g.frame()
     t.eq(fake.props(g.pcm).DefaultFOV, 110)
-    t.contains(g.log, "Settings reloaded")
+    t.contains(g.log, "Settings reloaded (new hotkeys take effect after restarting the game). Changed: "
+        .. "FieldOfView = 110 (was 100).")
+    -- config.lua wasn't saved, or a value was misspelt (Lua reads `BodySounds = flase` as no setting).
+    g.press(F7)
+    t.contains(g.log, "Changed: nothing.")
+    fake.useConfig({ BodyFollowsHop = false, PhysicsRate = 144 })
+    g.press(F7)
+    t.contains(g.log, "Changed: BodyFollowsHop = false (was true), FieldOfView = 100 (was 110), "
+        .. "PhysicsRate = 144 (was 100).")
+    noErrors(g)
 end)
+
+t.test("the report names every setting that isn't at its default, and says how many hops still get a line",
+    function()
+        local g = running()
+        g.press(F8)
+        t.contains(g.log, "Settings not at their defaults: none")
+        t.contains(g.log, "hops so far: 0 (the next 30 get a line in the log)")
+        fake.useConfig({ BodyFollowsHop = false, AirAccelerate = 12, JumpKeys = { "SpaceBar" } })
+        g.press(F7)
+        g.keys.SpaceBar = true
+        local landings = g.landings
+        for _ = 1, 400 do
+            if g.landings - landings >= 3 then
+                break
+            end
+            g.frame()
+        end
+        g.keys.SpaceBar = false
+        g.frame() -- the mod sees the third landing on the frame after it
+        g.press(F8)
+        t.contains(g.log, 'Settings not at their defaults: AirAccelerate=12, BodyFollowsHop=false, '
+            .. 'JumpKeys={ "SpaceBar" }')
+        t.contains(g.log, "hops so far: 3 (the next 27 get a line in the log)")
+        noErrors(g)
+    end)
 
 t.test("F7 keeps the camera switched off with F6", function()
     local g = running()
@@ -2039,7 +2193,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.3.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.3.1 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")
@@ -2399,7 +2553,9 @@ t.test("a step that fails every frame is turned off on its own and puts the game
     t.eq(styleOf(g), "FirstPerson", "first person keeps working")
     local lines = #g.log
     g.frames(10)
-    t.eq(#g.log, lines, "quiet once off")
+    for i = lines + 1, #g.log do
+        t.truthy(inReport(g.log, i), "quiet once off, but for a report: " .. g.log[i])
+    end
     g.press(F5)
     g.press(F5)
     t.contains(g.log, "Half-Life movement on")
@@ -2434,6 +2590,60 @@ t.test("a body part that can't be hidden doesn't hold up the movement", function
     t.eq(fake.writes(g.cmc).Velocity - writes, 300, "the movement ran every frame")
     t.falsy(g.engineAccelerated, "the game never moved the character itself")
     t.eq(count(g.log, "Error in hiding SkeletalMeshComponent"), 1, "logged once")
+end)
+
+t.test("an error while going through the character's attached parts costs hiding the body, not first person",
+    function()
+    local g = start()
+    local c = g.c
+    local children = fake.props(c.mesh).AttachChildren
+    -- An array UE4SS can't go through: ForEach raises after the first element. Read by
+    -- index, it still gives the elements, so the fake's renderer draws them as before.
+    local broken = assert(io.tmpfile())
+    broken:close()
+    debug.setmetatable(broken, { __index = function(_, key)
+        if type(key) == "number" then
+            return children[key]
+        elseif key == "type" then
+            return function()
+                return "TArray"
+            end
+        elseif key == "ForEach" then
+            return function(_, fn)
+                fn(1, fake.param(children[1]))
+                error("ForEach failed")
+            end
+        end
+        return nil
+    end })
+    fake.set(c.mesh, "AttachChildren", broken)
+    g.loadSave()
+    g.frames(SETTLE_FRAMES + 60) -- over 30 frames of the camera step
+    t.eq(styleOf(g), "FirstPerson", "first person on, though the body can't be hidden")
+    t.contains(g.log, "Error in hiding the body")
+    t.absent(g.log, "Error in the first-person camera")
+    t.absent(g.log, "Turned off the first-person camera")
+    t.eq(fake.props(c.mesh).bOwnerNoSee, false, "the body in view")
+    -- The fault is over. A pass whose walk failed hid nothing, so the first pass that
+    -- lists the parts is the first pass, which hides them all at once.
+    fake.set(c.mesh, "AttachChildren", children)
+    local passed = false
+    fake.onRead(c.capsule, "AttachChildren", function() -- only a hiding pass reads it now
+        passed = true
+    end)
+    for _ = 1, 31 do
+        g.frame()
+        if passed then
+            break
+        end
+    end
+    t.truthy(passed, "a hiding pass")
+    t.eq(styleOf(g), "FirstPerson")
+    t.eq(fake.props(c.mesh).bOwnerNoSee, true, "the body hidden on the first pass that lists its parts")
+    t.eq(fake.props(c.skinMesh).bOwnerNoSee, true, "its parts too")
+    t.contains(g.log, "Hiding the character's body")
+    t.eq(fake.props(c.mesh).VisibilityBasedAnimTickOption, 0, "kept animating: it was drawn")
+    t.absent(g.log, "Turned off")
 end)
 
 t.test("a body part that leaves the character is shown again", function()
@@ -2711,11 +2921,225 @@ t.test("the refreshes stay on different frames when the frame times vary, and af
 
 t.test("five minutes of play don't fill the log", function()
     local g = running()
-    strafeHops(g, 19000) -- over 31 status intervals
+    strafeHops(g, 9500, 1 / 30) -- over 31 status intervals, at 30 fps
     t.truthy(#g.log < 250, #g.log .. " lines")
     t.eq(count(g.log, "Status (10s)"), 30, "at most 30 status lines")
     t.eq(count(g.log, "Status (10s), the last one"), 1)
-    t.eq(count(g.log, "Hop "), 20, "at most 20 hop lines")
+    t.eq(count(g.log, "Hop "), 30, "at most 30 hop lines")
+end)
+
+t.test("the log takes 30 hop lines and 30 status lines, and F7 makes room for 30 more of each", function()
+    local g = running()
+    -- Over five minutes of walking: the 30 status lines. (Standing still wouldn't do:
+    -- ten seconds in which nothing happens get no status line, see the next test.)
+    g.keys.W = true
+    g.frames(3200, 0.1)
+    t.eq(count(g.log, "Status (10s)"), 30)
+    t.eq(count(g.log, "Status (10s), the last one"), 1)
+    g.keys.SpaceBar = true
+    g.frames(1500) -- about 38 hops
+    t.eq(count(g.log, "] Hop "), 30)
+    -- The other keys don't start them again.
+    for _, key in ipairs({ F6, F6, F5, F5, F8 }) do
+        g.press(key)
+    end
+    g.frames(700)
+    t.eq(count(g.log, "] Hop "), 30, "no hop lines after the 30th")
+    t.eq(count(g.log, "Status (10s)"), 30, "no status lines after the 30th")
+    g.press(F8)
+    t.contains(g.log, "(the next 0 get a line in the log)")
+    g.press(F7)
+    t.contains(g.log, "The log's counts start again: it has room for the next hops, slopes, status lines and "
+        .. "changes of state.")
+    g.frames(1800) -- over 40 hops and 30 seconds
+    t.eq(count(g.log, "] Hop "), 60, "the next 30 hops after F7 have their lines")
+    t.truthy(count(g.log, "Status (10s)") >= 32, "and there are status lines again")
+    t.eq(count(g.log, "further hops aren't logged"), 2)
+    -- The lines keep the session's hop numbers, so the hops in between show.
+    local numbers = {}
+    for _, line in ipairs(g.log) do
+        numbers[#numbers + 1] = tonumber(line:match("%] Hop (%d+) %("))
+    end
+    t.eq(numbers[30], 30)
+    t.truthy(numbers[31] > 45, "the first hop logged after F7 is hop " .. tostring(numbers[31]))
+    t.eq(numbers[60], numbers[31] + 29)
+    noErrors(g)
+end)
+
+t.test("ten seconds in which nothing happens get no status line, so a break doesn't use the lines up", function()
+    local g = running()
+    g.keys.W = true
+    g.frames(1300)
+    g.keys.W = false
+    g.frames(700) -- the 10 s in which it stopped still get their line
+    local lines = count(g.log, "Status (10s)")
+    t.truthy(lines >= 2, lines .. " status lines while it ran")
+    g.frames(1300) -- standing still, the view at rest
+    g.paused = true
+    g.frames(3700, 0.1) -- six minutes in the game's menu (the mod counts up to 0.1 s of a frame)
+    g.paused = false
+    g.frames(700)
+    t.eq(count(g.log, "Status (10s)"), lines, "none while nothing happened")
+    -- What the game does to the speed is something happening, also standing still: here
+    -- ALS sets its gait's walking speed.
+    fake.props(g.cmc).bRequestMovementSettingsChange = 1
+    g.frames(700)
+    t.eq(count(g.log, "Status (10s)"), lines + 1, "the game setting MaxWalkSpeed counts")
+    t.contains(g.log, "set MaxWalkSpeed 1 times")
+    -- So is hopping on the spot, as docs/TESTING.md asks for on a moving platform.
+    g.keys.SpaceBar = true
+    g.frames(1300)
+    g.keys.SpaceBar = false
+    t.truthy(count(g.log, "Status (10s)") >= lines + 3, "hops count, without any speed")
+    lines = count(g.log, "Status (10s)")
+    g.keys.W = true
+    g.frames(1300)
+    t.truthy(count(g.log, "Status (10s)") >= lines + 2, "status lines again once it moves")
+    t.absent(g.log, "Status (10s), the last one")
+    -- Looking around is something happening, also with the game's own movement.
+    g = running({ Movement = false })
+    lines = count(g.log, "Status (10s)")
+    g.frames(1300, nil, function()
+        g.rotation.Yaw = g.rotation.Yaw + 0.5
+    end)
+    t.truthy(count(g.log, "Status (10s)") >= lines + 2, "the view turning counts")
+    noErrors(g)
+end)
+
+t.test("the log says 10 times that first person and the movement went off and came back, and again after F7",
+    function()
+        local g = running()
+        g.frames(60)
+        local WAITING = "First person: waiting (dialogue)"
+        local BACK = "First person: on (the engine's first-person view), the view is at the eyes"
+        local MOVING = "Half-Life movement: on (movement mode 1, walking)"
+        local function talk()
+            g.inDialogue, g.inputLocked = true, true
+            g.frames(60)
+            g.inDialogue, g.inputLocked = false, false
+            g.frames(60)
+        end
+        -- (0.3.0 logged each text 5 times in a session: from the fifth dialogue of a
+        -- test on, the log no longer said that first person came back.)
+        for _ = 1, 7 do
+            talk()
+        end
+        t.eq(count(g.log, WAITING), 7)
+        t.eq(count(g.log, BACK), 8, "after each dialogue, and at the start")
+        t.eq(count(g.log, MOVING), 8)
+        for _ = 1, 6 do
+            talk()
+        end
+        t.eq(count(g.log, WAITING), 10, "a state that comes and goes can't fill the log")
+        t.eq(count(g.log, BACK), 10)
+        t.eq(count(g.log, MOVING), 10)
+        g.press(F7)
+        g.frames(60)
+        talk()
+        t.eq(count(g.log, WAITING), 11, "said again after F7")
+        t.eq(count(g.log, BACK), 12, "after F7, and after the dialogue")
+        t.eq(count(g.log, MOVING), 11)
+        noErrors(g)
+    end)
+
+t.test("F7 starts the lines about the game's speed cuts and its speed limiter again", function()
+    -- The game as the second test found it: its limiter starts again at every landing and cuts the speed.
+    local g = running(nil, { limiterWakesOnModeChange = true, maxSpeedIgnoresWalkSpeed = true })
+    strafeHops(g, 900) -- over 20 hops
+    t.eq(count(g.log, "The game cut the speed from "), 5)
+    t.eq(count(g.log, "The game turned its speed limiter on again"), 3)
+    g.press(F7)
+    g.frames(900, nil, function()
+        g.rotation.Yaw = g.rotation.Yaw + 72 / 60
+    end)
+    t.eq(count(g.log, "The game cut the speed from "), 10, "the next 5 cuts after F7 have their lines")
+    t.eq(count(g.log, "The game turned its speed limiter on again"), 6)
+    t.eq(count(g.log, "(not logged again)"), 4)
+    g.press(F8)
+    local total
+    for _, line in ipairs(g.log) do
+        total = tonumber(line:match("since taking over: speed cuts (%d+)")) or total -- the last report's
+    end
+    t.truthy(total > 30, "the report still counts them all: " .. tostring(total))
+    noErrors(g)
+end)
+
+t.test("F7 starts the lines about the game setting MaxWalkSpeed and changing the velocity at a jump again",
+    function()
+        -- A game that changes the velocity when a jump starts (a listener of the mode change).
+        local g = running(nil, { jumpListenerClamps = true })
+        local SET, CHANGED = "The game set MaxWalkSpeed to 375", "Something in the game changed the velocity by"
+        local function play()
+            -- ALS sets its gait's walking speed five times; then five hops at full speed.
+            for _ = 1, 5 do
+                fake.props(g.cmc).bRequestMovementSettingsChange = 1
+                g.frames(3)
+            end
+            runTo(g, MAX_SPEED)
+            local landings = g.landings
+            g.keys.SpaceBar = true
+            for _ = 1, 600 do
+                if g.landings - landings >= 5 then
+                    break
+                end
+                g.frame()
+            end
+            g.keys.SpaceBar, g.keys.W = false, false
+            g.frames(120) -- lands and stops
+        end
+        play()
+        t.eq(count(g.log, SET), 3, "the first three of five")
+        t.eq(count(g.log, CHANGED), 3)
+        g.press(F7)
+        play()
+        t.eq(count(g.log, SET), 6, "the next three after F7")
+        t.eq(count(g.log, CHANGED), 6)
+        g.press(F8)
+        local set, changed
+        for _, line in ipairs(g.log) do
+            set = tonumber(line:match("MaxWalkSpeed set by the game (%d+)")) or set
+            changed = tonumber(line:match("velocity changed at a jump (%d+)")) or changed
+        end
+        t.eq(set, 10, "the report still counts them all")
+        t.eq(changed, 10)
+        noErrors(g)
+    end)
+
+t.test("the log takes 200 state lines in all, and F7 makes room for 200 more", function()
+    local g = running()
+    local log = require("hl1movement.log") -- the copy main.lua loaded
+    local NOTE = "(Further changes of state aren't logged.)"
+    -- The state lines from log line `from` on: the mod's own, and this test's. (Not a
+    -- report's lines, two of which begin like one.)
+    local function stateLines(from)
+        local n = 0
+        for i = from, #g.log do
+            for _, topic in ipairs({ "First person", "Half-Life movement", "Character", "A part" }) do
+                if g.log[i]:find("] " .. topic .. ": ", 1, true) and not inReport(g.log, i) then
+                    n = n + 1
+                end
+            end
+        end
+        return n
+    end
+    -- A part of the mod whose state keeps changing between 30 texts, each said 10 times.
+    local function flicker()
+        for _ = 1, 10 do
+            for i = 1, 30 do
+                log.state("A part", "state " .. i)
+            end
+        end
+    end
+    flicker()
+    t.eq(stateLines(1), 199, "the 200th is the note")
+    t.eq(count(g.log, NOTE), 1)
+    t.eq(g.log[#g.log], "[HL1Movement] " .. NOTE, "nothing after it")
+    local from = #g.log + 1
+    g.press(F7)
+    flicker()
+    t.eq(stateLines(from), 199, "as many again after F7")
+    t.eq(count(g.log, NOTE), 2)
+    noErrors(g)
 end)
 
 t.test("bad settings are reported and the defaults used", function()
@@ -2731,12 +3155,63 @@ end)
 
 t.test("a broken config.lua is reported and the defaults used", function()
     local g = fake.newGame()
-    _G.dofile = function()
-        error("config.lua:12: '}' expected near 'MaxSpeed'")
-    end
+    fake.useConfig("return {\n    FirstPerson = false\n    MaxSpeed = 400,\n}\n") -- a comma lost
     fake.loadMod(root)
-    t.contains(g.log, "Could not read config.lua")
+    t.contains(g.log, "Could not read config.lua, so the default settings are used: config.lua:3: '}' expected")
     g.loadSave()
     g.frames(SETTLE_FRAMES)
     t.eq(styleOf(g), "FirstPerson")
+end)
+
+t.test("a config.lua that gives no settings (empty, only comments, a table not returned) is reported", function()
+    -- Lua runs such a file without an error and gets nil back, which was taken for no
+    -- settings at all: the defaults, with nothing in the log.
+    local NOTHING = "WARNING: Could not read config.lua, so the default settings are used: it gives no settings"
+    for _, text in ipairs({ "", "-- FirstPerson = false,\n", "local config = {\n    FirstPerson = false,\n}\n" }) do
+        local g = start(text)
+        t.contains(g.log, NOTHING)
+        t.eq(count(g.log, "WARNING"), 1, "one warning")
+        g.loadSave()
+        g.frames(SETTLE_FRAMES)
+        t.eq(styleOf(g), "FirstPerson", "the defaults")
+    end
+    -- The same at F7, for a file emptied while the game runs.
+    local g = running({ FirstPerson = false })
+    local before = #g.log
+    fake.useConfig("")
+    g.press(F7)
+    t.contains({ table.unpack(g.log, before + 1) }, NOTHING)
+end)
+
+t.test("a word in config.lua that Lua doesn't know (a misspelt false, a name without quotes) is reported", function()
+    -- Lua reads such a word as "not set": without the warning, the setting would keep
+    -- its default (or the list lose the entry) with nothing in the log.
+    local g = start("return {\n    BodySounds = flase,\n    PhysicsRate = 144,\n"
+        .. "    JumpKeys = { SpaceBar, \"MouseScrollDown\" },\n}\n")
+    t.contains(g.log, "WARNING: config.lua has words Lua doesn't know: flase (line 2), SpaceBar (line 4). Each "
+        .. "counts as \"not set\", so the setting there keeps its default (a list ends there).")
+    t.eq(count(g.log, "Lua doesn't know"), 1, "one warning for the file")
+    g.loadSave()
+    g.frames(SETTLE_FRAMES)
+    g.press(F8)
+    t.contains(g.log, "(BodySounds=true)", "the setting kept its default")
+    t.contains(g.log, "PhysicsRate=144", "the rest of the file is used")
+    -- The same at F7, as when a test changes a setting by hand.
+    local before = #g.log
+    fake.useConfig("return {\n    BodySounds = false,\n    SlopeBoosts = False,\n}\n")
+    g.press(F7)
+    g.press(F8)
+    local since = { table.unpack(g.log, before + 1) }
+    t.contains(since, "WARNING: config.lua has a word Lua doesn't know: False (line 3). It counts as \"not set\"")
+    t.eq(count(since, "Lua doesn't know"), 1, "only the slip")
+    -- The reload's own line names what did change: not the setting with the slip.
+    t.contains(since, 'Changed: BodySounds = false (was true), JumpKeys = { "SpaceBar", "Gamepad_FaceButton_Bottom" } '
+        .. "(was {  }), PhysicsRate = 100 (was 144).")
+    t.contains(since, "(BodySounds=false)", "the word that is right was read")
+    t.contains(since, "SlopeBoosts=true", "the other kept its default")
+    -- A file without slips: nothing.
+    before = #g.log
+    fake.useConfig("return {\n    BodySounds = false,\n    SlopeBoosts = false,\n    Gravity = math.floor(800.5),\n}\n")
+    g.press(F7)
+    t.absent({ table.unpack(g.log, before + 1) }, "WARNING", "Lua's own words (math) are known")
 end)

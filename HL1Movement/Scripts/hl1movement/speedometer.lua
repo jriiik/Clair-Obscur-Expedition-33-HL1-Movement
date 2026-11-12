@@ -23,7 +23,8 @@
 -- once another object takes its address. So IsValid is checked every frame, full
 -- names before each call (the widget's and the text's before each number and each
 -- show or hide), and every 0.5 s also IsInViewport. A widget the game took away is
--- made again, a few times at most.
+-- made again, unless the game takes each new one away soon after, several times in
+-- a row (see MAX_REMAKES).
 
 local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
@@ -46,7 +47,12 @@ local TEXT_INTERVAL = 0.1 -- s: a TextBlock at most 10 times (each change leaves
 local CHECK_INTERVAL = 0.5 -- s between checks that the widget is still on the screen
 local MAX_SHOWN = 99999
 local MAX_LOST_LINES = 3
-local MAX_REMAKES = 5 -- after the game took it away, until the next retry (F9, F5, F7, a new level)
+-- A widget the game took away is made again. Only when the game takes each new one
+-- away within REMAKE_WINDOW seconds of its making, MAX_REMAKES times in a row, does the
+-- mod stop until the next retry (see speedometer.retry): a game that clears the
+-- screen now and then, as a battle or a menu opens, doesn't end it.
+local MAX_REMAKES = 5
+local REMAKE_WINDOW = 10
 
 local st = {
     widget = nil,
@@ -62,7 +68,9 @@ local st = {
     made = 0,
     how = nil, -- how the last one was made
     lost = 0, -- times the game took it off the screen
-    remakes = 0, -- of those, since the last retry
+    remakes = 0, -- of those, in a row, each within REMAKE_WINDOW of the widget's making
+    now = 0, -- the mod's clock at the last update
+    madeAt = 0, -- when the widget was made
 }
 
 -- UMG colours are linear; the setting is in sRGB, 0 to 255, like bxt_hud_color.
@@ -268,6 +276,9 @@ local function lost()
         ue.call(st.widget, "RemoveFromParent")
     end
     st.lost = st.lost + 1
+    if st.now - st.madeAt >= REMAKE_WINDOW then
+        st.remakes = 0 -- this one had stayed a while: the game doesn't take each new one away
+    end
     st.remakes = st.remakes + 1
     forgetWidget()
     if st.remakes > MAX_REMAKES then
@@ -302,6 +313,7 @@ end
 --- Shows speed (Half-Life units per second) when visible is true, else hides the
 --- number. Runs every frame from the frame hook; makes the widget when it has none.
 function speedometer.update(pc, visible, speed, now, cfg)
+    st.now = now
     if not visible or type(speed) ~= "number" then
         speedometer.hide()
         return
@@ -329,8 +341,14 @@ function speedometer.update(pc, visible, speed, now, cfg)
             end
         end
     end
+    local made = false
     if not st.widget then
-        log.first("speedometer", "Putting the speedometer on the screen (a %s in a UserWidget)",
+        -- A line before every build, not only the first, and one once the new widget has
+        -- its number and is shown (below): if making or first showing it crashes the
+        -- game, UE4SS.log ends with the first of the two; if not, it never does, however
+        -- little is logged afterwards. (Builds are rare: a key press, a new area or
+        -- character, or the game taking the widget away.)
+        log.info("Putting the speedometer on the screen (a %s in a UserWidget)",
             ue.find(NUMERIC_TEXT) and "CommonNumericTextBlock" or "TextBlock")
         local ok, built, err = pcall(build, pc, cfg)
         if not ok or not built then
@@ -338,7 +356,9 @@ function speedometer.update(pc, visible, speed, now, cfg)
             log.warn("Can't show the speedometer: %s", st.failed)
             return
         end
+        made = true
         st.nextCheck = now + CHECK_INTERVAL
+        st.madeAt = now
         change = true
     end
     if change then
@@ -349,6 +369,9 @@ function speedometer.update(pc, visible, speed, now, cfg)
     if not st.visible then
         st.widget:SetVisibility(HIT_TEST_INVISIBLE) -- never takes the mouse or the keyboard
         st.visible = true
+    end
+    if made then
+        log.info("The speedometer is on the screen (made with %s)", tostring(st.how))
     end
 end
 
@@ -368,7 +391,8 @@ function speedometer.forget()
     forgetWidget()
 end
 
---- Tries again after a failure (F9, F5, F7, a new level).
+--- Tries again after a failure: main.lua calls this for F9, F5 and F7, and when the
+--- controller takes over a character or the character, controller or level changes.
 function speedometer.retry()
     st.failed = nil
     st.remakes = 0

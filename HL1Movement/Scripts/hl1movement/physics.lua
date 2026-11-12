@@ -153,6 +153,15 @@ function physics.clip(vx, vy, vz, nx, ny, nz)
     return vx - into * nx, vy - into * ny, vz - into * nz
 end
 
+--- Whether Half-Life's player leaves a floor that falls away under it at the end of an
+--- update on the ground of `step` seconds: its ground move goes straight ahead, and the
+--- ground check after it reaches `reach` below. From `rest` off the floor's plane (at
+--- right angles, where a player rests), moving at (vx, vy), it ends (vx nx + vy ny) / nz
+--- * step + rest / nz above that plane, straight up. (nx, ny, nz): the floor's unit normal.
+function physics.leavesFloor(vx, vy, nx, ny, nz, step, reach, rest)
+    return (vx * nx + vy * ny) / nz * step + rest / nz >= reach
+end
+
 --- The shortest turn in degrees from one yaw to another, from -180 to 180.
 function physics.turn(fromDegrees, toDegrees)
     return (toDegrees - fromDegrees + 180) % 360 - 180
@@ -160,27 +169,93 @@ end
 
 local MAX_STEPS = 25 -- per frame; time beyond that is dropped (a very long frame)
 
+-- One update's move in a slide whose path is followed (slide.h: how far it is above
+-- the plane of the floor, slide.nx, ny, nz, straight up, in cm). Half-Life's move runs
+-- into the floor only if it would end behind its plane: it stops there 1/32 unit off it
+-- (at right angles, p.restHeight), or where it was if it was closer, and goes on along
+-- it with the velocity clipped. Above about 160 updates a second one update's gravity
+-- closes less than the 1/32 unit, so the update after a clip can fall short of the
+-- floor and keep its gravity; where the floor falls away, the path leaves it. Without a
+-- normal the path only rises and falls. For the frame it adds how far the path went
+-- (slide.dx, slide.dy), how far the plane rose under it (slide.rise), what the clips
+-- took out (slide.push) and how long the updates ran (slide.time); slide.clipped: the
+-- last move ran into the floor.
+local function slideMove(slide, vx, vy, vz, p, stepTime)
+    local nx, ny, nz = slide.nx, slide.ny, slide.nz
+    local before = slide.h
+    slide.time = slide.time + stepTime
+    if not nx then
+        slide.h, slide.clipped = before + vz * stepTime, false
+        slide.dx, slide.dy = slide.dx + vx * stepTime, slide.dy + vy * stepTime
+        return vx, vy, vz
+    end
+    local into = vx * nx + vy * ny + vz * nz
+    local after = before + into / nz * stepTime
+    local dx, dy
+    if after >= 0 then
+        slide.h, slide.clipped = after, false
+        dx, dy = vx * stepTime, vy * stepTime
+    else
+        -- It goes this share of the move before it stops, then along the floor.
+        local rest = p.restHeight / nz
+        local share = before > rest and (before - rest) / (before - after) or 0
+        dx, dy = vx * stepTime * share, vy * stepTime * share
+        slide.push = slide.push - into
+        vx, vy, vz = physics.clip(vx, vy, vz, nx, ny, nz)
+        dx, dy = dx + vx * stepTime * (1 - share), dy + vy * stepTime * (1 - share)
+        slide.h, slide.clipped = math.min(before, rest), true
+    end
+    slide.dx, slide.dy = slide.dx + dx, slide.dy + dy
+    slide.rise = slide.rise - (dx * nx + dy * ny) / nz
+    return vx, vy, vz
+end
+
 --- Runs the Half-Life update at a fixed rate within one game frame. Half-Life
 --- updates the player once per input command, usually 100 times a second, and
 --- air strafing gains speed in small steps: at a low frame rate, one big update
 --- per frame gains much less, or even loses speed.
 ---
 --- sim is a table the caller keeps between frames (an empty table to start): the
---- time left over from earlier frames, and the view yaw of the last step. wish is
---- the input: { forward = f, right = r } (axes from -1 to 1, turned with the view,
---- whose turn since the last step is spread evenly over this frame's steps), or
+--- time left over from earlier frames, and the view yaw of the last frame. wish is
+--- the input: { forward = f, right = r } (axes from -1 to 1, turned with the view:
+--- each step gets the view of its own time, between the last frame's and this one's,
+--- the short way round, as each of Half-Life's updates has the view of its own), or
 --- { x = wx, y = wy, speed = s } (a fixed direction), or nil for none. With a rate
---- of 0 there is one update per frame. A jump can only start on the first step.
+--- of 0 there is one update per frame. A jump can only start on the first step, or
+--- on the update a slide ends on (slide.jump, below).
+---
+--- slide, if given, is a slide up a slope: the player is in the air for Half-Life,
+--- rising at vz along a floor the game walks it up, so the game applies no gravity and
+--- each update here does (p.gravity), as Half-Life: the ground check at the update's
+--- start, which finds the player on the ground once it rises no faster than
+--- p.airborneSpeed, half an update of gravity after the last move, and is within its
+--- reach (p.groundCheck) of the floor's plane, if slide.h follows the path (see
+--- slideMove); then the rest of the update's gravity, the air acceleration, and the
+--- clip against the floor it runs into (slide.nx, slide.ny, slide.nz: its unit normal;
+--- without them nothing is clipped; with slide.h only a move that reaches the floor's
+--- plane, see slideMove, without it every update). When the ground check ends the slide,
+--- slide.ended is set, with slide.endX, slide.endY (the horizontal velocity of the last
+--- update) and slide.endZ; that update and the rest are on the ground, and a jump starts
+--- on it if slide.jump is set.
+---
+--- floor, if given, is the floor the player walks on ({ nx, ny, nz }: its unit normal):
+--- where it falls away so far under an update's ground move that the ground check
+--- misses it (see physics.leavesFloor), the player is in the air from the next update
+--- on, and floor.left is set to the number of that update.
+---
 --- Returns the new vx, vy, vz, whether a jump started, and the number of steps.
-function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rate)
+function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rate, slide, floor)
     local fromYaw = sim.yaw or yaw
+    sim.yaw = yaw
     local steps, stepTime
+    local leftover = 0 -- the time from the last step to the last frame
     if not rate or rate <= 0 then
         steps, stepTime = 1, dt
         sim.time = 0
     else
         stepTime = 1 / rate
-        local total = (sim.time or 0) + dt
+        leftover = sim.time or 0
+        local total = leftover + dt
         steps = math.floor(total * rate + 1e-9)
         if steps > MAX_STEPS then
             steps = MAX_STEPS
@@ -192,7 +267,6 @@ function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rat
     if steps == 0 then
         -- Less than one step of time so far. A jump can't wait for the next frame,
         -- since the game moves the character in between: it starts now.
-        sim.yaw = fromYaw
         local jumped = false
         if jump and onGround then
             vx, vy, vz, jumped = physics.step(vx, vy, vz, true, 0, 0, 0, true, p, 0)
@@ -200,21 +274,46 @@ function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rat
         return vx, vy, vz, jumped, 0
     end
     local turn = physics.turn(fromYaw, yaw)
-    sim.yaw = yaw
     local jumped = false
+    local sliding = slide ~= nil and not onGround
     for k = 1, steps do
         local wx, wy, wishSpeed = 0, 0, 0
         if wish and wish.speed then
             wx, wy, wishSpeed = wish.x, wish.y, wish.speed
         elseif wish and (wish.forward ~= 0 or wish.right ~= 0) then
-            wx, wy, wishSpeed = physics.wish(fromYaw + turn * k / steps, wish.forward, wish.right,
+            -- This step ends k steps after the last one, which was `leftover` before the
+            -- last frame: the view has turned that share of this frame's turn by then.
+            -- (A share of the turn for each step made the steps' turns uneven whenever the
+            -- frames ran different numbers of steps, and air strafing gained less.)
+            local share = dt > 0 and math.max(0, math.min(1, (k * stepTime - leftover) / dt)) or 1
+            wx, wy, wishSpeed = physics.wish(fromYaw + turn * share, wish.forward, wish.right,
                 p.inputSpeed, p.maxSpeed)
         end
+        local jumpNow = jump and k == 1
+        if sliding then
+            if vz - 0.5 * p.gravity * stepTime <= p.airborneSpeed and (slide.h or 0) < p.groundCheck then
+                -- The ground check at the update's start: the slide is over, with the
+                -- velocity the last update left. This update is the first on the ground.
+                sliding, onGround = false, true
+                slide.ended, slide.endX, slide.endY, slide.endZ = true, vx, vy, vz
+                jumpNow = slide.jump
+            else
+                vz = vz - p.gravity * stepTime
+            end
+        end
         local started
-        vx, vy, vz, started = physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jump and k == 1, p, stepTime)
+        local walked = onGround and floor and not floor.left
+        vx, vy, vz, started = physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jumpNow, p, stepTime)
         if started then
             jumped = true
             onGround = false
+        elseif walked and physics.leavesFloor(vx, vy, floor.nx, floor.ny, floor.nz, stepTime, p.groundCheck,
+            p.restHeight) then
+            onGround, floor.left = false, k
+        elseif sliding and slide.h then
+            vx, vy, vz = slideMove(slide, vx, vy, vz, p, stepTime)
+        elseif sliding and slide.nx then
+            vx, vy, vz = physics.clip(vx, vy, vz, slide.nx, slide.ny, slide.nz)
         end
     end
     return vx, vy, vz, jumped, steps

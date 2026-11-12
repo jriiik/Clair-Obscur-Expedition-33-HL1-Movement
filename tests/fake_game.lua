@@ -9,21 +9,38 @@
 -- and using an object after it was destroyed raises an error (in the real game
 -- that would crash). A struct inside a struct reads as a view too.
 -- The fake character movement follows Unreal's closely enough (input acceleration,
--- braking, curve-driven ground values, gravity, landing, and with g.terrain walking
--- along slopes, with the floor in CurrentFloor) to check that the mod's speeds
--- survive it. The camera follows Unreal's rule: the view target's first
--- active camera component, in the order the components are listed, or the eyes
--- with the FirstPerson style.
+-- braking, curve-driven ground values, gravity, a falling move with the average of
+-- the old and the new velocity as Unreal's, landing, and with g.terrain walking along
+-- slopes, with the floor in CurrentFloor) to check that the mod's speeds
+-- survive it. The character's position stands for the lowest point of its capsule:
+-- walking, it is kept CurrentFloor.FloorDist above the ground (1.9 to 2.4 cm, as Unreal
+-- keeps a walking capsule), and a flight ends where it touches the ground. Not
+-- Unreal's: the character is a point (no capsule that rounds an edge), it lands on any
+-- ground under the end of a frame's move, and a frame longer than
+-- MaxSimulationTimeStep is moved in one step. The camera follows Unreal's rule: the
+-- view target's first active camera component, in the order the components are
+-- listed, or the eyes with the FirstPerson style.
 
 local fake = {}
 
-local realDofile = dofile
+local realLoadfile = loadfile
 local data = setmetatable({}, { __mode = "k" })
 local nextAddress = 0x10000
 local byPath = {} -- path -> object, for StaticFindObject
 
---- Counts of what the mod asked of the fake game, for the cost test.
-fake.counts = { calls = 0, fullNames = 0, reads = 0, writes = 0 }
+--- Counts of what the mod asked of the fake game, for the cost test. reads: of an
+--- object's properties; fields: of a struct's fields (those of a struct inside it too).
+--- destroyed: uses of an object after it was destroyed (each raises an error too, but
+--- the mod's safe calls catch errors, so a test that wants none of them counts them).
+fake.counts = { calls = 0, fullNames = 0, reads = 0, fields = 0, writes = 0, destroyed = 0 }
+
+-- Unreal keeps a walking capsule a little above the floor: between MIN_FLOOR_DIST and
+-- MAX_FLOOR_DIST (cm, measured straight down), and at their middle whenever it finds
+-- it outside that (AdjustFloorHeight). The distance is in CurrentFloor.FloorDist. A
+-- flight starts from there and ends where the capsule touches the floor.
+local MIN_FLOOR_DIST, MAX_FLOOR_DIST = 1.9, 2.4
+--- How far above the ground a character stands after a landing (cm).
+fake.FLOOR_DIST = (MIN_FLOOR_DIST + MAX_FLOOR_DIST) / 2
 
 -- UE4SS gives Lua full userdata. Pure Lua can't make one, but a closed file
 -- handle is one, and debug.setmetatable gives it the behaviour wanted.
@@ -140,6 +157,7 @@ local function structView(s)
             if key == "__fields" or not s.__fields[key] then
                 error("[handle_unreal_property_value]: Was unable to retrieve property '" .. tostring(key) .. "'", 2)
             end
+            fake.counts.fields = fake.counts.fields + 1
             local value = s[key]
             if isStruct(value) then
                 -- A struct inside a struct reads as a view too, onto the same memory, as in UE4SS.
@@ -193,6 +211,7 @@ local function live(self, what)
         error("not a fake object", 3)
     end
     if not d.alive then
+        fake.counts.destroyed = fake.counts.destroyed + 1
         error("used a destroyed object: " .. d.className .. "." .. tostring(what), 3)
     end
     return d
@@ -386,10 +405,29 @@ function fake.destroy(obj)
     data[obj].alive = false
 end
 
+--- Stops the renderer drawing a part whatever its own flags say (see g.animTick), as
+--- when the game hides the actor that owns it: SetActorHiddenInGame sets no flag on
+--- the actor's parts.
+function fake.setUndrawn(obj, undrawn)
+    data[obj].undrawn = undrawn or nil
+end
+
 --- A new object at the address of a destroyed one: in UE4SS a Lua object holds
 --- only the address, so from now on old reads and writes the new object.
 function fake.reuseAddress(old, new)
     data[old] = data[new]
+end
+
+--- The game moving an object into another outer, as UObject::Rename does (a skin's
+--- body moved out of the character, say): the same object at the same address, with
+--- another path in its full name. Its own name is the last part of the path.
+function fake.move(obj, path)
+    local d = data[obj]
+    if byPath[d.path] == obj then
+        byPath[d.path] = nil
+    end
+    d.path, d.name = path, path:match("[^.:]+$")
+    byPath[path] = obj
 end
 
 --- A new object like obj, with the same class, values and functions, at a new
@@ -501,7 +539,7 @@ end
 function fake.newGame(options)
     options = options or {}
     byPath = {}
-    fake.counts = { calls = 0, fullNames = 0, reads = 0, writes = 0 }
+    fake.counts = { calls = 0, fullNames = 0, reads = 0, fields = 0, writes = 0, destroyed = 0 }
     local g = {
         options = options,
         hooks = {},
@@ -512,7 +550,7 @@ function fake.newGame(options)
         keys = {},
         justPressed = {},
         analog = {},
-        position = { X = 0, Y = 0, Z = 0 },
+        position = { X = 0, Y = 0, Z = fake.FLOOR_DIST }, -- standing on the ground at Z = 0
         rotation = { Pitch = 0, Yaw = 0, Roll = 0 },
         pending = { X = 0, Y = 0, Z = 0 },
         lastAcceleration = { X = 0, Y = 0, Z = 0 },
@@ -1013,9 +1051,11 @@ function fake.newGame(options)
     end
 
     -- The movement component's CurrentFloor: the floor under the character while it
-    -- walks, cleared (zeros) otherwise, as Unreal does. g.contactNormal, if set, gives
-    -- the capsule's contact normal from the surface's (it leans on a step's edge).
-    local function setFloor(cmc, nx, ny, nz)
+    -- walks, cleared (zeros) otherwise, as Unreal does. dist: how far above it the
+    -- character is (nil: where a landing puts it). g.contactNormal, if set, gives
+    -- the capsule's contact normal from the surface's (they differ where the capsule
+    -- rests on an edge).
+    local function setFloor(cmc, nx, ny, nz, dist)
         local p = fake.props(cmc)
         local floor = p.CurrentFloor
         if not floor then
@@ -1024,7 +1064,7 @@ function fake.newGame(options)
         floor.bBlockingHit = nz ~= nil
         floor.bWalkableFloor = nz ~= nil and nz >= p.WalkableFloorZ
         floor.bLineTrace = false
-        floor.FloorDist = nz and 2.15 or 0
+        floor.FloorDist = nz and (dist or fake.FLOOR_DIST) or 0
         local surface, contact = floor.HitResult.ImpactNormal, floor.HitResult.Normal
         surface.X, surface.Y, surface.Z = nx or 0, ny or 0, nz or 0
         if nz and g.contactNormal then
@@ -1056,6 +1096,12 @@ function fake.newGame(options)
         local v = p.Velocity
         if mode == 3 and (was == 1 or was == 2) and platform and not p.bStayBasedInAir then
             v.X, v.Y, v.Z = v.X + platform.X, v.Y + platform.Y, v.Z + platform.Z
+        end
+        -- Entering mode None stops the character (Unreal's OnMovementModeChanged calls
+        -- StopMovementKeepPathing, which zeroes the velocity). ALS's mantle starts that
+        -- way and then moves the character by setting its location, without a velocity.
+        if mode == 0 and was ~= 0 then
+            v.X, v.Y, v.Z = 0, 0, 0
         end
         -- Listeners of the movement mode change, such as the game's speed limiter.
         if options.limiterWakesOnModeChange then
@@ -1097,10 +1143,10 @@ function fake.newGame(options)
                 fake.props(obj).bHiddenInGame = value
             end)
             -- Drawn within the tolerance, in seconds of the world's time (see g.animTick).
+            -- A part never drawn has Unreal's starting value: 1000 s before the world began.
             methods.WasRecentlyRendered = ufunction("WasRecentlyRendered", 1, function(_, tolerance)
                 assert(type(tolerance) == "number")
-                local last = data[obj].lastRender
-                return last ~= nil and g.worldTime - last <= tolerance
+                return g.worldTime - (data[obj].lastRender or -1000) <= tolerance
             end)
             obj = fake.object({ className = className, name = spec.name, address = spec.address, world = world,
                 chain = chainOf(className, spec.chain or PRIMITIVE_CHAIN), props = props, methods = methods,
@@ -1348,7 +1394,7 @@ function fake.newGame(options)
                 LedgeCheckThreshold = 4,
                 bCanWalkOffLedges = true,
                 CurrentFloor = fake.struct({ bBlockingHit = true, bWalkableFloor = true, bLineTrace = false,
-                    FloorDist = 2.15, LineDist = 0, HitResult = fake.struct({
+                    FloorDist = fake.FLOOR_DIST, LineDist = 0, HitResult = fake.struct({
                         -- (options.floorNormalUnreadable: as if UE4SS couldn't find the
                         -- vector's fields, which FVector_NetQuantizeNormal inherits.)
                         ImpactNormal = options.floorNormalUnreadable and fake.struct({}) or fake.vector(0, 0, 1),
@@ -1661,18 +1707,39 @@ function fake.newGame(options)
             end
         end
         v.X, v.Y = hx, hy
+        -- Unreal's falling update takes the frame's gravity off the velocity first and then
+        -- moves with the average of the old and the new velocity, so a flight is the same
+        -- at any frame rate.
+        local moveZ = v.Z
         if mode == 3 then
             v.Z = v.Z + g.cmc:GetGravityZ() * dt
+            moveZ = (moveZ + v.Z) / 2
         end
         local pos = g.position
         local share = g.moveShare or 1
         local startZ = pos.Z
-        pos.X, pos.Y, pos.Z = pos.X + v.X * dt * share, pos.Y + v.Y * dt * share, pos.Z + v.Z * dt
+        -- Walking, Unreal moves along the line of the floor the move starts on
+        -- (MoveAlongFloor) for the whole frame, also where that floor ends. (The terrain
+        -- under the character, not CurrentFloor: options.floorNormalUnreadable empties
+        -- that for what UE4SS can read of it, not for what the engine knows.)
+        local rise = 0
+        if mode == 1 and g.terrain then
+            local _, nx, ny, nz = g.groundAt(pos.X, pos.Y)
+            if nz >= p.WalkableFloorZ then
+                rise = -(nx * v.X + ny * v.Y) * dt * share / nz
+            end
+        end
+        pos.X, pos.Y, pos.Z = pos.X + v.X * dt * share, pos.Y + v.Y * dt * share, pos.Z + moveZ * dt
         local platform = g.baseVelocity
         if platform and (walking or p.bStayBasedInAir) then
             -- Unreal moves a character on a moving platform along with it, apart from
             -- its velocity (which is relative to the platform).
             pos.X, pos.Y = pos.X + platform.X * dt, pos.Y + platform.Y * dt
+            if not walking then
+                -- In the air nothing follows the floor up or down: Unreal's based movement
+                -- carries the character with all of the platform's motion, Z too.
+                pos.Z = pos.Z + platform.Z * dt
+            end
         end
         if share < 1 then
             -- Something in the way stopped the move part of the way (a wall hit head
@@ -1683,17 +1750,25 @@ function fake.newGame(options)
         if walking and g.terrain then
             -- (Without a terrain the fake's ground is wherever the character walks: a test
             -- may put a platform high above Z = 0.)
-            if ground >= pos.Z - (p.MaxStepHeight + 2.4) then
-                -- Unreal walks along the floor (up and down slopes and steps), keeping the
-                -- horizontal velocity (bMaintainHorizontalGroundVelocity).
-                pos.Z = ground
+            local dist = pos.Z + rise - ground -- how far above the floor the move left it
+            if dist <= p.MaxStepHeight + MAX_FLOOR_DIST then
+                -- A floor within reach below where the move led: Unreal walks along it (up
+                -- and down slopes and steps), keeping the horizontal velocity
+                -- (bMaintainHorizontalGroundVelocity), with its gap above the floor.
                 if mode == 1 then
-                    setFloor(g.cmc, gnx, gny, gnz)
+                    if dist < MIN_FLOOR_DIST or dist > MAX_FLOOR_DIST then
+                        dist = fake.FLOOR_DIST
+                    end
+                    pos.Z = ground + dist
+                    setFloor(g.cmc, gnx, gny, gnz, dist)
                 else
-                    setFloor(g.cmc, nil) -- nav-mesh walking doesn't look for a floor
+                    -- Nav-mesh walking puts the feet on the nav mesh, and doesn't look for a floor.
+                    pos.Z = ground
+                    setFloor(g.cmc, nil)
                 end
             else
-                -- No floor within reach: walking off a ledge.
+                -- No floor within reach: walking off a ledge, from where the floor's line led.
+                pos.Z = pos.Z + rise
                 changeMode(g.cmc, 3, g.pawn)
             end
         end
@@ -1715,7 +1790,9 @@ function fake.newGame(options)
                     g.landingClamps = g.landingClamps + 1
                 end
             end
-            pos.Z, v.Z = ground, 0
+            -- It touched the ground: Unreal lands it there, walks the rest of the frame
+            -- along the floor, and lifts it to its gap above the floor.
+            pos.Z, v.Z = ground + fake.FLOOR_DIST, 0
             setFloor(g.cmc, gnx, gny, gnz)
             p.MovementMode = 1
             g.jumpCount = 0
@@ -1813,13 +1890,13 @@ function fake.newGame(options)
 
     -- The end of a frame for the character's parts (see g.animTick).
     g.footsteps = 0
-    local function endFrame(part, depth)
+    local function endFrame(part, depth, paused)
         local d = data[part]
         if depth > 24 or not d or not d.alive then
             return
         end
         local p = d.props
-        if d.anim then
+        if d.anim and not paused then
             local drawn = d.lastRender ~= nil and d.lastRender > g.worldTime - 1
             if p.VisibilityBasedAnimTickOption < 2 or drawn then
                 local info = fake.props(d.anim).CharacterInformation
@@ -1833,11 +1910,11 @@ function fake.newGame(options)
         if d.drawnAt then
             d.lastRender, d.drawnAt = d.drawnAt, nil
         end
-        if p.bOwnerNoSee == false and p.bHiddenInGame == false and p.bVisible ~= false then
+        if not d.undrawn and p.bOwnerNoSee == false and p.bHiddenInGame == false and p.bVisible ~= false then
             d.drawnAt = g.worldTime
         end
         for _, child in ipairs(p.AttachChildren or {}) do
-            endFrame(child, depth + 1)
+            endFrame(child, depth + 1, paused)
         end
     end
 
@@ -1848,11 +1925,13 @@ function fake.newGame(options)
     --- the footsteps, counted in g.footsteps while the character moves. Then the
     --- renderer draws what the player's view shows: not what is hidden in game,
     --- invisible, or hidden from its owner (the view, shadows included, is the
-    --- character's own). It draws a frame while the game thread works on the next one,
-    --- so what it draws counts as drawn (LastRenderTime, which WasRecentlyRendered
-    --- reads) only from the end of the next frame.
-    function g.animTick()
-        endFrame(fake.props(g.pawn).RootComponent, 0)
+    --- character's own), nor a part of a hidden actor (fake.setUndrawn). It draws a
+    --- frame while the game thread works on the next one, so what it draws counts as
+    --- drawn (LastRenderTime, which WasRecentlyRendered reads) only from the end of the
+    --- next frame. On a frame Unreal runs as paused nothing animates, but the renderer
+    --- still draws (at the world's time, which stands still).
+    function g.animTick(paused)
+        endFrame(fake.props(g.pawn).RootComponent, 0, paused)
     end
 
     --- One frame: input, the controller's tick (where the mod runs), the character's
@@ -1892,7 +1971,11 @@ function fake.newGame(options)
             if jumpDown and jumpHook then
                 callJumpHook(true)
             end
-            if jumpDown and not g.jumpWasDown then
+            -- ALS's JumpAction calls Jump() on each such event while the character is on
+            -- the ground (its MovementState is Grounded while Unreal walks it), so
+            -- bPressedJump is set again on every frame the key is held there.
+            local mode = fake.props(g.cmc).MovementMode
+            if jumpDown and (not g.jumpWasDown or mode == 1 or mode == 2) then
                 g.pressedJump = true
             end
             g.jumpWasDown = jumpDown
@@ -1931,6 +2014,8 @@ function fake.newGame(options)
             g.alsTick(dt) -- in the character's update, after its ReceiveTick
             g.updateCamera(dt) -- Unreal doesn't update the camera while the game is paused
             g.animTick()
+        else
+            g.animTick(true) -- the renderer goes on drawing
         end
         g.justPressed = {}
         g.time = g.time + dt
@@ -1948,15 +2033,52 @@ function fake.newGame(options)
     return g
 end
 
---- Makes main.lua's dofile of config.lua return this table (nil: the real file).
+--- Makes main.lua's loadfile of config.lua give this table (nil: the real file). A
+--- string is config.lua's text instead, which Lua then reads as it would the file:
+--- for what a slip in the file does (a misspelt word, a lost comma).
 function fake.useConfig(config)
-    _G.dofile = function(path, ...)
+    _G.loadfile = function(path, ...)
         if config ~= nil and tostring(path):match("config%.lua$") then
-            return config
+            if type(config) == "string" then
+                return load(config, "@config.lua", ...)
+            end
+            return function()
+                return config
+            end
         end
-        return realDofile(path, ...)
+        return realLoadfile(path, ...)
     end
 end
+
+-- main.lua and its modules as Lua compiled them, by path: each file is read and compiled
+-- once in a run of the tests, and run again for every load. A compiled file is a
+-- function, and running it again makes its locals and functions anew, so each game still
+-- gets fresh copies. (Read and compiled for every game, loading took a quarter to two
+-- fifths of the suite's CPU time, and with the tree on the Windows side of WSL, where
+-- each file opened is slow, over half of its time on the clock.)
+local compiled = {}
+local scripts -- the folder of the main.lua fake.loadMod loads
+fake.compiles = 0 -- the files compiled so far in this run
+
+local function compiledFile(path)
+    local chunk = compiled[path]
+    if not chunk then
+        chunk = assert(realLoadfile(path))
+        compiled[path] = chunk
+        fake.compiles = fake.compiles + 1
+    end
+    return chunk
+end
+
+-- Asked before Lua's own search: the mod's modules, from the folder main.lua puts first
+-- in package.path (its own), compiled once and not opened again.
+table.insert(package.searchers, 2, function(name)
+    if not scripts or not name:match("^hl1movement%.") then
+        return nil
+    end
+    local path = scripts .. name:gsub("%.", "/") .. ".lua"
+    return compiledFile(path), path
+end)
 
 --- Loads main.lua afresh, with fresh copies of its modules.
 function fake.loadMod(root)
@@ -1965,7 +2087,8 @@ function fake.loadMod(root)
             package.loaded[name] = nil
         end
     end
-    realDofile(root .. "HL1Movement/Scripts/main.lua")
+    scripts = root .. "HL1Movement/Scripts/"
+    compiledFile(scripts .. "main.lua")()
 end
 
 return fake

@@ -4,11 +4,20 @@ A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
 Half-Life 1's movement: fast, slippery running, air strafing and bunny hopping
 by holding the jump key.
 
-> **Status: version 0.3.0, early testing.** In the second test (0.2.6), first
+> **Status: version 0.3.1, early testing.** In the second test (0.2.6), first
 > person, bunny hopping and air strafing worked. 0.3 adds what that test asked
 > for: your character's footsteps and other sounds in first person, your
 > character turning to face where it hops (seen in third person), Half-Life's
-> slopes with slope boosting, and a speedometer (F9). These new parts haven't
+> slopes with slope boosting, and a speedometer (F9). The test also asked for a
+> little more speed from air strafing. Air strafing now gains what Half-Life's
+> does at any frame rate (before, at most frame rates other than 50, 100 and
+> 200, it gained less: at 80 frames a second about a tenth less per hop
+> switching between A and D, a few per cent less holding one key); two
+> settings give more, `AirSpeedCap` and `PhysicsRate` (see
+> [Settings](#settings)). 0.3.1 fixes what a review of 0.3.0 and a final review
+> of 0.3.1 found; above all, a landing on a slope now changes your speed only
+> where Half-Life's would, and running fast down a hill without jumping you
+> leave the ground and leap down it, as in Half-Life. The new parts haven't
 > been tested in the game yet: see [docs/TESTING.md](docs/TESTING.md) and
 > [Reporting problems](#reporting-problems).
 
@@ -16,33 +25,50 @@ by holding the jump key.
 
 - **First-person camera** while you walk around. Your own character is hidden so
   it doesn't block the view, and you can look straight up and down. It keeps
-  animating while hidden, so you still hear its footsteps, jumps and other
-  sounds, as in third person.
+  animating while hidden, so you still hear its footsteps and the other sounds
+  its animations make, as in third person.
 - **Half-Life 1 movement**: the same acceleration, friction, gravity and jump
   height as Half-Life, scaled to the game's world.
-- **Bunny hopping**: hold the jump key and you jump again the moment you land,
-  without losing speed. Steer in the air (air strafing) to build up speed. In
-  third person (F6), your character turns in the air to face where it is going.
-- **Slopes as in Half-Life**: landing on a slope turns part of the fall into speed
-  along it, so hopping down a hill speeds you up and hopping up one slows you
-  down. Run or land fast against an upward slope and it lifts you off the
-  ground: you slide up it and fly off the top (slope boosting).
+- **Bunny hopping**: hold the jump key and you jump again the moment you land.
+  On level ground a landing costs no speed. Steer in the air (air strafing) to
+  build up speed. In third person (F6), your character turns in the air to face
+  where it is going.
+- **Slopes as in Half-Life**: on a slope most landings keep your speed too. Now
+  and then one turns part of the fall into speed along the slope, in one step:
+  your speed jumps up going down a hill and drops going up one. As in Half-Life
+  that happens often going down a hill and seldom going up one. On rough ground
+  the same rule can take a little speed at a landing and nudge your direction.
+  Run fast down a hill without jumping and you leave the ground, as in
+  Half-Life, and go on down it in long low leaps (from about 540 u/s on a 20
+  degree hill, 1120 on a 10 degree one; on a slope steeper than about 31.5
+  degrees even a run does it). A touch costs a little speed, or now and then
+  turns part of the fall into speed, as a landing can. Hop onto a steep upward
+  slope fast enough (about 675 u/s for a 20 degree slope, 600 for a 30 degree
+  one) and you don't land on it: you slide up it without friction, and fly off
+  its top if it ends, or rounds off, while you still slide (slope boosting).
+  [docs/TESTING.md](docs/TESTING.md#slope-boosting) has the speeds and what a
+  slide looks like.
 - It **steps aside on its own** in battles and on the world map. When the game
   shows another camera (dialogue, cutscenes, sneaking, aiming), first person
   switches off. When the game locks your movement or moves the character itself
   (dialogue, cutscenes, climbing, ledge grabs), the game's own movement comes back.
 - A **speedometer** like Bunnymod XT's, on **F9**: your speed across the ground in
   Half-Life units per second, in Half-Life's HUD orange, below the middle of the
-  screen. It hides itself in menus, battles, dialogue and cutscenes.
+  screen. It shows only while the mod is on, and hides itself in menus, battles,
+  dialogue and cutscenes (more under
+  [When the mod steps aside](#when-the-mod-steps-aside)).
 - Everything can be turned on and off in the game with one key.
 
 ## What you need
 
 - Clair Obscur: Expedition 33 for Windows. These steps are for the **Steam**
   version; see [Other versions](#other-versions-of-the-game).
-- **UE4SS**, a free mod loader for Unreal Engine games. You need an
-  **experimental** build, because the game uses Unreal Engine 5.4 and the older
-  "stable" UE4SS 3.0.1 from 2024 doesn't support it.
+- **UE4SS**, a free mod loader for Unreal Engine games. The game uses Unreal
+  Engine 5.4, which the old UE4SS 3.0.1 from 2024 doesn't support: you need an
+  **experimental** build (step 2 below) or UE4SS 4.0 or newer. The mod was last
+  tested in the game (version 0.2.6) with the experimental build 1218
+  (`UE4SS_v3.0.1-1218-g560411f1.zip`). UE4SS 4.0 came out on 12 November 2026
+  and hasn't been tried with the mod yet.
 
 Back up your saves before trying mods. They are in
 `%LOCALAPPDATA%\Sandfall\Saved\SaveGames` (paste that into the File Explorer
@@ -60,18 +86,20 @@ only added files.
    usually `C:\Program Files (x86)\Steam\steamapps\common\Expedition 33\Sandfall\Binaries\Win64`.
 2. **Install UE4SS.** Go to the UE4SS download page,
    <https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest>, and
-   download the file whose name starts with `UE4SS_v` (in November 2026 it was
-   `UE4SS_v3.0.1-1218-g560411f1.zip`). Not the files starting with `zDEV`,
-   `zCustomGameConfigs` or `zMapGenBP`, and not *Source code*. Double-click the
-   downloaded file, select everything inside it (`dwmapi.dll` and the `ue4ss`
-   folder) and copy it into the `Win64` folder from step 1. You should now have
-   `Win64\dwmapi.dll` and a `Win64\ue4ss` folder. Only download UE4SS from that
-   GitHub page; other sites that look official are not.
+   download the file whose name starts with `UE4SS_v` (on 12 November 2026 it
+   was `UE4SS_v4.0.0-1-gf54b7332.zip`; the numbers change with every build). Not
+   the files starting with `zDEV`, `zCustomGameConfigs` or `zMapGenBP`, and not
+   *Source code*. Double-click the downloaded file, select everything inside it
+   (`dwmapi.dll` and the `ue4ss` folder) and copy it into the `Win64` folder
+   from step 1. You should now have `Win64\dwmapi.dll` and a `Win64\ue4ss`
+   folder. Only download UE4SS from that GitHub page; other sites that look
+   official are not.
 3. **Install this mod.** On this mod's GitHub page, click the green **Code**
-   button, then **Download ZIP**. Double-click the ZIP, open the
-   `Clair-Obscur-Expedition-33-HL1-Movement-main` folder inside it, and copy the
-   `HL1Movement` folder into `Win64\ue4ss\Mods`. You should end up with
-   `Win64\ue4ss\Mods\HL1Movement\Scripts\main.lua` and
+   button, then **Download ZIP**. Double-click the ZIP, open the folder inside it
+   (`Clair-Obscur-Expedition-33-HL1-Movement-main`; if you chose another branch
+   on the GitHub page first, its name ends with that branch's name instead of
+   `main`), and copy the `HL1Movement` folder into `Win64\ue4ss\Mods`. You should
+   end up with `Win64\ue4ss\Mods\HL1Movement\Scripts\main.lua` and
    `Win64\ue4ss\Mods\HL1Movement\enabled.txt`.
 4. **Start the game from Steam** as usual and load a save. A few seconds after you
    gain control, the view switches to first person.
@@ -89,7 +117,7 @@ you gain control, the mod writes a report to the log by itself.
 | **F6** | Switches between first and third person (the movement stays) |
 | **F7** | Loads the settings file again |
 | **F8** | Writes a status report to `UE4SS.log` |
-| **F9** | Shows and hides the speedometer |
+| **F9** | Shows and hides the speedometer (it only shows while the mod is on) |
 | W A S D, mouse | Move and look, as usual |
 | **Space** (held) | Jump, and keep hopping every time you land |
 
@@ -98,7 +126,8 @@ keys only work while you hold the **Fn** key.
 
 ### How to bunny hop and air strafe
 
-1. Run forward and **hold Space**. You keep hopping and lose no speed when you land.
+1. Run forward and **hold Space**. You keep hopping, and on level ground you
+   lose no speed when you land.
 2. While in the air, **let go of W**, hold **A or D**, and turn the mouse smoothly in
    the same direction (left with A, right with D). This is air strafing: it
    gains speed.
@@ -106,7 +135,12 @@ keys only work while you hold the **Fn** key.
    more speed you gain, up to a point. Switch keys right when the mouse changes
    direction: switching late loses much of the gain.
 
-Without air strafing you keep the speed you had, but don't gain any.
+Without air strafing you keep the speed you had on level ground, but don't gain
+any. On a hill most landings keep it too; now and then one changes it in one
+step (on a 10 degree hill by about 55 u/s going down and about 35 going up; the
+speedometer shows it). Standing on a slope and holding Space, you stay where
+you are (with the default `PhysicsRate`). `SlopeLandings = false` (see
+[Settings](#settings)) makes every landing keep your speed.
 
 ## Settings
 
@@ -119,22 +153,22 @@ Each setting has a short explanation next to it. The most useful ones:
 | `FieldOfView` | `100` | How wide the first-person view is, in degrees |
 | `FirstPerson` | `true` | `false` keeps the game's own camera |
 | `CameraMethod` | `"auto"` | How first person is done: `"engine"` (Unreal's own first-person view), `"game"` (the game's camera moved to the eyes, which keeps its picture settings) or `"auto"` (the first, then the second if it doesn't work) |
-| `BodySounds` | `true` | Keeps your hidden character animating in first person, so you still hear its footsteps, jumps and other sounds; it costs about what third person does. `false` lets the game stop them, as it does for a character nobody sees |
+| `BodySounds` | `true` | Keeps your hidden character animating in first person, so you still hear its footsteps and the other sounds its animations make; it costs about what third person does. `false` lets the game stop them, as it does for a character nobody sees |
 | `Movement` | `true` | `false` keeps the game's own movement |
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
-| `AirSpeedCap` | `30` | Half-Life's limit on air strafing, which is what makes it work; `35` or `40` gain about 20 or 40 % more speed per hop, but aren't Half-Life's |
+| `AirSpeedCap` | `30` | Half-Life's limit on air strafing, which is what makes it work; `35` or `40` gain about 17 or 33 % more speed per hop, but aren't Half-Life's |
 | `BodyFollowsHop` | `true` | In the air, your character turns to face where it is going (you see it in third person); `false` keeps it facing the way it jumped |
 | `JumpKeys` | `{ "SpaceBar", "Gamepad_FaceButton_Bottom" }` | Add `"MouseScrollDown"` to hop with the mouse wheel |
-| `MaxSpeed`, `Accelerate`, `AirAccelerate`, `Friction`, `Gravity` | Half-Life's values | The same as Half-Life's `sv_` console variables |
+| `MaxSpeed`, `Accelerate`, `AirAccelerate`, `Friction`, `Gravity` | Half-Life's values | The same as Half-Life's `sv_` console variables. Your keys ask for 400 u/s (Half-Life's `cl_forwardspeed`), so `MaxSpeed` above 400 also needs a line `InputSpeed = ...` (a setting `config.lua` doesn't list), or you still run at 400 |
 | `JumpHeight` | `45` | How high a jump goes at `Gravity` 800; as in Half-Life, less gravity jumps higher |
 | `UnitScale` | `2.5` | Centimetres per Half-Life unit; higher makes everything faster and higher |
 | `BhopCap` | `0` | `1.7` copies later Half-Life updates, which slow you down above 1.7 × max speed |
-| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`, up to `250`; `0` updates once per frame. `144` to `250` gain a little more when air strafing (about 15 to 28 %), as Half-Life does at those frame rates |
+| `PhysicsRate` | `100` | Half-Life movement updates per second, whatever the frame rate, as Half-Life at `fps_max 100`, up to `250`; `0` updates once per frame. `144` to `250` gain a little more when air strafing (about 10 to 20 % with A and D in turn and the view swinging about 150 to 180 degrees a second, only a few per cent with one key and a slow turn), as today's Steam Half-Life does at those frame rates (the 2005 version cuts every update to whole milliseconds and gains more at 144). From `135` on, a hop along level ground or an even rise keeps its speed when it lands (unless it starts a slide, see `SlopeBoosts`), and landings going downhill change it less often; one that comes down where the ground turns upward (the foot of a hill, the bottom of a dip) can still lose some, less often the higher the rate. At some other rates (`80`, `95`, `98` and `101` of those tried) hopping on the spot on a slope moves you off down it, as today's Steam Half-Life does at those frame rates (the 2005 version, of these four, only at 80) |
 | `KeepSpeed` | `true` | Undoes the game cutting your speed (its own speed limit); `false` lets the game's cuts stand |
-| `SlopeLandings` | `true` | Landing on a slope turns part of the fall into speed along it: faster downhill, slower uphill, as in Half-Life; `false` keeps your speed at landings, as the game does |
-| `SlopeBoosts` | `true` | Running or landing fast against an upward slope lifts you off the ground: you slide up it without friction and fly off the top; `false` turns this off |
+| `SlopeLandings` | `true` | Half-Life's landings on slopes: most keep your speed, as on level ground; one that reaches the slope inside one of Half-Life's updates turns part of the fall into speed along it in one step (a jump in speed going downhill, a drop going uphill). How often depends on your speed, the slope and `PhysicsRate`. `false` makes every landing keep your speed, as the game does |
+| `SlopeBoosts` | `true` | Hopping onto a steep upward slope fast enough, or running into it, starts a slide up it without friction instead of a landing, and you fly off its top if it ends or rounds off while you still slide. Every hop slides from about 675 u/s on a 20 degree slope, 600 on 30 degrees, 825 on 15 and 1275 on 10, and some from less. Running down a slope without jumping, fast enough (from about 540 u/s on 20 degrees, 1120 on 10, and on slopes steeper than about 31.5 degrees at a run; a higher `PhysicsRate` needs more), you leave the ground and go on down it in long low leaps, as in Half-Life; `false` turns both off |
 | `ForwardKeys` and so on | `{ "W" }` … | The movement keys; add `"Up"`, `"Down"`, `"Left"`, `"Right"` for the arrow keys |
-| `Speedometer` | `false` | `true` shows the speedometer from the start; F9 (`SpeedometerKey`) shows and hides it either way |
+| `Speedometer` | `false` | `true`: the speedometer is on when the game starts. This is only read then: F7 doesn't switch it on or off, F9 (`SpeedometerKey`) does |
 | `SpeedometerPosition`, `SpeedometerSize`, `SpeedometerColor` | `{ 0.5, 0.75 }`, `32`, `{ 255, 160, 0 }` | Where the middle of the speedometer goes (across and down the screen, from 0 to 1), how big its digits are, and its colour (red, green and blue, from 0 to 255) |
 
 New hotkeys only take effect after restarting the game.
@@ -142,7 +176,7 @@ New hotkeys only take effect after restarting the game.
 ## When the mod steps aside
 
 Both the camera and the movement go back to the game, with everything the mod
-changed, when:
+changed, and the speedometer leaves the screen, when:
 
 - a battle starts (they come back afterwards);
 - the game changes area, and for three seconds after a new area or character
@@ -155,9 +189,13 @@ Otherwise each part steps aside on its own:
   game shows another camera, for example when sneaking or aiming.
 - **The game's own movement** comes back while the game locks your movement or
   moves the character itself: dialogue, cutscenes, climbing, ledge grabs.
+- **The speedometer** hides while the game is paused (its menu) and while it
+  locks your movement. With first person on, it also hides during dialogue and
+  cinematics, and while the game shows the view of something other than your
+  character, as it may when sneaking or aiming.
 
 So you stay in first person while you climb, and you may keep the Half-Life
-movement while aiming. While the game is paused, nothing changes.
+movement while aiming. While the game is paused, nothing else changes.
 
 ## Uninstalling
 
@@ -188,18 +226,33 @@ checks the game's own files. It isn't needed to uninstall either.
   If there is no `UE4SS.log` at all, or the times in it are from before you
   started the game, UE4SS didn't load: check step 2.
 - **The game crashes at start** after installing UE4SS. Make sure you use an
-  experimental build from the page above, and that you don't have two copies of
-  UE4SS from different mods.
+  experimental build from the page above, or UE4SS 4.0 or newer, and that you
+  don't have two copies of UE4SS from different mods.
 - **The camera stays in third person.** The log says why, in lines that start
   with `First person:`. If Unreal's own first-person view doesn't reach the eyes
   within two seconds, the mod moves the game's camera to the eyes instead. If
   that doesn't work either, it switches first person off by itself, so that your
   character isn't left invisible, and the log says `First person doesn't work
   here`. Please report it. Press F6 twice to try again.
+- **The speedometer doesn't show** when you press F9. It shows only while the
+  mod is on (F5) and you can move your character: not in menus, battles,
+  dialogue or cutscenes, and not on the world map. If you pressed F9 while the
+  mod was off, that press only switched the number on or off for later: the log
+  says `Speedometer on (it shows once the mod is on: F5)` or `Speedometer off`.
+  After the second, press F9 once more when the mod is on. Setting
+  `Speedometer = true` and pressing F7 doesn't show it either: that setting is
+  only read when the game starts. If the mod couldn't put it on the screen, the
+  log says why, in a line with `WARNING` and `speedometer`. Please report it.
 - **Steam Deck or Linux**: add this launch option in Steam (right-click the game,
   *Properties*, *Launch options*): `WINEDLLOVERRIDES="dwmapi=n,b" %command%`.
 - **A key does nothing.** On a laptop, hold **Fn** with it. Another mod may use
   it too: change the keys in `config.lua` and restart the game.
+- **A changed setting does nothing.** Save `config.lua` and press **F7** (the
+  hotkeys, `StartEnabled` and `Speedometer` are only read when the game
+  starts). If it still does nothing, search `UE4SS.log` for `WARNING`: the mod
+  says there what it couldn't use in `config.lua`. The usual slips are a
+  missing comma, a name without its quotes, and `true` or `false` written
+  differently (`False`, `flase`).
 
 ## Reporting problems
 
@@ -218,15 +271,26 @@ checks the game's own files. It isn't needed to uninstall either.
 
 - The sounds in first person, the turning in the air, the slopes and the
   speedometer are new in 0.3 and not tested in the game yet (see the top).
+- If your character is silent in first person after a cutscene or a battle that
+  started as soon as you entered an area, press F6 twice: the mod only keeps a
+  hidden character animating once the game has shown it.
 - No crouch jumping, ducking, swimming or ladders the way Half-Life does them.
 - No surfing: a slope too steep to walk on stops you like a wall, where Half-Life
   lets you slide along it. Slopes otherwise follow Half-Life's rules closely but
-  not exactly: the game keeps you on the ground over small bumps.
+  not exactly: the game keeps you on the ground over small bumps and down stairs
+  (Half-Life leaves the ground at every step higher than 2 units), and a leap
+  down a hill or a flight off the top of a slide starts from the ground, a
+  little lower than Half-Life's. While you slide up a slope, the game still
+  walks your character, so it looks as if it ran up the slope until it flies
+  off the top.
 - Half-Life's extra friction near ledge edges isn't copied.
 - While the mod moves you, the game's automatic ledge climbing may not trigger.
   Press F5 to climb, then F5 again.
 - In third person (F6) with the mod's movement, the character's animations can
   look wrong, because the game doesn't see your input.
+- A hop may lack the sound the game's own jump makes, in first and third person
+  alike: the mod lifts the character off the ground itself, without the game's
+  jump. This isn't known yet; [docs/TESTING.md](docs/TESTING.md) asks.
 - With Unreal's own first-person view (`CameraMethod = "engine"`, the first one
   `"auto"` tries), the game's camera effects, such as depth of field and camera
   shake, don't apply. If the game sets brightness or colours on its own camera,
@@ -256,9 +320,10 @@ and before it moves your character:
   with Half-Life's rules (`hl1movement/physics.lua`), in steps of a hundredth of
   a second, as Half-Life does. It then hands that velocity to Unreal's character
   movement, which still handles walls, stairs, slopes and gravity; on slopes the
-  mod changes the velocity as Half-Life would (landings, slides). Unreal's own
-  acceleration and braking are switched off or cancelled out, and the game's
-  speed limiter is paused (`hl1movement/movement.lua`).
+  mod changes the velocity as Half-Life would (landings, slides, leaving the
+  ground running down one). Unreal's own acceleration and braking are switched
+  off or cancelled out, and the game's speed limiter is paused
+  (`hl1movement/movement.lua`).
 - It checks which camera the game shows (`hl1movement/view.lua`). While that is
   the character's main camera, it switches Unreal's camera manager to its built-in
   `FirstPerson` camera style, which looks out of the character's eyes, or moves

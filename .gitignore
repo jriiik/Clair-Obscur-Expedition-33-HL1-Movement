@@ -30,3 +30,6 @@ ObjectDump*.txt
 # Crash files: UE4SS and Unreal crash dumps and their context
 *.dmp
 *.runtime-xml
+
+# A review's scratch folder (probes and their output): never part of the repository
+probes/

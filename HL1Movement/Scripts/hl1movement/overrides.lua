@@ -125,16 +125,24 @@ function Overrides:forget()
 end
 
 --- Puts every remembered value back, newest change first. Objects that no longer
---- exist, or whose address now belongs to a different object, are skipped.
+--- exist, or whose address now belongs to a different object, are skipped. A value
+--- the game wrote since the mod's last write (in the frame the mod hands back) is
+--- the game's latest, so it stays.
 function Overrides:restore()
     for _, entry in pairs(self.entries) do
         local obj = entry.obj
         if ue.valid(obj) and ue.fullName(obj) == entry.fullName then
             for i = #entry.order, 1, -1 do
                 local name = entry.order[i]
-                pcall(function()
-                    obj[name] = entry.saved[name].value
+                local slot = entry.saved[name]
+                local read, current = pcall(function()
+                    return obj[name]
                 end)
+                if not read or slot.written == nil or unchanged(current, slot.written) then
+                    pcall(function()
+                        obj[name] = slot.value
+                    end)
+                end
             end
         end
         forgetEntry(entry)

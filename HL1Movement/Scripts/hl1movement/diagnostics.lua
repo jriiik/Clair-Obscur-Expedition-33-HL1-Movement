@@ -7,6 +7,7 @@ local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
 local guard = require("hl1movement.guard")
 local journal = require("hl1movement.journal")
+local settings = require("hl1movement.settings")
 local input = require("hl1movement.input")
 local view = require("hl1movement.view")
 local camera = require("hl1movement.camera")
@@ -120,6 +121,12 @@ function diagnostics.report(env)
     line("Settings: CameraMethod=%s, FieldOfView=%s, PhysicsRate=%s, KeepSpeed=%s, AutoHop=%s, JumpInput=%s",
         tostring(cfg.CameraMethod), tostring(cfg.FieldOfView), tostring(cfg.PhysicsRate), tostring(cfg.KeepSpeed),
         tostring(cfg.AutoHop), tostring(cfg.JumpInput))
+    -- Every setting config.lua changed, whichever it is: what a test was played with.
+    local changed = {}
+    for i, change in ipairs(settings.changes(cfg)) do
+        changed[i] = change.name .. "=" .. change.value
+    end
+    line("Settings not at their defaults: %s", #changed > 0 and table.concat(changed, ", ") or "none")
     line("Frame hook: %s%s", mod.tickHook or ("not registered yet (" .. tostring(mod.hookError) .. ")"),
         mod.lateHook and " (runs after the character's movement, so the movement is off)" or "")
     line("Jump hook: %s%s", mod.jumpHook or "not registered", mod.hooksWanted and " (a hook is waiting to be added)"
@@ -141,11 +148,11 @@ function diagnostics.report(env)
 
     local cameraStatus = camera.status()
     local waitingFor = mod.cameraBlock or cameraStatus.waiting
-    line("First person: %s with %s%s, hidden parts=%d (kept animating %d), camera to eyes=%s cm%s",
-        cameraStatus.state, cameraStatus.methodName,
+    line("First person: %s with %s%s, hidden parts=%d (kept animating %d), hidden parts the game moved to another "
+        .. "actor this session=%d, camera to eyes=%s cm%s", cameraStatus.state, cameraStatus.methodName,
         cameraStatus.method == "engine" and (" (style set through " .. cameraStatus.styleRoute .. ")") or "",
-        cameraStatus.hiddenParts, cameraStatus.animatedParts, show(cameraStatus.lastDistance),
-        waitingFor and (", waiting because: " .. waitingFor) or "")
+        cameraStatus.hiddenParts, cameraStatus.animatedParts, cameraStatus.partsMoved,
+        show(cameraStatus.lastDistance), waitingFor and (", waiting because: " .. waitingFor) or "")
     if cameraStatus.moved then
         line("  game camera at the eyes: %s, put back on its arm by the game %d times", cameraStatus.moved,
             cameraStatus.reattached)
@@ -171,16 +178,48 @@ function diagnostics.report(env)
         .. "air=%s", show(moveStatus.worldGravity), tostring(moveStatus.curveTaken), tostring(moveStatus.curveBroken),
         moveStatus.limiter, tostring(moveStatus.stayBasedInAir))
     local counts = moveStatus.counts
-    line("  GetMaxSpeed() after setting MaxWalkSpeed: %s; the game's own MaxWalkSpeed: %s; hops logged: %d",
-        show(moveStatus.maxSpeed), show(moveStatus.gameMaxWalkSpeed), moveStatus.hops)
+    line("  GetMaxSpeed() after setting MaxWalkSpeed: %s; the game's own MaxWalkSpeed: %s; hops so far: %d (the "
+        .. "next %d get a line in the log)", show(moveStatus.maxSpeed), show(moveStatus.gameMaxWalkSpeed),
+        moveStatus.hops, moveStatus.hopLinesLeft)
     line("  since taking over: speed cuts %d (undone %d), MaxWalkSpeed set by the game %d, speed limiter started "
-        .. "%d, the game's input reaching Unreal %d, velocity changed at a jump %d", counts.cuts, counts.restores,
-        counts.rewrites, counts.wakes, counts.leaks, counts.jumpChanges)
-    line("  slopes (SlopeLandings=%s, SlopeBoosts=%s): landings on one %d, slides up one %d, flights off one %d, "
-        .. "the game's jumps held back while sliding %d, MaxSimulationTimeStep %s s%s", tostring(cfg.SlopeLandings),
-        tostring(cfg.SlopeBoosts), counts.slopeLandings, counts.slides, counts.launches, counts.stoppedJumps,
-        show(moveStatus.maxStep), moveStatus.slopeBroken and "; off: the floor's normal can't be read"
-            or (moveStatus.sliding and "; sliding up a slope now" or ""))
+        .. "%d, the game's input reaching Unreal %d, velocity changed at a jump %d, jumps that landed again within "
+        .. "their own frame %d", counts.cuts, counts.restores, counts.rewrites, counts.wakes, counts.leaks,
+        counts.jumpChanges, counts.groundedJumps)
+    -- The landings on slopes by kind: those a Half-Life update ran into, with what they
+    -- gained and lost in all, apart (hopping down a hill and up it again cancels out);
+    -- those Half-Life's ground check set down first, which keep their speed; and those
+    -- the mod couldn't tell, which keep it too. The hop lines and status lines that say
+    -- so run out.
+    local slopeTotals = ""
+    if counts.slopeLandings > 0 then
+        slopeTotals = string.format(" (%d ran into it: +%.0f and -%.0f u/s in all; %d set down first by the ground "
+            .. "check, speed kept; %d not told apart, speed kept)", counts.slopeHits,
+            moveStatus.slopeGained / P.unitScale, moveStatus.slopeLost / P.unitScale,
+            counts.slopeLandings - counts.slopeHits - counts.slopeUnknown, counts.slopeUnknown)
+    end
+    line("  slopes (SlopeLandings=%s, SlopeBoosts=%s): landings on one %d%s, slides up one %d, flights off one %d, "
+        .. "the game's jumps held back while sliding %d%s", tostring(cfg.SlopeLandings),
+        tostring(cfg.SlopeBoosts), counts.slopeLandings, slopeTotals, counts.slides, counts.launches,
+        counts.stoppedJumps, moveStatus.slopeBroken
+            and "; off: the floor's normal can't be read" or (moveStatus.sliding and "; sliding up a slope now" or ""))
+    -- How rough the game's ground is: a landing on a floor that leans can change the
+    -- speed and the direction, also on ground that is level on the whole. Counts since
+    -- the mod loaded, so two reports give what lay between them.
+    local floors, bands, read = moveStatus.floors, {}, 0
+    for i = 1, #floors.bands + 1 do
+        local label
+        if i == 1 then
+            label = string.format("under %d deg", floors.bands[1])
+        elseif i > #floors.bands then
+            label = string.format("%d or more", floors.bands[i - 1])
+        else
+            label = string.format("%d to %d", floors.bands[i - 1], floors.bands[i])
+        end
+        bands[i] = string.format("%s: %d", label, floors[i])
+        read = read + floors[i]
+    end
+    line("  floors at landings: %d read (leaning %s); no usable floor at %d landings (found by a line trace, touched "
+        .. "with an edge, or not walkable)", read, table.concat(bands, ", "), floors.unusable)
     line("Physics in cm: max speed %.0f, jump speed %.0f, gravity %.0f, air cap %.0f, unit scale %.2f, "
         .. "updates per second %s", P.maxSpeed, P.jumpSpeed, P.gravity, P.airSpeedCap, P.unitScale,
         P.rate > 0 and tostring(P.rate) or "one per frame")
@@ -345,8 +384,7 @@ function diagnostics.report(env)
                 line("  Skin: %s", values(skin, { "AttachedBodyOnCharacter", "AttachedFaceOnCharacter",
                     "AnimInstanceClass" }))
             end
-            line("  Skinned meshes on the character (BodySounds=%s):", tostring(cfg.BodySounds))
-            each("/Script/Engine.SkinnedMeshComponent", function(mesh)
+            local function skinnedMesh(mesh)
                 local option = ue.number(mesh, "VisibilityBasedAnimTickOption")
                 local was = camera.tickToPutBack(mesh)
                 local okSeen, onScreen = ue.call(mesh, "WasRecentlyRendered", 0.2)
@@ -374,7 +412,34 @@ function diagnostics.report(env)
                         .. "bIsMoving=%s", show(ue.get(info, "Speed")), show(ue.get(pawn, "Speed")),
                         math.sqrt(x * x + y * y), show(ue.get(info, "bIsMoving")))
                 end
+            end
+            line("  Skinned meshes on the character (BodySounds=%s):", tostring(cfg.BodySounds))
+            local listed = {}
+            each("/Script/Engine.SkinnedMeshComponent", function(mesh)
+                listed[ue.address(mesh) or false] = true
+                skinnedMesh(mesh)
             end)
+            -- The meshes of actors attached to the character aren't its components, but the
+            -- mod hides them with the rest, and keeps them animating too: they are found as
+            -- the hiding finds them, through the attached parts.
+            local skinnedClass = ue.find("/Script/Engine.SkinnedMeshComponent")
+            local okParts, parts = pcall(camera.attachedParts, pawn)
+            local others = {}
+            for _, part in ipairs(okParts and parts or {}) do
+                local address = ue.address(part)
+                if skinnedClass and address and not listed[address] then
+                    listed[address] = true
+                    local okIs, skinned = ue.call(part, "IsA", skinnedClass)
+                    if okIs and skinned == true then
+                        others[#others + 1] = part
+                    end
+                end
+            end
+            line("  Skinned meshes of actors attached to the character:%s", okParts and (#others == 0 and " none" or "")
+                or (" could not look for them: " .. tostring(parts)))
+            for _, mesh in ipairs(others) do
+                skinnedMesh(mesh)
+            end
             local controller = ue.object(pawn, "BP_CameraControllerComponent")
             if controller then
                 local okTick, ticking = ue.call(controller, "IsComponentTickEnabled")

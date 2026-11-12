@@ -32,10 +32,22 @@ function t.eq(actual, expected, message)
 end
 
 function t.near(actual, expected, tolerance, message)
-    if type(actual) ~= "number" or math.abs(actual - expected) > (tolerance or 1e-9) then
-        error(string.format("%s: expected %s (+-%s), got %s", message or "numbers differ", show(expected),
-            show(tolerance), show(actual)), 2)
+    tolerance = tolerance or 1e-9
+    -- Asked this way round so that a NaN fails: every comparison with one is false.
+    if type(actual) == "number" and math.abs(actual - expected) <= tolerance then
+        return
     end
+    error(string.format("%s: expected %s (+-%s), got %s", message or "numbers differ", show(expected),
+        show(tolerance), show(actual)), 2)
+end
+
+--- math.max(most, value) for a running maximum, failing on a value that isn't a number:
+--- math.max drops a NaN that isn't its first argument, so a check of the maximum would pass.
+function t.max(most, value, message)
+    if type(value) ~= "number" or value ~= value then
+        error(string.format("%s: %s isn't a number", message or "a value for a maximum", show(value)), 2)
+    end
+    return math.max(most, value)
 end
 
 function t.truthy(value, message)

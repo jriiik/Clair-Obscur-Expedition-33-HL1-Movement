@@ -1,7 +1,7 @@
 -- Runs the tests with plain Lua 5.4, from the repository root:
 --   lua5.4 tests/run.lua
 
-local dofile = dofile -- the mod tests replace the global one
+local dofile = dofile -- kept apart from the globals the mod tests replace (print, loadfile)
 local root = (arg and arg[0] or ""):match("^(.-)tests[/\\]run%.lua$") or ""
 package.path = root .. "HL1Movement/Scripts/?.lua;" .. root .. "tests/?.lua;" .. package.path
 

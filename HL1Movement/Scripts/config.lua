@@ -2,7 +2,9 @@
 --
 -- Change a value, save the file, and press F7 in the game to load it again.
 -- New keys for the five hotkeys below only work after restarting the game.
--- Keep the commas at the ends of lines and the quotes around names.
+-- Keep the commas at the ends of lines and the quotes around names, and write
+-- true and false in small letters. A slip in this file is named in UE4SS.log,
+-- in a line with WARNING.
 -- Speeds and distances are in Half-Life units, so the numbers match Half-Life's.
 
 return {
@@ -16,7 +18,8 @@ return {
     StartEnabled = true,    -- false: the mod starts switched off until you press ToggleKey
 
     -- Speedometer: your speed across the ground in Half-Life units per second, like Bunnymod XT's
-    Speedometer = false,    -- true: shown from the start; SpeedometerKey shows and hides it either way
+    Speedometer = false,    -- true: the speedometer is on when the game starts. Only read then: F7 doesn't
+                            -- switch it on or off, SpeedometerKey does. It shows only while the mod is on
     SpeedometerKey = "F9",  -- a hotkey like those above: shows and hides the speedometer
     SpeedometerPosition = { 0.5, 0.75 }, -- where its middle goes, from 0 to 1: { across, down } the screen
     SpeedometerSize = 32,   -- how big its digits are, from 8 to 200
@@ -37,12 +40,13 @@ return {
     -- Movement. These are Half-Life 1's default values.
     Movement = true,        -- false: first person with the game's own movement
     AutoHop = true,         -- hold jump to keep hopping; false: press jump for every hop, as in Half-Life 1
-    MaxSpeed = 320,         -- sv_maxspeed
+    MaxSpeed = 320,         -- sv_maxspeed. Your keys ask for 400 (Half-Life's cl_forwardspeed), so above 400
+                            -- also add a line InputSpeed = ... (a setting this file doesn't list)
     Accelerate = 10,        -- sv_accelerate
     AirAccelerate = 10,     -- sv_airaccelerate
     AirSpeedCap = 30,       -- the air strafing limit; keep it low, it is what makes air strafing work.
-                            -- 35 or 40 gain about 20 or 40 % more speed per hop (strafing with two or
-                            -- three turns a hop), but aren't Half-Life's
+                            -- 35 or 40 gain about 17 or 33 % more speed per hop when air strafing, but
+                            -- aren't Half-Life's
     Friction = 4,           -- sv_friction
     StopSpeed = 100,        -- sv_stopspeed
     Gravity = 800,          -- sv_gravity; as in Half-Life, less gravity also means higher jumps
@@ -52,14 +56,27 @@ return {
     MaxVelocity = 2000,     -- sv_maxvelocity
     UnitScale = 2.5,        -- centimetres per Half-Life unit; higher makes everything faster and jumps higher
     PhysicsRate = 100,      -- Half-Life updates per second, whatever the frame rate (Half-Life at fps_max 100);
-                            -- up to 250; 0: one update per frame. 144, 200 or 250 gain about 15, 24 or 28 %
-                            -- more speed per hop when air strafing, as Half-Life does at that frame rate
-    KeepSpeed = true,       -- undo the game cutting your speed (its speed limit), so hops keep their speed
-    SlopeLandings = true,   -- Half-Life's landings on slopes: part of the fall turns into speed along the slope,
-                            -- so hopping down a 10 degree hill gains about 65 u/s a hop, and up it loses
-                            -- about 30; false: landings keep your speed, as the game's do
-    SlopeBoosts = true,     -- slope boosting: running or landing fast against an upward slope lifts you off
-                            -- the ground, you slide up it without friction and fly off the top; false: never
+                            -- up to 250; 0: one update per frame. 144, 200 or 250 gain about 10, 15 or 20 %
+                            -- more speed per hop when air strafing with A and D in turn and the view swinging
+                            -- about 150 to 180 degrees a second, as today's Steam Half-Life does at that frame
+                            -- rate (the 2005 version cuts every update to whole milliseconds, 6 at 144 fps, and
+                            -- gains more there); with one key and a slow turn only a few per cent. From 135 on,
+                            -- landings on slopes change your speed less often (see SlopeLandings)
+    KeepSpeed = true,       -- undo the game cutting your speed (its speed limit), so it takes none from your hops
+    SlopeLandings = true,   -- Half-Life's landings on slopes. Most keep your speed, as on level ground. One that
+                            -- reaches the slope inside one of Half-Life's updates turns part of the fall into
+                            -- speed along it, in one step: on a 10 degree hill about 55 u/s gained going down
+                            -- from a run (more the faster you go) and about 35 lost going up. How often depends
+                            -- on your speed, the slope and PhysicsRate: at 100, about every second landing
+                            -- going down a 10 degree hill while strafing, and few going up one.
+                            -- false: every landing keeps your speed, as the game's do
+    SlopeBoosts = true,     -- slope boosting: hop onto a steep upward slope fast enough (or run into it) and you
+                            -- slide up it without friction instead of landing, and fly off its top if it ends
+                            -- or rounds off while you still slide. Every hop slides from about 675 u/s on a 20
+                            -- degree slope, 600 on 30 degrees, 825 on 15 and 1275 on 10, and some from less.
+                            -- Running down a slope without jumping, fast enough (about 540 u/s on 20 degrees,
+                            -- 1120 on 10, and at a run on slopes steeper than about 31.5 degrees), you leave the
+                            -- ground and go on down it in long low leaps, as in Half-Life; false: neither
 
     -- Input, as Unreal key names: W, A, S, D, Up, Down, Left, Right, SpaceBar,
     -- LeftShift, MouseScrollDown, Gamepad_FaceButton_Bottom (the A button) ...

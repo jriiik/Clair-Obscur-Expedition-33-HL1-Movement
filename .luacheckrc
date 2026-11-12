@@ -2,6 +2,9 @@
 std = "lua54"
 max_line_length = 120
 
+-- A review's scratch folder, if one is here: not part of the repository (.gitignore has it too).
+exclude_files = { "probes/" }
+
 -- Globals UE4SS gives every Lua mod.
 read_globals = {
     "RegisterHook",
@@ -30,6 +33,6 @@ files["tests/"] = {
         "ModRef",
         "TEST_ROOT",
         "print",
-        "dofile",
+        "loadfile",
     },
 }

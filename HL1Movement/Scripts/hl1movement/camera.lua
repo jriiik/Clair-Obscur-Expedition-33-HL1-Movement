@@ -48,9 +48,11 @@ local SKINNED = "/Script/Engine.SkinnedMeshComponent"
 -- 3 OnlyTickMontagesWhenNotRendered, 4 OnlyTickPoseWhenRendered. From 2 on, a mesh that
 -- hasn't been drawn for a second stops running its animation graph (2 and 3 still play
 -- montages, and 4 runs it only during a root-motion montage), and with the graph the
--- anim notifies of its animations, which play the footsteps, the jump and landing
--- sounds and the clothes' rustle. A part hidden with "owner no see" isn't drawn in the
--- player's view and casts no shadow there, and one hidden in game isn't drawn at all.
+-- anim notifies of its animations, which play the footsteps, the clothes' rustle, the
+-- breathing and the grunts. (What plays the game's jump sound isn't known: the mod's
+-- hops aren't the game's own jump, so they skip what is tied to it in any view.) A part
+-- hidden with "owner no see" isn't drawn in the player's view and casts no shadow
+-- there, and one hidden in game isn't drawn at all.
 local TICK_OPTION = "VisibilityBasedAnimTickOption"
 local TICK_AS_IF_SEEN = 0 -- AlwaysTickPoseAndRefreshBones: what Unreal does while the part is on screen
 local TICK_STOPS_UNSEEN = 2 -- this option and the ones after it stop the graph while the part isn't drawn
@@ -61,17 +63,21 @@ local KEEP_RELATIVE, SNAP_TO_TARGET = 0, 2 -- EAttachmentRule
 local FOCUS_DISABLED = 3 -- ECameraFocusMethod::Disable
 local NAME_CHECK_EVERY = 4 -- hiding passes between checks of the hidden parts' full names
 local MAX_MOVE_LINES = 3
+local MAX_MOVED_PART_LINES = 3 -- log lines for hidden parts the game moved to another actor, per session
 local FOV_TOLERANCE = 0.05 -- degrees: a field of view that differs by more was changed
 -- Seconds the engine's view waits for the camera manager to finish blending to
 -- the character, before it starts anyway.
 local BLEND_WAIT = 3
+-- Frames a character's first start waits for a mesh the game has never drawn to be
+-- drawn (see bodyUndrawn), before it starts anyway.
+local DRAW_WAIT = 5
 
 local overrides = Overrides.new()
 local hidden = {} -- address -> { obj, fullName, how, was, skinned, tick, refused }
 local waiting = {} -- address -> full name of parts seen once, hidden if still there next pass
 local notPrimitive = {} -- address -> true for attached components that can't be seen
--- address -> full name of the skinned parts that were drawn when the mod hid them, for
--- the character's life (drawnPawn): see keepAnimating.
+-- address -> full name of the skinned parts the game had drawn by the time the mod hid
+-- them, for the character's life (drawnPawn): see keepAnimating.
 local drawnBefore = {}
 local drawnPawn = nil
 local st = {
@@ -98,9 +104,11 @@ local st = {
     hasStyleField = false,
     moved = nil, -- the game camera while it is at the eyes (see moveCamera)
     moveLines = 0,
+    partsMoved = 0, -- hidden parts the game moved to another actor, put back by the mod (see movedByGame)
     updates = 0, -- views the camera manager has worked out: one at the end of each frame Unreal didn't pause
     lastUnpaused = false, -- the last frame wasn't paused
-    waiting = nil, -- why first person isn't on yet although it may be: "camera" or "blend"
+    waiting = nil, -- why first person isn't on yet although it may be: "camera", "blend" or "body"
+    bodyWaited = 0, -- frames this start has waited for the body to be drawn (see bodyUndrawn)
     blendWaited = nil, -- seconds (not paused) the camera manager has been seen blending to the character
     blendLast = nil, -- when that was last checked
     blendStuck = false, -- a blend didn't end in BLEND_WAIT seconds: not waited for again until it ends
@@ -546,6 +554,68 @@ local function tickName(option)
     return string.format("%s (%s)", tostring(option), TICK_NAMES[option] or "unknown")
 end
 
+-- Whether Unreal has drawn a part at any time since its world began. The engine keeps
+-- each part's last render time (WasRecentlyRendered compares it with the world's
+-- clock), also while the game or the mod hides the part, and a part never drawn has a
+-- time from before the world began (-1000 s in Unreal 5.4). So: drawn within the
+-- world's age, less a second, so that no starting value up to 0 counts as drawn.
+-- Without the world's clock, or in a world's first two seconds: drawn in the last
+-- second, which is Unreal's own test of whether to animate it.
+local function everDrawn(part)
+    local tolerance = 1
+    local statics = ue.find("/Script/Engine.Default__GameplayStatics")
+    if statics then
+        local okTime, time = ue.call(statics, "GetTimeSeconds", part)
+        if okTime and type(time) == "number" and time - 1 > tolerance then
+            tolerance = time - 1
+        end
+    end
+    local ok, drawn = ue.call(part, "WasRecentlyRendered", tolerance)
+    return ok and drawn == true
+end
+
+-- The tick option of a skinned mesh whose animation stops while it isn't drawn: one
+-- with an animation of its own (a mesh that follows another's pose doesn't run one)
+-- and an option from TICK_STOPS_UNSEEN on. nil for any other mesh.
+local function stoppingOption(part)
+    local option = ue.number(part, TICK_OPTION)
+    if not option or option < TICK_STOPS_UNSEEN then
+        return nil
+    end
+    local ok, anim = ue.call(part, "GetAnimInstance")
+    return ok and ue.valid(anim) and option or nil
+end
+
+-- Whether part is a mesh the mod would keep animating that has never been drawn,
+-- whatever the game's own flags say: a mesh they still hide may be shown a frame or
+-- two from now.
+local function undrawnMesh(part, skinned)
+    return part:IsA(skinned) and stoppingOption(part) ~= nil and not everDrawn(part)
+end
+
+-- Before a character's first start: whether one of its meshes that the mod would keep
+-- animating has never been drawn. The game may have shown it only on this frame or
+-- the one before (a new area that opens with a cinematic or a battle, which hid the
+-- character from its first frame), or may show it a frame or two after its battle or
+-- cinematic flag clears: the renderer's word reaches the game a frame or two late,
+-- and once the mod hides the mesh it never comes. So first person waits for it,
+-- DRAW_WAIT frames at most: a mesh the game never draws stays undrawn.
+local function bodyUndrawn(pawn)
+    local skinned = ue.find(SKINNED)
+    if not skinned then
+        return false
+    end
+    local parts = {}
+    collect(ue.get(pawn, "RootComponent"), parts, 0)
+    for _, part in ipairs(parts) do
+        local ok, undrawn = pcall(undrawnMesh, part, skinned)
+        if ok and undrawn then
+            return true
+        end
+    end
+    return false
+end
+
 -- Whether the game itself hides a part the mod hides, so that it isn't drawn in third
 -- person either: it hid it before the mod did, made it invisible, or (for a part
 -- hidden from the player only) hid it in game.
@@ -590,77 +660,157 @@ local function setTick(entry)
     return false
 end
 
+-- Whether the object at the entry's address is still the entry's part. hideOne compares
+-- the full names on some passes only, and between them a new mesh can have taken the
+-- address of a destroyed one. So this is asked before the mod sets a tick option, or
+-- takes one it reads for the game's: a new mesh the game made already hidden would
+-- otherwise get the mod's option, and nothing would put its own back.
+local function stillThePart(entry)
+    return ue.fullName(entry.obj) == entry.fullName
+end
+
 -- Keeps the animation of a skinned mesh the mod hides running as if the player saw
 -- it, so that its anim notifies still play their sounds. entry.tick is the option to
 -- put back. Only for a mesh with an animation of its own (one that follows another
 -- mesh's pose doesn't run it), whose option would stop it, that the game doesn't hide
--- itself, and that was drawn when the mod hid it, now or earlier in the character's
--- life (drawnBefore: once hidden, it isn't drawn again, so a restart of first person
--- can't tell). One the game never draws never ran its animation, and starting it
--- could double the sounds.
+-- itself, and that the game had drawn at some time before the mod hid it, at this
+-- hide or an earlier one in the character's life (everDrawn, kept in drawnBefore).
+-- One the game never draws never ran its animation, and starting it could double
+-- the sounds. That also leaves out a body the game shows for the first time only
+-- after the mod hid it (an area that opens with a cinematic or a battle): it is
+-- logged, and kept animating from the next time first person starts after it was in
+-- view. Returns true if another part has taken the address.
 local function keepAnimating(entry)
     local part = entry.obj
-    local option = ue.number(part, TICK_OPTION)
-    if not option or option < TICK_STOPS_UNSEEN then
-        return
-    end
-    local ok, anim = ue.call(part, "GetAnimInstance")
-    if not ok or not ue.valid(anim) or hiddenByGame(entry) then
-        return
+    local option = stoppingOption(part)
+    if not option or hiddenByGame(entry) then
+        return false
     end
     if not entry.fullName or drawnBefore[ue.address(part) or false] ~= entry.fullName then
-        log.once("animate-unseen:" .. tostring(entry.fullName), "Not keeping %s animating: it wasn't drawn when the "
-            .. "mod hid it, so its sounds stop in first person (tick option %s)", ue.describe(part), tickName(option))
-        return
+        log.once("animate-unseen:" .. tostring(entry.fullName), "Not keeping %s animating: the game hadn't drawn it "
+            .. "when the mod hid it, so its sounds stop in first person, until first person next starts after it "
+            .. "was in view (tick option %s)", ue.describe(part), tickName(option))
+        return false
+    end
+    if not stillThePart(entry) then
+        return true
     end
     log.first("animate", "Keeping the hidden body's animation going, so its sounds play: %s, %s -> %s",
         ue.describe(part), tickName(option), tickName(TICK_AS_IF_SEEN))
     entry.tick = option
     journal.note("prop", entry.fullName, TICK_OPTION, option)
     setTick(entry)
+    return false
 end
 
 -- Each pass while the mod keeps a part animating. If the game hides the part itself,
 -- its animation would stop in third person too, so its option goes back. An option
 -- the game wrote since the last pass is the one to put back, and if it would stop the
--- animation, the mod's is set again.
+-- animation, the mod's is set again; one that animates the part unseen is the game's
+-- to keep, and the mod has nothing left on the part (keepAnimating takes it up again
+-- if the game later writes one that would stop it). Returns true if another part has
+-- taken the address: what reads like the game's doing is then the new part's own.
 local function checkAnimating(entry)
     local part = entry.obj
     if hiddenByGame(entry) then
-        stopAnimating(entry, part, ue.fullName(part) == entry.fullName)
-        return
+        if not stillThePart(entry) then
+            -- Another part, or this one under another full name: showPart tells which,
+            -- and puts the option back on a part the game only moved.
+            return true
+        end
+        stopAnimating(entry, part, true)
+        return false
     end
     local option = ue.number(part, TICK_OPTION)
     if option == nil or option == TICK_AS_IF_SEEN then
-        return
+        return false
+    end
+    if not stillThePart(entry) then
+        return true
+    end
+    if option < TICK_STOPS_UNSEEN then
+        journal.forget("prop", entry.fullName, TICK_OPTION)
+        entry.tick = nil
+        log.once("animate-again", "The game set %s's animation tick option to %s, which animates it unseen: the mod "
+            .. "leaves it", ue.describe(part), tickName(option))
+        return false
     end
     entry.tick = option
     journal.note("prop", entry.fullName, TICK_OPTION, option)
-    if option >= TICK_STOPS_UNSEEN and setTick(entry) then
+    if setTick(entry) then
         log.once("animate-again", "The game set %s's animation tick option to %s; it is kept animating",
             ue.describe(part), tickName(option))
     end
+    return false
 end
 
 -- On each hiding pass, for a skinned part: keeps it animating, or checks on it while
--- it does.
+-- it does. Returns true if it found another part at the entry's address (before
+-- touching its tick option): hideOne then takes that one for a new part.
 local function animate(entry, cfg)
     if not entry.skinned then
-        return
+        return false
     end
     if entry.tick ~= nil then
-        checkAnimating(entry)
+        return checkAnimating(entry)
     elseif cfg.BodySounds and not entry.refused then
-        keepAnimating(entry)
+        return keepAnimating(entry)
     end
+    return false
+end
+
+-- The class and the object's own name in a full name: "SkeletalMeshComponent" and
+-- "Body" for "SkeletalMeshComponent /Game/Maps/Town.Town:PersistentLevel.Hero_C_12.Body".
+local function classAndName(fullName)
+    return fullName:match("^(%S+) "), fullName:match("([^.:]+)$")
+end
+
+-- Whether the object at a hidden part's address, which now has another full name
+-- (nowName), is still that part: the game moved it to another actor, as it may do
+-- with a skin's body (the path in its full name changes; its class and own name
+-- stay). Only for a part the mod itself hid, while its flag is still set: a new
+-- object at a freed address starts shown. A part the mod hid in game is judged only
+-- if the character owns it now (a skin's body hidden while it was still its skin
+-- actor's, then moved into the character): otherwise hidden in game is ordinary for
+-- a new object that was put away.
+local function movedByGame(entry, part, nowName)
+    if entry.was or not entry.fullName or ue.get(part, hiddenFlag(entry)) ~= true then
+        return false
+    end
+    if entry.how ~= "owner" then
+        local ok, owner = ue.call(part, "GetOwner")
+        if not (ok and st.pawnAddr and ownedByPawn(owner, st.pawnAddr)) then
+            return false
+        end
+    end
+    local class, name = classAndName(entry.fullName)
+    local nowClass, nowOwnName = classAndName(nowName)
+    if class == nil or name == nil or class ~= nowClass or name ~= nowOwnName then
+        return false
+    end
+    st.partsMoved = st.partsMoved + 1
+    if st.partsMoved <= MAX_MOVED_PART_LINES then
+        log.info("The game moved a part the mod had hidden (%s is now %s); it is put back as it was",
+            entry.fullName, nowName)
+    end
+    return true
 end
 
 -- Shows a part the way it was before (if it is still the same part) and forgets it.
--- A part the game has shown since the last pass stays shown.
+-- A part the game has shown since the last pass stays shown. A part the game moved
+-- to another actor meanwhile is put back too (see movedByGame): left hidden, it
+-- would look hidden by the game itself if it came back, and stay hidden for good.
 local function showPart(entry)
     journal.forget("hide", entry.fullName, entry.how)
     local part = entry.obj
-    local same = ue.valid(part) and ue.fullName(part) == entry.fullName
+    local nowName = ue.fullName(part) -- nil if it is gone
+    local same = ue.valid(part)
+        and (nowName == entry.fullName or (nowName ~= nil and movedByGame(entry, part, nowName)))
+    if nowName ~= nil and not same and not entry.was and ue.get(part, hiddenFlag(entry)) == true then
+        log.once("left-hidden", "A part the mod had hidden (%s) is now %s, still hidden: the mod can't tell whether "
+            .. "it is the same part, so it is left as it is. If a part of your character stays invisible in third "
+            .. "person, load a save, and please report UE4SS.log.", tostring(entry.fullName), nowName)
+    end
     stopAnimating(entry, part, same)
     if same and ue.get(part, hiddenFlag(entry)) ~= false then
         pcall(function()
@@ -676,11 +826,16 @@ end
 local function hideOne(part, address, primitive, pawnAddr, checkNames, firstPass, cfg)
     local entry = hidden[address]
     if entry then
-        -- A known part that reads as shown was shown by the game, or is a new part
-        -- at the address of a destroyed one (UE4SS tells objects apart by their
-        -- address only), so then its full name is compared too.
+        -- A known part that doesn't read as hidden was shown by the game, or is a new
+        -- part at the address of a destroyed one (UE4SS tells objects apart by their
+        -- address only), so then its full name is compared too, before the mod hides
+        -- it again. "Doesn't read as hidden" and not "reads as shown": the new object
+        -- may not be a primitive, and then it has no bOwnerNoSee to read (UE4SS gives
+        -- an invalid object or nil for a name an object doesn't have) and no
+        -- SetOwnerNoSee to call. (Before its tick option is touched, animate compares
+        -- the names.)
         local flag = ue.get(part, hiddenFlag(entry))
-        if ue.valid(entry.obj) and not ((checkNames or flag == false) and entry.fullName ~= ue.fullName(part)) then
+        if ue.valid(entry.obj) and not ((checkNames or flag ~= true) and entry.fullName ~= ue.fullName(part)) then
             if flag ~= true then
                 if flag == false and entry.was then
                     -- The game showed it: shown is what to put back.
@@ -689,12 +844,14 @@ local function hideOne(part, address, primitive, pawnAddr, checkNames, firstPass
                 end
                 hidePart(entry)
             end
-            animate(entry, cfg)
-            return
+            if not animate(entry, cfg) then
+                return
+            end
         end
-        -- A new part where an old, now destroyed one used to be.
-        journal.forget("hide", entry.fullName, entry.how)
-        stopAnimating(entry, part, false)
+        -- A new part where an old, now destroyed one used to be: the old one is
+        -- forgotten. Or the old one under another full name (see movedByGame): it is
+        -- put back, and hidden again as a new part.
+        showPart(entry)
         hidden[address] = nil
     end
     if notPrimitive[address] then
@@ -724,13 +881,11 @@ local function hideOne(part, address, primitive, pawnAddr, checkNames, firstPass
     entry = { obj = part, fullName = fullName, how = how,
         was = ue.get(part, how == "owner" and "bOwnerNoSee" or "bHiddenInGame") == true,
         skinned = skinned ~= nil and part:IsA(skinned) }
-    if entry.skinned then
-        -- Drawn in the last second (Unreal's own test of whether to animate it), before
-        -- it is hidden. Asked whatever BodySounds says, so that F7 can switch it on.
-        local okDrawn, drawn = ue.call(part, "WasRecentlyRendered", 1)
-        if okDrawn and drawn == true then
-            drawnBefore[address] = fullName
-        end
+    if entry.skinned and everDrawn(part) then
+        -- The game has drawn it, now or before it hid it for a while (a cinematic, a
+        -- battle). Asked before the mod hides it, and whatever BodySounds says, so that
+        -- F7 can switch it on.
+        drawnBefore[address] = fullName
     end
     hidden[address] = entry
     journal.note("hide", entry.fullName, how, entry.was)
@@ -738,10 +893,11 @@ local function hideOne(part, address, primitive, pawnAddr, checkNames, firstPass
     animate(entry, cfg)
 end
 
--- Hides everything visible that is attached to the character: its meshes and those
--- of attached actors, such as the swappable body, face, hair and gear. Parts the
--- character owns get "owner no see", which hides them only from the player's own
--- view; other parts are hidden in game. Lights are separate components and stay on.
+-- Hides everything visible that is attached to the character: its own meshes (in
+-- Expedition 33 also the skin's body, face and hair, which the game moves into the
+-- character) and those of attached actors, such as gear. Parts the character owns
+-- get "owner no see", which hides them only from the player's own view; other parts
+-- are hidden in game. Lights are separate components and stay on.
 -- Parts that are no longer attached (dropped, or detached by the game) are shown.
 -- Skinned meshes keep animating with BodySounds (see keepAnimating).
 local function hideBody(pawn, cfg)
@@ -749,14 +905,16 @@ local function hideBody(pawn, cfg)
     if not primitive then
         return
     end
+    local parts = {}
+    collect(ue.get(pawn, "RootComponent"), parts, 0)
+    -- Counted once the parts are listed: a pass whose walk failed hid nothing, so the
+    -- next one is still the first, which hides every part at once.
     st.passes = st.passes + 1
     local firstPass = st.passes == 1
     local checkNames = st.passes % NAME_CHECK_EVERY == 0
     if checkNames then
         notPrimitive = {} -- addresses can be reused, so this is worked out again now and then
     end
-    local parts = {}
-    collect(ue.get(pawn, "RootComponent"), parts, 0)
     if firstPass then
         log.first("hide", "Hiding the character's body (%d attached parts)", #parts)
     end
@@ -1018,6 +1176,16 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
             st.waiting = "blend"
             return
         end
+        if drawnPawn ~= pawnAddr and cfg.HideBody and cfg.BodySounds and st.bodyWaited < DRAW_WAIT then
+            -- An error in going through the parts costs the wait, not first person: hiding
+            -- the body, its own step, goes through them on this frame too and logs it.
+            local looked, undrawn = pcall(bodyUndrawn, pawn)
+            if looked and undrawn then
+                st.bodyWaited = st.bodyWaited + 1
+                st.waiting = "body" -- the game has never drawn the body: waits a few frames for it to be
+                return
+            end
+        end
         st.waiting = nil
         st.active = true
         st.pawnAddr = pawnAddr
@@ -1135,6 +1303,7 @@ function camera.status()
     return { active = st.active, state = state, method = st.method, waiting = st.waiting,
         methodName = st.method and METHOD_NAMES[st.method] or "none",
         styleRoute = st.styleRoute or "not set", hiddenParts = count, animatedParts = animated,
+        partsMoved = st.partsMoved, -- all of them: the log has a line for the first few only
         lastDistance = st.lastDistance,
         moved = st.moved and ue.describe(st.moved.cam) or nil, reattached = st.moved and st.moved.reattached or 0,
         engineFailed = table.concat(engineFailed, "; ") }
@@ -1150,9 +1319,19 @@ end
 --- "4 (OnlyTickPoseWhenRendered)", for the report.
 camera.tickName = tickName
 
+--- For the report: every component attached to the character, directly or through
+--- others, as the body hiding walks them: the character's own parts and those of
+--- actors attached to it.
+function camera.attachedParts(pawn)
+    local parts = {}
+    collect(ue.get(pawn, "RootComponent"), parts, 0)
+    return parts
+end
+
 --- Turns first person off and puts back everything it changed.
 function camera.release()
     st.waiting = nil
+    st.bodyWaited = 0 -- the next start gets the whole wait for the body again
     st.blendWaited, st.blendLast = nil, nil -- a blend seen from now on gets the whole wait again
     if not st.active and overrides:isEmpty() and next(hidden) == nil and not st.styleSetter and not st.moved then
         return
@@ -1196,6 +1375,7 @@ function camera.forget()
     st.styleFieldPcm = nil
     st.styleRoute = nil
     st.waiting = nil
+    st.bodyWaited = 0
     st.blendWaited, st.blendLast, st.blendStuck = nil, nil, false
 end
 

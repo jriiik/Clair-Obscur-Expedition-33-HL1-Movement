@@ -225,8 +225,100 @@ t.test("hidden while first person waits for a dialogue, a cinematic or another v
     noErrors(g)
 end)
 
+-- Makes the camera module's function `name` raise until the camera step's errors
+-- have turned the step off (see guard.lua), so its clean-up runs while it still raises.
+local function cameraStepTurnedOff(g, name)
+    local camera = require("hl1movement.camera")
+    local real = camera[name]
+    camera[name] = function()
+        error(name .. " failed")
+    end
+    g.frames(80) -- 30 errors in a row, once first person waits (asked every 0.25 s)
+    camera[name] = real
+    t.contains(g.log, "Turned off the first-person camera after 30 errors in a row")
+end
+
+t.test("a camera step turned off because first person couldn't be released doesn't keep the number hidden", function()
+    local waits = {
+        { "a dialogue", function(g, on)
+            g.inDialogue = on
+        end },
+        { "another view target", function(g, on, other)
+            g.viewTarget = on and other or nil
+        end },
+    }
+    for _, wait in ipairs(waits) do
+        local what, set = wait[1], wait[2]
+        local g = running({ Speedometer = true })
+        local other = fake.object({ className = "BP_SneakCamera_C" })
+        runTo(g, 320 * SCALE)
+        g.frames(5)
+        t.eq(g.shownText(), "320", what .. ": shown before it")
+        -- First person waits and is released, which fails on every frame: the step is
+        -- turned off, and the release in its clean-up fails too.
+        set(g, true, other)
+        cameraStepTurnedOff(g, "release")
+        set(g, false)
+        g.frame()
+        t.truthy(require("hl1movement.movement").isActive(), what .. ": the movement goes on")
+        t.eq(g.shownText(), "320", what .. ": shown after it, without F5 or F7")
+    end
+end)
+
+t.test("a camera step turned off before it could say why first person waits doesn't keep the number hidden", function()
+    local g = running({ Speedometer = true })
+    runTo(g, 320 * SCALE)
+    g.inDialogue = true
+    g.frames(20)
+    t.eq(g.shownText(), nil, "hidden in the dialogue")
+    -- The step now fails before it gets to why first person waits: its last answer,
+    -- the dialogue, would stay for good.
+    cameraStepTurnedOff(g, "watchBlend")
+    g.inDialogue = false
+    g.frame()
+    t.truthy(require("hl1movement.movement").isActive(), "the movement goes on")
+    t.eq(g.shownText(), "320", "shown after the dialogue, without F5 or F7")
+end)
+
+t.test("with the fallback hook it shows the game's speed, but can't hide while the game is paused", function()
+    local g = running({ Speedometer = true }, { noControllerTick = true })
+    local warning = t.contains(g.log, "Only the character's update could be hooked")
+    t.truthy(warning:find("the speedometer stays on the screen then", 1, true), warning)
+    t.truthy(warning:find("the mod's keys act once the game runs again", 1, true), warning)
+    g.keys.W = true
+    g.frames(60)
+    t.truthy(g.shownText() ~= nil and g.shownText() ~= "0", "the game's own speed")
+    t.eq(g.shownText(), tostring(units(g)))
+    -- The character doesn't tick while the game is paused, so the hook doesn't run:
+    -- nothing hides the number, and F9's action waits.
+    local before = g.shownText()
+    g.paused = true
+    g.frames(60)
+    t.eq(g.shownText(), before, "still on the screen, as it was")
+    g.keybinds[F9]()
+    g.frames(10)
+    t.eq(g.shownText(), before, "F9 waits until the game runs again")
+    g.paused = false
+    g.frames(2)
+    t.eq(#g.viewport, 0, "then F9 takes it off the screen")
+    g.press(F9)
+    g.frames(2)
+    t.truthy(g.shownText() ~= nil, "and brings it back")
+    -- What the hook does see still hides it.
+    g.inBattle = true
+    g.frames(2)
+    t.eq(g.shownText(), nil, "battle")
+    g.inBattle = false
+    g.inputLocked = true
+    g.frames(2)
+    t.eq(g.shownText(), nil, "the game locks the movement input")
+    noErrors(g)
+end)
+
 t.test("the movement and the speedometer ask the game about the movement input once a frame", function()
     local g = running({ Speedometer = true })
+    g.frames(200)
+    t.contains(g.log, "diagnostics (automatic", "the automatic report, which asks both too, came first")
     local asked = { IsMoveInputIgnored = 0, CanAddMovementInput = 0 }
     fake.method(g.pc, "IsMoveInputIgnored", fake.ufunction("IsMoveInputIgnored", 0, function()
         asked.IsMoveInputIgnored = asked.IsMoveInputIgnored + 1
@@ -249,15 +341,18 @@ t.test("the movement and the speedometer ask the game about the movement input o
     noErrors(g)
 end)
 
-t.test("a mantle or a climb (movement mode None) in mid-run keeps it showing the game's speed", function()
+t.test("in movement mode None it stays, showing the game's velocity: 0 during an ALS mantle in mid-run", function()
     local g = running({ Speedometer = true })
     runTo(g, 320 * SCALE)
     g.frames(5)
     local _, w = theText(g)
-    fake.props(g.cmc).MovementMode = 0 -- ALS's mantle: the game moves the character itself
+    -- ALS's mantle starts with SetMovementMode(None), which stops the velocity in
+    -- Unreal, and then moves the character itself, without one.
+    g.cmc:SetMovementMode(0, 0)
     g.frames(10)
     t.contains(g.log, "Half-Life movement: off (the game's movement mode is 0")
-    t.eq(g.shownText(), "320", "the game's own velocity")
+    t.eq(g.shownText(), "0", "the game's own velocity, which Unreal stopped")
+    -- A move of the game's in mode None that does set a velocity.
     fake.props(g.cmc).Velocity.X = 100 * SCALE
     fake.props(g.cmc).Velocity.Y = 0
     g.frames(5)
@@ -289,9 +384,12 @@ t.test("switching the mod off, F7 and an area change take it off the screen; it 
     g.frame()
     t.eq(#g.viewport, 0, "area change")
     g.changingArea = false
-    g.frames(SETTLE_FRAMES - 10)
+    -- The mod's own 3 s after an area change are 180 frames: 170 are within them, 200
+    -- past them. (Not SETTLE_FRAMES - 10, which is how long the tests wait before they
+    -- start, and was exactly the 3 s, so that the clock's rounding decided the test.)
+    g.frames(170)
     t.eq(#g.viewport, 0, "not while the game sets the character up")
-    g.frames(20)
+    g.frames(30)
     t.eq(#g.viewport, 1)
     g.collectGarbage()
     g.frames(5)
@@ -308,6 +406,119 @@ t.test("F7 makes it again with the new look", function()
     t.eq(fake.props(fake.props(fake.props(fake.props(w).WidgetTree).RootWidget).Slot).Anchors.Minimum.Y, 0.25)
     noErrors(g)
 end)
+
+t.test("every time the speedometer is made, the log's last line then says so: a crash there would show", function()
+    local MARKER = "Putting the speedometer on the screen"
+    local g = running()
+    -- The last line in the log whenever a widget is made: where UE4SS.log would end
+    -- if making it crashed the game.
+    local library = g.statics["/Script/UMG.Default__WidgetBlueprintLibrary"]
+    local create = library.Create
+    local builds, unmarked = 0, {}
+    fake.method(library, "Create", function(...)
+        builds = builds + 1
+        if not g.log[#g.log]:find(MARKER, 1, true) then
+            unmarked[#unmarked + 1] = builds .. ": " .. g.log[#g.log]
+        end
+        return create(...)
+    end)
+    g.press(F9) -- the first of the session
+    g.press(F9)
+    g.press(F9) -- off and on
+    g.press(F7) -- the settings loaded again
+    g.press(F5)
+    g.press(F5) -- the mod off and on
+    g.frames(3)
+    g.changingArea = true -- an area change
+    g.frame()
+    g.changingArea = false
+    g.frames(SETTLE_FRAMES + 5)
+    g.useCharacter(g.buildCharacter()) -- a new character
+    g.frames(SETTLE_FRAMES + 5)
+    g.removeWorldWidgets() -- the game takes it off the screen
+    g.frames(40)
+    t.eq(builds, 7, "made 7 times")
+    t.eq(#unmarked, 0, "made without the line just before: " .. table.concat(unmarked, "; "))
+    t.eq(count(g.log, MARKER), 7, "one line for each")
+    -- ...and a line once it is made, so the first isn't left as the log's last line
+    -- for minutes when nothing else is logged (a later crash would be blamed on it).
+    t.eq(count(g.log, "The speedometer is on the screen (made with WidgetBlueprintLibrary.Create)"), 7)
+    for i, line in ipairs(g.log) do
+        if line:find(MARKER, 1, true) then
+            t.truthy(g.log[i + 1] and g.log[i + 1]:find("The speedometer is on the screen", 1, true),
+                "the line after it: " .. tostring(g.log[i + 1]))
+        end
+    end
+    noErrors(g)
+end)
+
+t.test("a build that fails has the warning after the line, not the line that says it is on the screen", function()
+    local g = running({ Speedometer = true }, { addFails = true })
+    g.frames(5)
+    local at
+    for i, line in ipairs(g.log) do
+        if line:find("Putting the speedometer on the screen", 1, true) then
+            at = i
+        end
+    end
+    t.truthy(at, "the line before the build")
+    t.truthy(g.log[at + 1]:find("Can't show the speedometer", 1, true), tostring(g.log[at + 1]))
+    t.absent(g.log, "The speedometer is on the screen")
+    noErrors(g)
+end)
+
+t.test("the line that says it is on the screen comes after the first number and the first show, not before",
+    function()
+        -- The number's first SetCurrentValue fails: had it crashed the game, the log
+        -- would have to end with the line from before the build.
+        local g = running()
+        local construct = StaticConstructObject
+        _G.StaticConstructObject = function(class, outer, ...)
+            local made = construct(class, outer, ...)
+            if class == g.statics[NUMERIC_TEXT] then
+                fake.method(made, "SetCurrentValue", function()
+                    error("SetCurrentValue failed")
+                end)
+            end
+            return made
+        end
+        g.press(F9)
+        local at
+        for i, line in ipairs(g.log) do
+            at = line:find("Putting the speedometer on the screen", 1, true) and i or at
+        end
+        t.truthy(at, "the line before the build")
+        t.truthy(g.log[at + 1]:find("Error in the speedometer", 1, true), tostring(g.log[at + 1]))
+        t.absent(g.log, "The speedometer is on the screen")
+        g.frames(40)
+        t.contains(g.log, "Turned off the speedometer after 30 errors in a row")
+        t.absent(g.log, "The speedometer is on the screen")
+    end)
+
+t.test("late in a session, when little else is logged, the log doesn't end with the line from before a build",
+    function()
+        -- The status lines stop after 30 and the hop lines after 30. A build that worked
+        -- must not leave "Putting the speedometer on the screen" as the log's last line:
+        -- after a crash for any other reason, the log would read as a crash in the build.
+        local MARKER = "Putting the speedometer on the screen"
+        local g = running()
+        -- (As in test_mod.lua: over five minutes of walking in frames of 0.1 s for the
+        -- status lines, then about 38 hops for the hop lines.)
+        g.keys.W = true
+        g.frames(3200, 0.1)
+        g.keys.SpaceBar = true
+        g.frames(1500)
+        t.contains(g.log, "Status (10s), the last one")
+        t.contains(g.log, "(further hops aren't logged)")
+        g.press(F9)
+        t.eq(g.shownText() ~= nil, true, "the speedometer is on the screen")
+        local lines = #g.log
+        g.frames(60 * 30)
+        t.eq(#g.log, lines, "nothing else was logged in the next half minute")
+        t.falsy(g.log[#g.log]:find(MARKER, 1, true), "the log ends with: " .. g.log[#g.log])
+        t.truthy(g.log[#g.log]:find("The speedometer is on the screen (made with ", 1, true), g.log[#g.log])
+        noErrors(g)
+    end)
 
 t.test("F9 during the settle or an area change: nothing is made until the game is ready", function()
     local g = start()
@@ -333,6 +544,80 @@ t.test("F9 during the settle or an area change: nothing is made until the game i
     t.eq(#g.viewport, 0, "switched off during the area change: stays off")
     g.press(F9)
     t.eq(#g.viewport, 1, "and on again")
+    noErrors(g)
+end)
+
+t.test("F9 while the mod is switched off shows nothing, the log says why, and F5 brings the number", function()
+    local g = running()
+    g.press(F5)
+    g.press(F9)
+    g.frames(60)
+    t.eq(#g.viewport, 0, "nothing on the screen while the mod is off")
+    t.contains(g.log, "Speedometer on (it shows once the mod is on: F5)")
+    g.press(F5)
+    g.frames(3)
+    t.eq(g.shownText(), "0", "shown once the mod is on")
+    g.press(F9)
+    g.press(F9)
+    t.eq(count(g.log, "Speedometer on"), 2, "switched on a second time, with the mod on")
+    t.eq(count(g.log, "it shows once the mod is on"), 1, "no such note while the mod is on")
+    noErrors(g)
+    -- A mod that starts switched off, and has no key to switch it on: the note names none.
+    g = running({ StartEnabled = false, ToggleKey = false })
+    g.press(F9)
+    g.frames(60)
+    t.eq(#g.viewport, 0, "StartEnabled = false: nothing on the screen")
+    local line = t.contains(g.log, "Speedometer on (it shows once the mod is on")
+    t.truthy(line:find("Speedometer on (it shows once the mod is on)", 1, true), line)
+    noErrors(g)
+end)
+
+-- docs/TESTING.md (step 6) has the owner press F9 with the mod off. With the number on when
+-- the mod went off, that press switches it off, so F5 then brings no number: the step's
+-- sentence has to name both lines the log can get.
+t.test("F9 while the mod is switched off, with the number on, switches it off: F5 brings no number, and "
+    .. "docs/TESTING.md names both of the log's lines", function()
+    local g = running()
+    g.press(F9)
+    t.eq(g.shownText(), "0", "on, with the mod on")
+    g.press(F5)
+    t.eq(#g.viewport, 0, "F5 takes it off the screen")
+    g.press(F9)
+    g.frames(60)
+    t.eq(#g.viewport, 0, "nothing on the screen while the mod is off")
+    t.eq(g.log[#g.log], "[HL1Movement] Speedometer off", "the log's line for that press")
+    g.press(F5)
+    g.frames(60)
+    t.eq(#g.viewport, 0, "switched off while the mod was off: F5 brings no number")
+    t.absent(g.log, "it shows once the mod is on", "no line said the number would come")
+    g.press(F9)
+    t.eq(g.shownText(), "0", "F9 brings it")
+    noErrors(g)
+    local file = assert(io.open(root .. "docs/TESTING.md", "r"))
+    local text = file:read("a"):gsub("%s+", " ")
+    file:close()
+    local from = text:find("F9 pressed while the mod is off", 1, true)
+    t.truthy(from, "docs/TESTING.md no longer has the sentence 'F9 pressed while the mod is off'")
+    local to = text:find("In first person it may also go away", from, true)
+    local sentence = text:sub(from, to and to - 1 or from + 400)
+    for _, quoted in ipairs({ "`Speedometer on (it shows once the mod is on: F5)`", "`Speedometer off`" }) do
+        t.truthy(sentence:find(quoted, 1, true), "docs/TESTING.md, on F9 with the mod off, doesn't quote "
+            .. quoted .. ": " .. sentence)
+    end
+end)
+
+t.test("Speedometer in config.lua is only read when the game starts: F7 keeps what F9 last chose", function()
+    local g = running({ Speedometer = false })
+    fake.useConfig({ Speedometer = true })
+    g.press(F7)
+    g.frames(30)
+    t.eq(#g.viewport, 0, "true and F7: not shown")
+    g.press(F9)
+    t.eq(g.shownText(), "0", "F9 shows it")
+    fake.useConfig({ Speedometer = false })
+    g.press(F7)
+    g.frames(30)
+    t.eq(g.shownText(), "0", "false and F7: still shown")
     noErrors(g)
 end)
 
@@ -372,6 +657,7 @@ t.test("a new level: the old widget is never touched, a new one is made after th
     local newWorld = fake.object({ className = "World", name = "Level_Other", path = "/Game/Levels/Other.Level_Other" })
     g.removeWorldWidgets()
     g.collectGarbage() -- the old widget is destroyed: using it now would raise
+    local used = fake.counts.destroyed -- a use through ue.call logs nothing (see below)
     local c = g.buildCharacter()
     fake.setWorld(c.pawn, newWorld)
     fake.setWorld(g.pc, newWorld)
@@ -380,6 +666,7 @@ t.test("a new level: the old widget is never touched, a new one is made after th
     t.eq(#g.viewport, 1)
     t.truthy(g.viewport[1] ~= old, "a new widget")
     t.eq(count(g.log, "taken off the screen by the game;"), 0, "forgotten, not taken for the game's doing")
+    t.eq(fake.counts.destroyed, used, "nothing freed was used")
     noErrors(g)
 end)
 
@@ -408,11 +695,14 @@ t.test("a new level: the old level's widget isn't touched, even before it is fre
     noErrors(g)
 end)
 
-t.test("the game taking every widget off the screen: made again, the old one never touched", function()
+t.test("the game taking every widget off the screen: made again; the old one is taken off while it is still the "
+    .. "mod's own, and never used once freed", function()
     local g = running({ Speedometer = true })
     g.frame()
     local old = g.viewport[1]
     g.removeWorldWidgets()
+    -- Until the half-second check notices, the old widget is still the mod's own: the
+    -- check asks it IsInViewport, and then it is taken off with RemoveFromParent.
     for _ = 1, 40 do -- the check is every 0.5 s
         g.frame()
         if #g.viewport > 0 then
@@ -423,8 +713,16 @@ t.test("the game taking every widget off the screen: made again, the old one nev
     t.truthy(g.viewport[1] ~= old)
     t.eq(g.shownText(), "0", "the new one shows the number on the frame it is made")
     t.contains(g.log, "taken off the screen by the game")
+    -- Once freed, the old widget is never used. The fake raises on any use of a freed
+    -- object (but IsValid, GetAddress and type), before it looks at what was asked
+    -- for, so recording calls on the old widget would find nothing. A direct call's
+    -- error is logged as an error in the speedometer, which noErrors finds; one made
+    -- through ue.call is caught there without a line, so the fake's count of such
+    -- uses is checked too.
+    local used = fake.counts.destroyed
     g.collectGarbage()
     g.frames(60)
+    t.eq(fake.counts.destroyed, used, "nothing freed was used")
     noErrors(g)
 end)
 
@@ -434,8 +732,10 @@ t.test("the game taking it off the screen and the garbage collection coming at o
     g.frame()
     g.removeWorldWidgets()
     g.collectGarbage()
+    local used = fake.counts.destroyed -- a use through ue.call logs nothing (see the test before)
     g.frames(60)
     t.eq(#g.viewport, 1, "made again")
+    t.eq(fake.counts.destroyed, used, "nothing freed was used")
     noErrors(g)
 end)
 
@@ -534,6 +834,71 @@ t.test("the game taking it away again and again: made again 5 times, then one wa
     noErrors(g)
 end)
 
+t.test("the game taking it away now and then, as each battle or menu opens: made again every time", function()
+    local g = running({ Speedometer = true })
+    g.frame()
+    for n = 1, 8 do
+        if n % 2 == 1 then
+            g.inBattle = true -- the number is hidden: the loss is found when it should show again
+        else
+            g.paused = true
+        end
+        g.removeWorldWidgets() -- the game clears the screen, the mod's widget with its own
+        g.frames(60)
+        g.collectGarbage()
+        g.frames(60)
+        g.inBattle, g.paused = false, false
+        g.frames(11 * 60) -- 11 s of play
+        t.eq(g.shownText(), "0", "shown after removal " .. n)
+    end
+    t.eq(g.umg.made, 9 * 5, "the first and 8 more, 5 objects each")
+    t.absent(g.log, "Can't show the speedometer")
+    t.eq(count(g.log, "taken off the screen by the game; it is made again"), 3, "3 lines at most")
+    g.press(F8)
+    t.contains(g.log, "taken off the screen by the game 8 times")
+    -- Taken away soon after each making, five times in a row, still ends it.
+    for _ = 1, 6 do
+        g.removeWorldWidgets()
+        g.frames(9 * 60) -- under 10 s each
+    end
+    t.eq(count(g.log, "Can't show the speedometer: the game keeps taking it off the screen"), 1)
+    t.eq(#g.viewport, 0, "not made again")
+    noErrors(g)
+end)
+
+t.test("a failing speedometer is turned off alone and taken off the screen; F5 twice brings it back", function()
+    local g = running({ Speedometer = true })
+    g.keys.W = true
+    g.frames(30)
+    t.truthy(g.shownText() ~= nil, "shown")
+    fake.method(theText(g), "SetCurrentValue", function()
+        error("SetCurrentValue failed")
+    end)
+    g.keys.SpaceBar = true -- hopping and turning: the number keeps changing
+    g.keys.D = true
+    g.frames(240, nil, function()
+        g.rotation.Yaw = g.rotation.Yaw + 1.5
+    end)
+    t.contains(g.log, "Error in the speedometer: ")
+    t.contains(g.log, "Turned off the speedometer after 30 errors in a row")
+    t.eq(#g.viewport, 0, "taken off the screen: no number that stands still")
+    t.falsy(g.shared[JOURNAL]:find("widget", 1, true), "and nothing left in the journal")
+    t.absent(g.log, "Turned off the Half-Life movement")
+    t.absent(g.log, "Turned off the first-person camera")
+    t.absent(g.log, "Error in the mod's frame update")
+    t.truthy(require("hl1movement.movement").isActive(), "the movement goes on")
+    t.truthy(require("hl1movement.camera").isActive(), "and first person")
+    t.truthy(g.speed() > 320 * SCALE, "air strafing still gains speed")
+    g.press(F9)
+    g.press(F9)
+    t.eq(#g.viewport, 0, "F9 doesn't turn the step back on: the log says F5 twice")
+    g.press(F5)
+    g.press(F5)
+    g.frames(3)
+    t.eq(#g.viewport, 1, "F5 twice does: a new widget")
+    t.truthy(g.shownText() ~= nil, "which shows a number again")
+end)
+
 t.test("UE4SS restarting its mods: the new copy takes the old speedometer off the screen", function()
     local g = running({ Speedometer = true })
     g.frame()
@@ -578,6 +943,18 @@ t.test("a speedometer that can't be made: one warning, the movement goes on, F9 
     t.eq(count(g.log, "Can't show the speedometer"), 3, "F5 twice tries again too")
     g.press(F7)
     t.eq(count(g.log, "Can't show the speedometer"), 4, "and F7")
+    g.press(F6)
+    g.press(F6)
+    g.frames(40)
+    t.eq(count(g.log, "Can't show the speedometer"), 4, "F6 twice doesn't: it is the camera's key")
+    g.changingArea = true
+    g.frame()
+    g.changingArea = false
+    g.frames(SETTLE_FRAMES + 5)
+    t.eq(count(g.log, "Can't show the speedometer"), 4, "nor an area change that keeps the character")
+    g.useCharacter(g.buildCharacter())
+    g.frames(SETTLE_FRAMES + 5)
+    t.eq(count(g.log, "Can't show the speedometer"), 5, "a new character tries again")
     noErrors(g)
 end)
 
@@ -719,6 +1096,21 @@ t.test("the report says what the speedometer does", function()
         .. "(the last with WidgetBlueprintLibrary.Create, a CommonNumericTextBlock), taken off the screen by the "
         .. "game 0 times")
     t.contains(g.log, "Controller.MyHUD = ")
+    -- Taken away just after one of the mod's half-second checks of the widget: one on
+    -- the report's frame would find it gone and make it again before the report.
+    local widget, checks = g.viewport[1], 0
+    local isInViewport = widget.IsInViewport
+    fake.method(widget, "IsInViewport", function(...)
+        checks = checks + 1
+        return isInViewport(...)
+    end)
+    for _ = 1, 40 do
+        if checks > 0 then
+            break
+        end
+        g.frame()
+    end
+    t.eq(checks, 1, "the mod checks its widget every half second")
     g.removeWorldWidgets()
     g.press(F8)
     t.contains(g.log, "Speedometer: wanted=true, on the screen=false", "IsInViewport, not the mod's guess")

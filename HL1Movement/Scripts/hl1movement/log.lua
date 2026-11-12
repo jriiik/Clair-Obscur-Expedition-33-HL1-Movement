@@ -59,13 +59,14 @@ end
 local states = {}
 local stateLines = 0
 local stateCounts = {}
-local MAX_STATE_LINES = 200 -- per session
-local MAX_PER_STATE = 5 -- each different state text
+local MAX_STATE_LINES = 200 -- until log.again()
+local MAX_PER_STATE = 10 -- each different state text, until log.again()
 
 --- Logs "<topic>: <text>" when the topic's text changes. Each different text is
 --- logged at most MAX_PER_STATE times, and at most MAX_STATE_LINES in all, so a
---- state that flickers can't fill the log. force logs it even if it is the same
---- as before, or has been logged often (answering a key press, for example).
+--- state that flickers can't fill the log; log.again() starts both counts again.
+--- force logs it even if it is the same as before, or has been logged often
+--- (answering a key press, for example).
 function log.state(topic, text, force)
     if states[topic] == text and not force then
         return
@@ -81,8 +82,16 @@ function log.state(topic, text, force)
     if stateLines < MAX_STATE_LINES then
         log.info("%s", line)
     elseif stateLines == MAX_STATE_LINES then
-        log.info("(Further changes of state aren't logged in this session.)")
+        log.info("(Further changes of state aren't logged.)")
     end
+end
+
+--- Starts the counts of the state lines again, for the reload key: in 0.3.0 the log
+--- stopped saying that first person or the movement came back on after the fifth
+--- time in a session. What each topic last said stays, so nothing is said twice.
+function log.again()
+    stateLines = 0
+    stateCounts = {}
 end
 
 --- The last state text logged for a topic, or nil.
