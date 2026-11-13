@@ -123,7 +123,7 @@ change seems to do nothing, search `UE4SS.log` for `WARNING`: a slip in the file
      and `AirSpeedCap = 35` about an eighth more (about 6 u/s); with D held and
      a slow turn, `PhysicsRate = 100` loses only a few per cent, too little to
      see. Set `AirSpeedCap` back to 30 after, save, and press **F7**.
-   - Now do the steps D1 to D13 under [Ducking and the keys](#ducking-and-the-keys)
+   - Now do the steps D1 to D15 under [Ducking and the keys](#ducking-and-the-keys)
      below, then come back here for step 6.
 6. **Keys.** Does F6 switch between first and third person? Does F5 turn the mod
    off and back on?
@@ -449,7 +449,8 @@ back on.
 does the view sink for under half a second, then stay low? Keep holding it and
 walk with W: does the speedometer show about 107? Still holding Ctrl and W,
 press **F8** (the report's first line then says `asked for with F8, Ctrl
-held`). Let go of Ctrl: are you up at once? Press **F6** and do the same in
+held`). Let go of Ctrl: are you up at once, the view's last bit rising over
+about a tenth of a second (D14)? Press **F6** and do the same in
 third person: does your character crouch, and walk crouched? Then **F6**
 again. In the log, `The character crouched (Unreal's crouch, on the ground)`
 means the game let the mod crouch your character; `Ducking: on: no hull change
@@ -562,6 +563,35 @@ person (**F6**), talk to someone and press Space: does it skip the lines, and
 does your character hop meanwhile (it shouldn't; the log: `Keys: given back
 (dialogue)`, or `(input-ignored)` / `(input-blocked)` if the game locks your
 movement there)? Then **F6** again.
+
+**D14 (0.4.1). Standing up and stairs.** Press **F7**. Hold Ctrl until the view
+is low, then let go: the view should rise in two parts, most of the way at
+once and the last 18 units (45 cm) over about 0.12 s, as in Half-Life. Walk
+up some stairs and a steep slope: the view should trail the climb a little
+and catch up at the top; walking down, it follows at once. Then set
+`ViewSmoothing = false` in `config.lua`, press **F7**, and do the same to
+compare: the rise all at once, as in 0.4.0. Which feels closer to Half-Life?
+Put it back and press **F7**. The log has `Smoothing the view's rises on the
+ground from ...` once; `The view's rises on the ground aren't smoothed` or
+`The view isn't smoothed` mean it couldn't be done, and say why. The report's
+`view smoothing` line counts the frames it ran on.
+
+**D15 (0.4.1). Landings and running into things.** Press **F7**. Hop with W
+held in third person (**F6**) for 10 seconds: your character should never
+roll on landing (the mod switches the game's roll off, `LandingRoll`; the
+report's `ALS on landing` line shows `bBreakfallOnLand=false` and the game's
+own value). A line `Root motion: the game moved the character itself, playing
+...` means the game still took the movement with an animation of its own: it
+names the animation and the speed before and after it. Then hop through the
+place where your speed dropped before (the square). A line `Speed lost: from
+699 to 232 u/s in one frame (in the air, ..., at X=... Y=... Z=...)` says
+where the character ran into something (a prop, a person, something
+invisible) and how much of its move it got; that hop's own line ends `ran
+into something, -N u/s`. If the move got its whole way, the line says
+instead that the game set the speed itself (and the hop line `the game set
+the speed`): then nothing was in the way, and the game stopped you. The first 10 lines of each kind are logged until
+**F7**; the status lines and the report count all of them. Press **F8**
+there, and **F6** back.
 
 ## What to send back
 

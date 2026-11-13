@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.4.0"
+local VERSION = "0.4.1"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -62,6 +62,7 @@ local KEYS_WATCH_STEP = "watching the keys the mod gave back"
 local FACING_STEP = "turning the character to the view"
 local HEADING_STEP = "turning the character to where it heads"
 local SPEEDOMETER_STEP = "the speedometer"
+local VIEW_STEP = "smoothing the view after the movement"
 
 local function newWindow()
     return { frames = 0, time = 0, ticks = 0, cpu = 0, minDt = math.huge, maxDt = 0, turn = 0 }
@@ -555,7 +556,7 @@ local function statusLine()
     local ducking = moved.taps + moved.groundDucks + moved.airDucks + moved.groundStands + moved.airStands
         + moved.hull.refusedLifts + moved.hull.standRefusals
     if moved.hops == 0 and moved.top < 1 and window.turn < 1 and ducking == 0
-        and moved.cuts + moved.wakes + moved.rewrites + moved.leaks == 0 then
+        and moved.cuts + moved.wakes + moved.rewrites + moved.leaks + moved.speedLosses + moved.rootMotions == 0 then
         return
     end
     mod.statusLines = mod.statusLines + 1
@@ -597,6 +598,12 @@ local function statusLine()
             parts[#parts + 1] = string.format("the game cut the speed %d times (%d undone), started its speed limiter "
                 .. "%d times, set MaxWalkSpeed %d times; its input reached Unreal on %d frames", moved.cuts,
                 moved.restores, moved.wakes, moved.rewrites, moved.leaks)
+        end
+        if moved.speedLosses + moved.rootMotions > 0 then
+            -- (Each also has a line of its own, the first few until F7.)
+            parts[#parts + 1] = string.format("the speed dropped suddenly %d times (ran into something, or the game "
+                .. "set it), the game moved the character with an animation of its own %d times",
+                moved.speedLosses, moved.rootMotions)
         end
         if ducking > 0 or moved.hull.brakeGiven > 0 then
             local h = moved.hull
@@ -909,6 +916,30 @@ local function onGameJump(_, pressed)
     mod.insideHook = outer
 end
 
+-- Runs for every character of the hooked class, after Unreal has moved it (the character ticks
+-- after its movement component) and before the view is worked out: Half-Life's smoothing of
+-- the view's rises on the ground, for the character the mod moves (camera.lateEye). Cheap for
+-- the others: one address. Not while paused: the character doesn't tick then.
+local function onViewTick(context, deltaSeconds)
+    if mod.broken or not mod.enabled or not mod.pawnAddr then
+        return
+    end
+    local pawn = ue.unwrap(context)
+    if ue.address(pawn) ~= mod.pawnAddr then
+        return
+    end
+    local started = clock()
+    local outer = mod.insideHook
+    mod.insideHook = true
+    local ok, err = pcall(guard.run, VIEW_STEP, camera.lateEye, pawn, cfg, ue.unwrap(deltaSeconds))
+    mod.insideHook = outer
+    if not ok then
+        guard.report("the view hook", err)
+    end
+    journal.flush()
+    mod.window.cpu = mod.window.cpu + (clock() - started) -- (in the status line's ms per frame)
+end
+
 -- The function is looked up first: a RegisterHook that fails leaves things behind
 -- in UE4SS.
 local function tryHook(paths, callback)
@@ -947,6 +978,29 @@ local function ensureHooks()
             mod.hookError = tostring(err)
         end
     end
+    if mod.tickHook and not mod.viewHook and cfg.ViewSmoothing then
+        -- After the frame hook, on another function than it: on the character's own update, which
+        -- the frame hook only falls back to when the controller's can't be hooked (the movement is
+        -- off then, and nothing needs smoothing).
+        local paths, fallback = {}, false
+        for _, path in ipairs(cfg.ViewTickFunctions) do
+            if path == mod.tickHook then
+                fallback = true
+            else
+                paths[#paths + 1] = path
+            end
+        end
+        local path, err = tryHook(paths, onViewTick)
+        if path then
+            mod.viewHook = path
+            camera.setLateHook(path)
+            log.info("Smoothing the view's rises on the ground from %s", path)
+        elseif not fallback and not mod.viewHookLogged then
+            mod.viewHookLogged = true
+            log.info("The view's rises on the ground aren't smoothed (ViewSmoothing): the character's own update "
+                .. "couldn't be hooked (%s), so they show at once, as in 0.4.0", tostring(err or "no function"))
+        end
+    end
     if not mod.jumpHook and cfg.JumpInput ~= "keys" then
         local path, err = tryHook(cfg.JumpFunctions, onGameJump)
         if path then
@@ -964,6 +1018,7 @@ local function turnOn()
     mod.broken = false
     mod.errorsInARow = 0
     guard.reset()
+    camera.setLateHook(mod.viewHook) -- (its step may have been turned off by its errors)
     hull.reset()
     keys.retry()
     camera.retry(true)
@@ -1021,6 +1076,7 @@ local function applyReloadedSettings(changed)
     speedometer.retry() -- made again on this frame, with the new place, size and colour
     mod.recheck = true -- check the character again with the new settings
     guard.reset()
+    camera.setLateHook(mod.viewHook)
     hull.reset()
     mod.keysValidated = false -- the key lists are checked with the game again (and the keys' context tried again)
     camera.retry(true)
@@ -1145,6 +1201,9 @@ guard.whenOff(MOVEMENT_STEP, function()
     end
 end)
 guard.whenOff(EYE_STEP, camera.release)
+guard.whenOff(VIEW_STEP, function()
+    camera.setLateHook(nil) -- the eye as the frame hook writes it: a rise shows at once
+end)
 guard.whenOff(KEYS_STEP, function()
     if mod.pc then
         keys.give(mod.pc, "errors")

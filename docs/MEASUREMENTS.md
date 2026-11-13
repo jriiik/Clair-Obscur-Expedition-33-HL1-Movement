@@ -604,6 +604,9 @@ Life's 2005 version, whose updates at 144 fps are 6 ms, gains 19, 30 and 35 % at
   30), reads 18.13 (15.90; limit 45); a ducked walk 27.33; standing still with the stick asked 30.40 (27.33; limit 31);
   +ducktap strafing at 80 fps 28.91 (limit 30); third person in a dialogue that leaves the movement input on 20.13
   (22.00). The mod's Lua time strafe hopping at 80 fps: 0.063 ms a frame at 250 against 0.058 at 100 (0.4.0 rate).
+  0.4.1 (the view smoothing, the breakfall flag): W held 29.40 calls, 21.17 reads; a ducked walk 28.33; standing
+  still 30.40 (the smoothing reads no location when no speed was written), measured with `Speedometer = true` as the
+  test runs it.
 
 ## Keys
 

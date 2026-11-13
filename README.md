@@ -4,7 +4,7 @@ A mod that lets you explore Clair Obscur: Expedition 33 in first person, with
 Half-Life 1's movement: fast, slippery running, air strafing, bunny hopping by
 holding the jump key, ducking and duck tapping.
 
-> **Status: version 0.4.0, early testing.** In the second test (0.2.6), first
+> **Status: version 0.4.1, early testing.** In the second test (0.2.6), first
 > person, bunny hopping and air strafing worked. 0.3 added your character's
 > sounds in first person, its turning to face where it hops, Half-Life's
 > slopes with slope boosting and a speedometer (F9). 0.4.0 adds Half-Life's
@@ -13,8 +13,10 @@ holding the jump key, ducking and duck tapping.
 > ground), with jumping on the wheel too. While the mod moves you, the game
 > no longer runs, toggles walk or jumps on those keys. The movement now runs
 > 250 Half-Life updates a second, as Half-Life at `fps_max 250`, the rate
-> duck tapping is played at. 0.3 and 0.4 haven't been tested in the game
-> yet: see [docs/TESTING.md](docs/TESTING.md) and
+> duck tapping is played at. 0.4.1, after the first test of 0.4.0, smooths
+> the view as you stand up or climb a stair, as Half-Life does, switches off the game's
+> roll on landing (it took your speed), and logs a sudden loss of speed. 0.4.1
+> hasn't been tested in the game yet: see [docs/TESTING.md](docs/TESTING.md) and
 > [Reporting problems](#reporting-problems). If you used 0.3.1, read
 > [Updating](#updating-from-031) first.
 
@@ -120,7 +122,10 @@ you gain control, the mod writes a report to the log by itself.
 
 ### Updating from 0.3.1
 
-Replace the whole `HL1Movement` folder, `config.lua` too (copy out any
+From 0.4.0, replacing the `HL1Movement` folder is enough: an old `config.lua`
+works, and lacks only `ViewSmoothing` and `LandingRoll`, which then have their
+defaults. From 0.3.1:
+replace the whole `HL1Movement` folder, `config.lua` too (copy out any
 settings you changed first, and put them back in the new file). An old
 `config.lua` still works: every setting it lacks, the duck keys among them,
 comes from the defaults. But it keeps `PhysicsRate = 100`, which plays duck
@@ -240,6 +245,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `AutoHop` | `true` | `false`: press jump for every hop, like the original Half-Life |
 | `AirSpeedCap` | `30` | Half-Life's limit on air strafing, which is what makes it work; `35` or `40` gain about 15 to 17 or 30 to 35 % more speed per hop with a slow turn (about 10 to 15 or 15 to 27 % with A and D and a fast one), but aren't Half-Life's |
 | `BodyFollowsHop` | `true` | In the air, your character turns to face where it is going (you see it in third person); `false` keeps it facing the way it jumped |
+| `ViewSmoothing` | `true` | As in Half-Life, on the ground your view follows a rise at 150 units a second, never more than 18 behind: standing up from a duck, a stair, a steep slope. `false` shows the rise at once, as 0.4.0 did |
 | `JumpKeys` | `{ "SpaceBar", "MouseScrollUp", "Gamepad_FaceButton_Bottom" }` | The jump keys (see [Changing the keys](#changing-the-keys)); a wheel notch is one jump |
 | `DuckKeys` | `{ "LeftControl", "MouseScrollDown" }` | Half-Life's `+duck`: ducked while held; a wheel notch ducks for one Half-Life update |
 | `DuckTapKeys` | `{ "LeftShift" }` | OpenAG's `+ducktap`: while held, a duck tap every time you touch the ground. Not the wheel |
@@ -255,6 +261,7 @@ Each setting has a short explanation next to it. The most useful ones:
 | `KeepSpeed` | `true` | Undoes the game cutting your speed (its own speed limit); `false` lets the game's cuts stand |
 | `SlopeLandings` | `true` | Half-Life's landings on slopes: most keep your speed, as on level ground; one that reaches the slope inside one of Half-Life's updates turns part of the fall into speed along it in one step (a jump in speed going downhill, a drop going uphill). How often depends on your speed, the slope and `PhysicsRate`. `false` makes every landing keep your speed, as the game does |
 | `SlopeBoosts` | `true` | Hopping onto a steep upward slope fast enough, or running into it, starts a slide up it without friction instead of a landing, and you fly off its top if it ends or rounds off while you still slide. Every hop slides from about 675 u/s on a 20 degree slope, 575 on 30 degrees, 850 on 15 and 1275 on 10, and on 20 to 30 degrees some from less. Running down a slope without jumping, fast enough (from about 1355 u/s on 20 degrees, 855 on 30 and 585 on 40; never at a run, and never on 10 degrees; at `PhysicsRate = 100` from 540 on 20 degrees, and at a run on slopes over 31.5 degrees), you leave the ground and go on down it in long low leaps, as in Half-Life; `false` turns both off |
+| `LandingRoll` | `false` | `true` keeps the game's roll on landing with a movement key held (its "breakfall"), which takes the movement from the mod for the roll and most of your speed with it. Half-Life has no roll, so the mod switches it off while it moves you, in first and third person |
 | `ForwardKeys` and so on | `{ "W" }` … | The movement keys; add `"Up"`, `"Down"`, `"Left"`, `"Right"` for the arrow keys |
 | `Speedometer` | `false` | `true`: the speedometer is on when the game starts. This is only read then: F7 doesn't switch it on or off, F9 (`SpeedometerKey`) does |
 | `SpeedometerPosition`, `SpeedometerSize`, `SpeedometerColor` | `{ 0.5, 0.75 }`, `32`, `{ 255, 160, 0 }` | Where the middle of the speedometer goes (across and down the screen, from 0 to 1), how big its digits are, and its colour (red, green and blue, from 0 to 255) |
@@ -382,11 +389,11 @@ a lot. [docs/TESTING.md](docs/TESTING.md) has a short list of things to try.
 
 ## Known limitations
 
-- Ducking, duck tapping, the wheel and the keys taken from the game are new
-  in 0.4.0, and the sounds in first person, the turning in the air, the slopes
-  and the speedometer in 0.3; none of it is tested in the game yet (see the
-  top). If the game doesn't let your character crouch, the mod ducks the view
-  and the speed only, and the log says so.
+- The view's smoothing, the landing roll switched off and the lines about
+  sudden losses of speed are new in 0.4.1 and not tested in the game yet.
+  Ducking, duck tapping and the wheel (0.4.0) had their first test there. If
+  the game doesn't let your character crouch, the mod ducks the view and the
+  speed only, and the log says so.
 - If your character is silent in first person after a cutscene or a battle that
   started as soon as you entered an area, press F6 twice: the mod only keeps a
   hidden character animating once the game has shown it.
@@ -437,8 +444,7 @@ little differently:
   (on the same taps, about 15 % more at a steady 60 frames a second, 8 % at 80,
   and about 4 % less than Half-Life with frame times that vary by a tenth).
 - **Standing up** where there turns out to be no room costs one frame at full
-  speed before the duck goes on, and the view isn't smoothed as Half-Life's
-  is when you stand up.
+  speed before the duck goes on.
 - **A stand-up just above the ground** (the "jump bug") lands first, and a
   held jump comes up to a frame later.
 - **Letting go of Shift** on the ground with Space held hops at once; OpenAG

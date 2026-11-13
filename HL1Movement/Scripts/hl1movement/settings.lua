@@ -28,6 +28,7 @@ settings.DEFAULTS = {
     PitchLimit = 89,
     BodyFollowsView = true,
     BodyFollowsHop = true,
+    ViewSmoothing = true,
 
     Movement = true,
     AutoHop = true,
@@ -35,6 +36,7 @@ settings.DEFAULTS = {
     KeepSpeed = true,
     SlopeLandings = true,
     SlopeBoosts = true,
+    LandingRoll = false,
     MaxSpeed = 320,
     InputSpeed = 400,
     Accelerate = 10,
@@ -73,6 +75,11 @@ settings.DEFAULTS = {
     CameraComponents = { "Main_CineCamera", "MainCamera" },
     TickFunctions = {
         "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Controller_World.BP_jRPG_Controller_World_C:ReceiveTick",
+        "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C:ReceiveTick",
+    },
+    -- The character's own update, which runs after Unreal has moved it: where the view's
+    -- smoothing of rises on the ground (ViewSmoothing) is done.
+    ViewTickFunctions = {
         "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C:ReceiveTick",
     },
     JumpFunctions = {
@@ -118,6 +125,7 @@ local RULES = {
     PitchLimit = number(10, 89.9),
     BodyFollowsView = BOOLEAN,
     BodyFollowsHop = BOOLEAN,
+    ViewSmoothing = BOOLEAN,
 
     Movement = BOOLEAN,
     AutoHop = BOOLEAN,
@@ -126,6 +134,7 @@ local RULES = {
     KeepSpeed = BOOLEAN,
     SlopeLandings = BOOLEAN,
     SlopeBoosts = BOOLEAN,
+    LandingRoll = BOOLEAN,
     MaxSpeed = number(1, 5000),
     InputSpeed = number(1, 10000),
     Accelerate = number(0, 1000),
@@ -160,6 +169,7 @@ local RULES = {
 
     CameraComponents = NAMES,
     TickFunctions = NAMES,
+    ViewTickFunctions = NAMES,
     JumpFunctions = NAMES,
     PawnClasses = NAMES,
     AllowWorldMap = BOOLEAN,

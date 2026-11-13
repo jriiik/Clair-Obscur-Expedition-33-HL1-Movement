@@ -709,6 +709,11 @@ function fake.newGame(options)
         worldTime = 0, -- UWorld::TimeSeconds: goes on only in frames Unreal doesn't run as paused
         clock = nil, -- GetTimeSeconds when it misbehaves: "stuck", "running" (real time) or "error"
         rootMotion = false,
+        montage = nil, -- what the character's GetCurrentMontage gives (an object, or nil)
+        -- ALS's breakfall (options.breakfall: the roll's length in frames): rolls played, and
+        -- the frames the one playing has left.
+        rolls = 0,
+        rollFrames = nil,
         limiterTicking = true,
         jumpCount = 0,
         gameJumps = 0,
@@ -1723,6 +1728,9 @@ function fake.newGame(options)
                 IsPlayingRootMotion = ufunction("IsPlayingRootMotion", 0, function()
                     return g.rootMotion
                 end),
+                GetCurrentMontage = ufunction("GetCurrentMontage", 0, function()
+                    return g.montage
+                end),
                 StopJumping = ufunction("StopJumping", 0, function()
                     g.pressedJump = false
                     g.stoppedJumps = g.stoppedJumps + 1
@@ -1851,6 +1859,13 @@ function fake.newGame(options)
         if g.rootMotion then
             -- Unreal's update moves the character by its animation (the fake doesn't), between
             -- its steps before and after the movement.
+            if g.rollFrames then
+                -- ALS's breakfall: the roll ends after its frames.
+                g.rollFrames = g.rollFrames - 1
+                if g.rollFrames <= 0 then
+                    g.rootMotion, g.rollFrames, g.montage = false, nil, nil
+                end
+            end
             runPoints(g, g.points.beforeMove, dt, true)
             runPoints(g, g.points.afterMove, dt, true)
             return
@@ -2019,6 +2034,7 @@ function fake.newGame(options)
             end
             -- It touched the ground: Unreal lands it there, walks the rest of the frame
             -- along the floor, and lifts it to its gap above the floor.
+            local fall = -v.Z
             pos.Z, v.Z = ground + fake.FLOOR_DIST, 0
             setFloor(g.cmc, gnx, gny, gnz)
             p.MovementMode = 1
@@ -2026,6 +2042,16 @@ function fake.newGame(options)
             g.landings = g.landings + 1
             -- ALS raises the braking friction for a moment after landing.
             p.BrakingFrictionFactor = inputLength > 0 and 0.5 or 3
+            local als = fake.props(g.pawn)
+            if options.breakfall and als.bBreakfallOnLand == true and fall >= als.BreakfallOnLandVelocity
+                and (g.keys.W or g.keys.A or g.keys.S or g.keys.D) then
+                -- ALS's breakfall on a landing with movement input (E33's ALS sees it although the mod
+                -- takes the input): a roll montage, whose root motion moves the character for
+                -- options.breakfall frames (the fake stops it).
+                g.rootMotion, g.rollFrames, g.rolls = true, options.breakfall, g.rolls + 1
+                g.montage = g.montage or fake.object({ className = "AnimMontage", name = "ALS_N_Breakfall_Montage" })
+                v.X, v.Y = 0, 0
+            end
             wake()
             runPoints(g, g.points.modeChanged, g.cmc, g.pawn, 3, 1)
         end

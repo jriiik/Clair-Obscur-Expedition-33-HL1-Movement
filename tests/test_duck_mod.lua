@@ -101,7 +101,7 @@ end
 -- Ducking on the ground and in the air
 
 t.test("Ctrl held at 80 fps: 0.4 s at full speed, then Unreal's crouch keeping the feet, a ducked walk at 106.56 "
-    .. "u/s, and the standing eye again on the frame after the release", function()
+    .. "u/s, and the standing eye again 0.12 s after the release", function()
     -- Fails with: no hull request (the capsule never crouches); the moves scaled from the press;
     -- the eye step not after the movement, or no eye from the movement (first person's eye
     -- stays standing through the transition); the drop not worked out again where Unreal walks
@@ -144,7 +144,12 @@ t.test("Ctrl held at 80 fps: 0.4 s at full speed, then Unreal's crouch keeping t
     t.absent(since(g, from), "Duck: stood up", "said once the next hook reads Unreal's stand-up")
     g.frame(DT)
     t.contains(since(g, from), "Duck: stood up on the ground after ")
-    t.near(fake.props(g.pawn).BaseEyeHeight, E, 0.01, "the standing eye on the frame after")
+    -- Half-Life's view smoothing (ViewSmoothing): the origin's 18 units come at 150 u/s, two
+    -- frames of it by now; the standing eye once they are in (10 frames of 1/80 s). The test
+    -- "standing up from the duck on the ground ..." has the rest.
+    t.near(fake.props(g.pawn).BaseEyeHeight, E - (18 - 2 * 150 * DT) * SCALE, 0.01, "the rise smoothed")
+    g.frames(8, DT)
+    t.near(fake.props(g.pawn).BaseEyeHeight, E, 0.01, "the standing eye 0.12 s after the stand-up")
     g.frames(120, DT)
     t.near(speed(g), 320, 0.01, "running again")
     noErrors(g)
@@ -1478,4 +1483,290 @@ t.test("the 2020 rule: a duck key counting under +ducktap gives no button in the
     end)
     duck.HELD_DUCK_UNDER_TAP = true
     assert(ok, err)
+end)
+
+-------------------------------------------------------------------------------------------
+-- Half-Life's smoothing of the view's rises on the ground (ViewSmoothing, 0.4.1): the view
+-- follows a rise of the origin at 150 u/s, never more than 18 units behind, from the
+-- character's own update after Unreal's movement (camera.lateEye).
+
+local RISE = 150 * SCALE * DT -- cm the smoothed origin catches up in a frame of 1/80 s
+local VIEW_HOOK = "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C:"
+    .. "ReceiveTick"
+
+-- Ducked with Ctrl, then let go: the view's height above where the crouched capsule's middle
+-- was, on each of the frames after the release.
+local function standUpViews(config, frames)
+    local g = running(config)
+    g.keys.LeftControl = true
+    untilTrue(g, DT, 60, crouched, "a crouch")
+    g.frames(10, DT)
+    local middle = g.actorLocation().Z
+    g.keys.LeftControl = false
+    local views = {}
+    for i = 1, frames or 14 do
+        g.frame(DT)
+        views[i] = g.cameraLocation.Z - middle
+    end
+    return g, views
+end
+
+t.test("standing up from the duck on the ground: the view height's 16 units at once, the origin's 18 at 150 u/s "
+    .. "(0.12 s), with either camera method; ViewSmoothing = false shows them at once, as 0.4.0", function()
+    -- Fails with: no hook after Unreal's movement, or camera.lateEye not writing (the view at
+    -- once); the crouch Unreal ends in its update not taken in (the view 45 cm off).
+    for _, method in ipairs({ "engine", "game" }) do
+        local g, views = standUpViews({ CameraMethod = method })
+        for i = 1, 14 do
+            t.near(views[i], E + math.min(18 * SCALE, i * RISE), 0.01,
+                string.format("%s: the view %d frames after the release", method, i))
+        end
+        t.contains(g.log, "Smoothing the view's rises on the ground from " .. VIEW_HOOK)
+        g.press(F8)
+        t.contains(g.log, "  view smoothing (ViewSmoothing=true): from " .. VIEW_HOOK .. "; ran on ")
+        noErrors(g)
+    end
+    local g, views = standUpViews({ ViewSmoothing = false })
+    t.near(views[1], 18 * SCALE + 64, 0.01, "engine: Unreal's class default eye in the stand-up's frame, as 0.4.0")
+    t.near(views[2], 18 * SCALE + E, 0.01, "then the standing eye at once")
+    t.absent(g.log, "Smoothing the view's rises")
+    noErrors(g)
+end)
+
+-- Running at 320 u/s onto a step of `height` cm and on: the view's lag below the eye without
+-- smoothing, on each frame.
+local function stepLags(config, height)
+    local g = running(config)
+    g.keys.W = true
+    g.frames(120, DT)
+    local stepX = g.position.X + 100
+    g.terrain = function(x)
+        return x > stepX and height or 0, 0, 0, 1
+    end
+    local lags = {}
+    for i = 1, 16 do
+        g.frame(DT)
+        lags[i] = g.actorLocation().Z + E - g.cameraLocation.Z
+    end
+    return g, lags
+end
+
+t.test("a stair walked up: the view follows the rise at 150 u/s; down a stair it follows at once", function()
+    -- Fails with: no smoothing; a fall smoothed too.
+    for _, method in ipairs({ "engine", "game" }) do
+        local g, lags = stepLags({ CameraMethod = method }, 30)
+        local first
+        for i = 1, 16 do
+            if not first and lags[i] > 1 then
+                first = i
+            end
+        end
+        t.truthy(first, method .. ": the view lags the step")
+        for i = first, 16 do
+            t.near(lags[i], math.max(0, 30 - (i - first + 1) * RISE), 0.01,
+                string.format("%s: frame %d after the step", method, i - first))
+        end
+        noErrors(g)
+        local _, down = stepLags({ CameraMethod = method }, -30)
+        for i = 1, 16 do
+            t.near(down[i], 0, 0.01, method .. ": down a stair the view goes with the origin, frame " .. i)
+        end
+    end
+    local _, lags = stepLags({ ViewSmoothing = false }, 30)
+    for i = 1, 16 do
+        t.near(lags[i], 0, 0.01, "ViewSmoothing = false: at once, frame " .. i)
+    end
+end)
+
+t.test("a step walked up on the first frame after a landing is smoothed too: Half-Life's smoothed origin "
+    .. "was where the player was in the air", function()
+    -- Fails with: the smoothing starting from the origin after Unreal's movement on the first
+    -- frame after one without it (the step shows at once).
+    for _, method in ipairs({ "engine", "game" }) do
+        local g = running({ CameraMethod = method })
+        g.keys.W = true
+        g.frames(120, DT)
+        g.keys.SpaceBar = true
+        g.frame(DT)
+        g.keys.SpaceBar = false
+        untilTrue(g, DT, 200, function()
+            return g.mode() == 1
+        end, "the landing")
+        local stepX = g.position.X + 1
+        g.terrain = function(x)
+            return x > stepX and 30 or 0, 0, 0, 1
+        end
+        local most = 0
+        for _ = 1, 16 do
+            g.frame(DT)
+            most = t.max(most, g.actorLocation().Z + E - g.cameraLocation.Z)
+        end
+        t.truthy(g.position.X > stepX, method .. ": up the step")
+        t.near(most, 30 - RISE, 0.01, method .. ": the view lags the step from its first frame")
+        noErrors(g)
+    end
+end)
+
+t.test("the status line's time per frame counts the hook after Unreal's movement too", function()
+    -- Fails with: only the frame hook timed.
+    local real = os.clock
+    local now = 0
+    rawset(os, "clock", function() -- every reading a millisecond on
+        now = now + 0.001
+        return now
+    end)
+    local ok, err = pcall(function()
+        local g = running()
+        g.keys.W = true
+        g.frames(1000, DT)
+        local line = t.contains(g.log, " ms per frame")
+        local ms = tonumber(line:match("the mod took ([%d%.]+) ms per frame"))
+        t.truthy(ms and ms > 1.5, "both hooks timed: " .. line)
+        noErrors(g)
+    end)
+    rawset(os, "clock", real)
+    assert(ok, err)
+end)
+
+t.test("walking up a 30 degree slope at 320 u/s the view falls behind by up to 18 units, as in Half-Life, and "
+    .. "the view check still passes with either method", function()
+    -- Fails with: the lag uncapped; the game camera's view check measuring against BaseEyeHeight
+    -- alone (st.lateOff).
+    for _, method in ipairs({ "engine", "game" }) do
+        local g = running({ CameraMethod = method })
+        g.terrain = ramp(30, g.position.X + 50, g.position.X + 5000)
+        g.keys.W = true
+        local most = 0
+        for _ = 1, 320 do
+            g.frame(DT)
+            most = t.max(most, g.actorLocation().Z + E - g.cameraLocation.Z)
+        end
+        t.near(most, 18 * SCALE, 0.01, method .. ": at most 18 units behind")
+        t.absent(g.log, "doesn't work")
+        t.truthy((require("hl1movement.camera").status().lastDistance or 99) < 1,
+            method .. ": the view check finds the camera at the eyes")
+        noErrors(g)
+    end
+end)
+
+t.test("a duck tap's lift and the flights aren't smoothed: +ducktap gives the same view as without smoothing",
+    function()
+    -- Fails with: the stash made on frames Half-Life's player leaves the ground or is in the air.
+    local function views(config)
+        local g = running(config)
+        g.keys.LeftShift = true
+        local list = {}
+        for i = 1, 120 do
+            g.frame(DT)
+            list[i] = g.cameraLocation.Z - g.actorLocation().Z
+        end
+        t.truthy(#taps(g) >= 3, "taps")
+        return list
+    end
+    local with, without = views(), views({ ViewSmoothing = false })
+    for i = 1, 120 do
+        t.near(with[i], without[i], 1e-6, "frame " .. i)
+    end
+end)
+
+t.test("a pause in the middle of a smoothed stand-up holds it; it goes on after the pause", function()
+    -- Fails with: no smoothing; a step of the smoothing that is not the frame's own length.
+    local g = running()
+    g.keys.LeftControl = true
+    untilTrue(g, DT, 60, crouched, "a crouch")
+    g.frames(10, DT)
+    local middle = g.actorLocation().Z
+    g.keys.LeftControl = false
+    g.frames(3, DT)
+    local before = g.cameraLocation.Z - middle
+    t.near(before, E + 3 * RISE, 0.01, "three frames in")
+    g.paused = true
+    g.frames(30, DT)
+    t.near(g.cameraLocation.Z - middle, before, 1e-6, "nothing moves while paused")
+    g.paused = false
+    g.frame(DT)
+    t.near(g.cameraLocation.Z - middle, E + 4 * RISE, 0.01, "the fourth frame, after the pause")
+    t.absent(g.log, "The view isn't smoothed")
+    noErrors(g)
+end)
+
+t.test("F6 in the middle of a smoothed stand-up puts back what it would without the smoothing", function()
+    -- Fails with: the late write outside the camera's overrides (its value taken for the game's).
+    local function released(smoothing, method)
+        local g = running({ CameraMethod = method, ViewSmoothing = smoothing })
+        g.keys.LeftControl = true
+        untilTrue(g, DT, 60, crouched, "a crouch")
+        g.frames(10, DT)
+        g.keys.LeftControl = false
+        g.frames(3, DT)
+        local cam = g.viewCamera()
+        g.press(F6)
+        g.frame(DT)
+        return fake.props(g.pawn).BaseEyeHeight, cam and fake.props(cam).RelativeLocation.Z, g
+    end
+    for _, method in ipairs({ "engine", "game" }) do
+        local eye, camZ, g = released(true, method)
+        local eye0, camZ0 = released(false, method)
+        t.near(eye, eye0, 1e-6, method .. ": BaseEyeHeight put back")
+        t.near(camZ or 0, camZ0 or 0, 1e-6, method .. ": the game camera put back")
+        t.falsy((g.shared["HL1Movement.changes"] or ""):find("BaseEyeHeight", 1, true),
+            method .. ": nothing left in the journal")
+    end
+end)
+
+t.test("a hook after the movement that comes before it gets one line after 30 frames; running into a wall "
+    .. "with the hook in its place gets none", function()
+    -- Fails with: no check of the late hook's order.
+    local g = running()
+    g.keys.W = true
+    g.frames(60, DT)
+    g.moveShare = 0 -- against a wall: Unreal doesn't move the character
+    g.frames(100, DT)
+    g.moveShare = nil
+    g.frames(20, DT)
+    t.absent(g.log, "The view's smoothing comes before Unreal's movement", "the hook in its place")
+    local hook = g.hooks[g.characterTickPath]
+    g.hooks[g.characterTickPath] = nil
+    local walk = g.moveTick
+    g.moveTick = function(dt) -- the character ticks before its movement
+        g.inHook = true
+        local ok, err = pcall(hook, fake.param(g.pawn), fake.param(dt))
+        g.inHook = false
+        assert(ok, err)
+        walk(dt)
+    end
+    g.frames(29, DT)
+    t.absent(g.log, "The view's smoothing comes before Unreal's movement", "29 frames")
+    g.frames(40, DT)
+    t.eq(count(g.log, "The view's smoothing comes before Unreal's movement"), 1, "one line")
+    noErrors(g)
+end)
+
+t.test("a hook after the movement that stops coming leaves no smoothing in the game camera's view check", function()
+    -- Fails with: st.lateOff kept from the last smoothed frame (up to 45 cm off in the view check).
+    local g = running({ CameraMethod = "game" })
+    g.terrain = ramp(30, g.position.X + 50, g.position.X + 5000)
+    g.keys.W = true
+    g.frames(200, DT)
+    t.truthy(require("hl1movement.camera").smoothStatus().lag > 4, "the view lags on the slope")
+    g.hooks[g.characterTickPath] = nil
+    g.frames(60, DT)
+    t.truthy((require("hl1movement.camera").status().lastDistance or 99) < 1,
+        "the view check finds the camera at the eyes")
+    noErrors(g)
+end)
+
+t.test("ViewTickFunctions that can't be hooked: one line, and the rise shows at once; a hook that never comes for "
+    .. "the character the mod moves: one line after 30 frames", function()
+    -- Fails with: no line; the stash made without a hook.
+    local g, views = standUpViews({ ViewTickFunctions = { "/Game/Nothing/BP_Nothing.BP_Nothing_C:ReceiveTick" } })
+    t.eq(count(g.log, "The view's rises on the ground aren't smoothed (ViewSmoothing): the character's own update "
+        .. "couldn't be hooked"), 1, "one line")
+    t.near(views[2], 18 * SCALE + E, 0.01, "the standing eye at once")
+    t.absent(g.log, "The view isn't smoothed")
+    noErrors(g)
+    g = standUpViews({ JumpInput = "keys", ViewTickFunctions = {
+        "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C:JumpAction" } }, 40)
+    t.eq(count(g.log, "The view isn't smoothed: the character's own update"), 1, "one line")
+    noErrors(g)
 end)

@@ -151,7 +151,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.4.0 loaded")
+    t.contains(g.log, "Version 0.4.1 loaded")
     t.contains(g.log, "F9 shows the speedometer")
     for _, code in ipairs({ F5, F6, F7, F8, F9 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
@@ -248,7 +248,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.4.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.4.1 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -1278,6 +1278,8 @@ t.test("walking off a moving platform keeps its velocity, as a jump does, and is
     t.eq(g.mode(), 3)
     t.near(g.speed(), MAX_SPEED - 300, 5, "the platform's velocity is kept")
     t.absent(g.log, "The game cut the speed")
+    -- Nor a sudden loss: 320 u/s written, 200 after the walk-off, the platform's -120 added.
+    t.absent(g.log, "Speed lost:")
     noErrors(g)
 end)
 
@@ -2194,7 +2196,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.4.0 diagnostics")
+    t.contains(g.log, "HL1Movement 0.4.1 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")
@@ -3220,4 +3222,192 @@ t.test("a word in config.lua that Lua doesn't know (a misspelt false, a name wit
     fake.useConfig("return {\n    BodySounds = false,\n    SlopeBoosts = false,\n    Gravity = math.floor(800.5),\n}\n")
     g.press(F7)
     t.absent({ table.unpack(g.log, before + 1) }, "WARNING", "Lua's own words (math) are known")
+end)
+
+-------------------------------------------------------------------------------------------
+-- 0.4.1: a line for a sudden loss of speed (running into something), ALS's landing roll
+-- switched off while the mod moves the character (LandingRoll), and a line for the game's
+-- root motion.
+
+t.test("running into something: a frame Unreal moves much slower than the mod wrote gets a line (from what to what, "
+    .. "walking or in the air, the heading, how far the move got, the duck, where), the hop line notes it, and the "
+    .. "status line and the report count it", function()
+    -- Fails with: no speedLoss (no line, no counts, no note in the hop line).
+    local g = running()
+    runTo(g, MAX_SPEED)
+    g.moveShare = 0.2 -- something in the way: a fifth of the move happens
+    g.frame()
+    g.moveShare = nil
+    g.frame()
+    local at = g.actorLocation()
+    local line = t.contains(g.log, "Speed lost: from 320 to 64 u/s in one frame (walking, standing, heading 0 deg; "
+        .. "the move got 20 % of its way; at X=")
+    t.truthy(line:find(string.format("Z=%.0f): the character most likely ran into something", at.Z), 1, true), line)
+    t.eq(count(g.log, "Speed lost:"), 1, "one line")
+    -- In the air: the hop's line notes it.
+    runTo(g, MAX_SPEED)
+    g.keys.SpaceBar = true
+    g.frame()
+    g.keys.SpaceBar = false
+    g.frames(10)
+    g.moveShare = 0.5
+    g.frame()
+    g.moveShare = nil
+    while g.mode() == 3 do
+        g.frame()
+    end
+    g.frame()
+    t.contains(g.log, "Speed lost: from 320 to 160 u/s in one frame (in the air, standing, heading 0 deg; the move "
+        .. "got 50 % of its way;")
+    t.contains(g.log, ", ran into something, -160 u/s, speed cuts 0")
+    g.keys.W = false
+    g.frames(700)
+    local status = t.contains(g.log, "times (ran into something, or the game set it), the game moved the character "
+        .. "with an animation of its own 0 times")
+    t.truthy(status:find("the speed dropped suddenly [12] times") and status:find("^.-Status"), status)
+    g.press(F8)
+    t.contains(g.log, "  sudden speed losses 2 (the next 8 get a line), animations the game moved the character "
+        .. "with while the mod had it 0 (the next 10 get a line)")
+    noErrors(g)
+end)
+
+t.test("a sudden loss after a move that went its whole way is the game setting the speed, not running into "
+    .. "something, in the line and in the hop's", function()
+    -- Fails with: every sudden loss taken for running into something.
+    local g = running()
+    runTo(g, MAX_SPEED)
+    g.afterMove = function(v) -- after Unreal's whole move, the game stops the character
+        g.afterMove = nil
+        v.X, v.Y = v.X * 0.1, v.Y * 0.1
+    end
+    g.frames(2)
+    local line = t.contains(g.log, "Speed lost: from 320 to 32 u/s in one frame (walking, standing, heading 0 deg; "
+        .. "the move got 100 % of its way; at X=")
+    t.truthy(line:find("): the game set the speed itself (nothing cut the move short)", 1, true), line)
+    runTo(g, MAX_SPEED)
+    g.keys.SpaceBar = true
+    g.frame()
+    g.keys.SpaceBar = false
+    g.frames(10)
+    g.afterMove = function(v)
+        g.afterMove = nil
+        v.X, v.Y = v.X * 0.1, v.Y * 0.1
+    end
+    while g.mode() == 3 do
+        g.frame()
+    end
+    g.frame()
+    t.contains(g.log, ", the game set the speed, -288 u/s, speed cuts 0")
+    t.absent(g.log, "ran into something")
+    noErrors(g)
+end)
+
+t.test("ten lines of sudden speed losses until F7, then ten more; the counts go on", function()
+    local g = running()
+    for _ = 1, 12 do
+        runTo(g, MAX_SPEED)
+        g.moveShare = 0.2
+        g.frame()
+        g.moveShare = nil
+        g.frame()
+    end
+    t.eq(count(g.log, "Speed lost:"), 10)
+    t.eq(count(g.log, "(further losses aren't logged)"), 1)
+    g.press(F7)
+    g.frame()
+    runTo(g, MAX_SPEED)
+    g.moveShare = 0.2
+    g.frame()
+    g.moveShare = nil
+    g.frame()
+    t.eq(count(g.log, "Speed lost:"), 11)
+    g.press(F8)
+    t.contains(g.log, "  sudden speed losses 13 (the next 9 get a line)")
+end)
+
+t.test("not a sudden loss: a cut of the game's (undone with KeepSpeed, a cut line of its own without it), nor a "
+    .. "landing on a moving platform, whose velocity Unreal kept in the air", function()
+    -- Fails with: KeepSpeed off's cuts taken for losses; the landing's platform velocity taken out
+    -- before the check.
+    for _, keep in ipairs({ true, false }) do
+        local g = running({ KeepSpeed = keep }, { limiterWakesOnModeChange = true, maxSpeedIgnoresWalkSpeed = true })
+        fake.props(g.cmc).CurrentMovementSettings.SprintSpeed = 100 -- the limiter caps at 40 u/s
+        strafeHops(g, 300)
+        t.contains(g.log, "The game cut the speed from ")
+        t.absent(g.log, "Speed lost:")
+        t.absent(g.log, "ran into something")
+    end
+    local g = running()
+    g.baseVelocity = { X = 400, Y = 0, Z = 0 } -- 160 u/s
+    g.frames(3)
+    g.keys.SpaceBar = true
+    g.frames(300)
+    t.truthy(g.landings >= 4, "hopped on the platform")
+    t.absent(g.log, "Speed lost:")
+    noErrors(g)
+end)
+
+t.test("ALS's breakfall is off while the mod moves the character (LandingRoll = false): no roll at landings with a "
+    .. "movement key held, and the game's value comes back at F5", function()
+    -- Fails with: bBreakfallOnLand left as the game has it (the roll plays at every landing).
+    local options = { breakfall = 40 }
+    local g = running(nil, options)
+    fake.set(g.pawn, "BreakfallOnLandVelocity", 0) -- E33's: a roll from any fall
+    t.eq(fake.props(g.pawn).bBreakfallOnLand, false, "the mod's")
+    t.truthy((g.shared[JOURNAL] or ""):find("bBreakfallOnLand", 1, true), "in the journal")
+    strafeHops(g, 600)
+    t.truthy(g.landings >= 5, "hopped")
+    t.eq(g.rolls, 0, "no roll")
+    t.truthy(g.speed() > MAX_SPEED, "the hops keep their speed")
+    g.press(F5)
+    g.frame()
+    t.eq(fake.props(g.pawn).bBreakfallOnLand, true, "the game's again with the mod off")
+    t.falsy((g.shared[JOURNAL] or ""):find("bBreakfallOnLand", 1, true), "out of the journal")
+    -- The game writing it again while the mod moves the character: the mod's comes back, and
+    -- the game's is what is put back.
+    g.press(F5)
+    g.frame()
+    fake.set(g.pawn, "bBreakfallOnLand", true)
+    g.frame()
+    t.eq(fake.props(g.pawn).bBreakfallOnLand, false, "the mod's again")
+    g.press(F8)
+    t.contains(g.log, "bBreakfallOnLand=false, BreakfallOnLandVelocity=0; LandingRoll=false, the game's own "
+        .. "bBreakfallOnLand: true")
+    noErrors(g)
+end)
+
+t.test("LandingRoll = true keeps the game's roll: the root motion takes the movement, and its line says what played, "
+    .. "the speed before it and after it; counted in the status line and the report, 10 lines until F7", function()
+    -- Fails with: no root motion line (noteRootMotion or rootMotionLine missing).
+    local g = running({ LandingRoll = true }, { breakfall = 40 })
+    fake.set(g.pawn, "BreakfallOnLandVelocity", 0)
+    t.eq(fake.props(g.pawn).bBreakfallOnLand, true, "the game's")
+    runTo(g, MAX_SPEED)
+    g.keys.SpaceBar = true
+    g.frame()
+    g.keys.SpaceBar = false
+    while g.mode() == 3 do
+        g.frame()
+    end
+    t.eq(g.rolls, 1, "the game's roll")
+    g.frames(45)
+    local line = t.contains(g.log, "Root motion: the game moved the character itself, playing "
+        .. "ALS_N_Breakfall_Montage, for 4")
+    t.truthy(line:find("u/s before it, 0 as the mod had the movement again", 1, true), line)
+    g.keys.W = false
+    g.frames(700)
+    t.contains(g.log, "the game moved the character with an animation of its own 1 times")
+    g.press(F8)
+    t.contains(g.log, "animations the game moved the character with while the mod had it 1 (the next 9 get a line)")
+    -- Root motion without a montage the game names, and one still playing as the mod gives the
+    -- movement back.
+    runTo(g, MAX_SPEED)
+    g.rootMotion = true
+    g.frames(5)
+    g.press(F5)
+    g.frame()
+    t.contains(g.log, "Root motion: the game moved the character itself, playing no montage, for ")
+    t.contains(g.log, "and the mod gave the movement back before it ended")
+    g.rootMotion = false
+    noErrors(g)
 end)

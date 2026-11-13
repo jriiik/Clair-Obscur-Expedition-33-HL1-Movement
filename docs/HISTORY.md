@@ -343,3 +343,27 @@ docs. Every rule a lane built has a test shown to fail on a broken variant of it
   slow-turn figures. Tests added for two limits of the brake-back, the drop window and the lift's 10 cm. Left: a ground
   stand-up on slopes of 23.6° or more stays on the ground (CLAUDE.md, "Ducking"); a held jump key in the air at a hook
   with no update is judged at once, as in 0.3.1; `WALK_GAP` and `HOTKEY_REPEAT` have no test.
+
+## 0.4.1: after the first test of 0.4.0
+
+The owner's first test of 0.4.0 in the game (UE4SS build 1218) asked for three things, and 0.4.1 has them:
+
+- **The stand-up looked too sharp.** Half-Life's client smooths a rise of the origin on the ground (a stand-up from
+  the duck, a stair, a slope): the view follows at 150 units a second, never more than 18 behind, so a stand-up's 18
+  units of origin arrive over about 0.12 s while the view height's 16 are instant. 0.4.0 left it out (Unreal writes
+  the class default's eye at a stand-up after the frame hook). 0.4.1 does it in a second, light hook on the
+  character's `ReceiveTick`, which runs after Unreal's movement and before the view is worked out
+  (`camera.lateEye`, `ViewSmoothing`, default true; `ViewTickFunctions`).
+- **The speed dropped "to minimum" at one spot while hopping.** The log showed hop 22 landing at 232 u/s after taking
+  off at 699, ducked, with every game cut undone; nothing pointed at the mod, and most likely the character ran into
+  something. Nothing logged a sudden loss, so 0.4.1 adds a line for one (`Speed lost: ...`: from what to what, where,
+  the heading, how far the move got, and whether something cut the move short or the game set the speed itself), notes
+  it in the hop line and counts it.
+- **A roll on landing in third person, which killed the speed.** The report read `bBreakfallOnLand=true,
+  BreakfallOnLandVelocity=0`: ALS's breakfall plays a roll on a landing with movement input, from any fall, and its
+  root motion hands the movement to the game. While the mod moves the character, in either view, it writes
+  `bBreakfallOnLand = false` (put back at the release, journaled; `LandingRoll = true` keeps the roll). A line names
+  any animation the game moves the character with while the mod had it (`Root motion: ...`).
+
+Tests: 643 (631 in 0.4.0), each new one shown to fail on a broken variant; the settle sweep and the acceptance
+replay pass.

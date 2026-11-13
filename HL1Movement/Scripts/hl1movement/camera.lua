@@ -47,6 +47,13 @@ local EYE_FACTOR = 0.78 -- "auto" eye height, as a share of the standing capsule
 -- Units the ducked eye is below the standing one: Half-Life's view heights above its
 -- origin, 28 standing and 12 ducked (duck.VIEW_STAND and duck.VIEW_DUCK).
 local DUCKED_EYE_DROP = 28 - 12
+-- Half-Life's client smooths a rise of its origin on the ground (a stand-up from the duck, a
+-- stair, a slope): the view follows at RISE_SPEED units a second, never more than RISE_LAG
+-- behind (camera.lateEye). The hulls' difference, units, where nothing tells Unreal's.
+local RISE_SPEED, RISE_LAG = 150, 18
+local DUCKED_EYE_DROP_HULL = 18
+local LATE_MISSES = 30 -- eye writes in a row whose smoothing never came, before the line that says so
+local LATE_TOLERANCE = 0.01 -- cm the late eye has to differ by to be written
 local EYE_MOVE = 0.5 -- cm the game's camera has to be off its height on the capsule to be moved
 local CROUCHED_EYE = "CrouchedEyeHeight"
 local REFRESH = 0.5 -- seconds between re-checks of the pitch limits, the body and the shakes
@@ -97,6 +104,12 @@ local standing = { pawnAddr = nil, fullName = nil, eye = nil, setting = nil }
 -- (main.lua from 0.4.0 on). Until one does, camera.apply writes it itself, as it did
 -- before, with nothing known of a duck.
 local eyeLate = false
+-- The hook after Unreal's movement that smooths the view (main.lua registers it: its path), the
+-- smoothing's state (oldz: Half-Life's smoothed origin, cm; nil starts it from where the origin
+-- is), and its counts for the report.
+local lateHook = nil
+local smooth = { oldz = nil, missed = 0, missLogged = false, runs = 0, lagged = 0, writes = 0, most = 0, lag = 0,
+    early = 0, earlyLogged = false, still = false, sx = 0, sy = 0, sz = 0 }
 local hidden = {} -- address -> { obj, fullName, how, was, skinned, tick, refused }
 local waiting = {} -- address -> full name of parts seen once, hidden if still there next pass
 local notPrimitive = {} -- address -> true for attached components that can't be seen
@@ -142,6 +155,8 @@ local st = {
     crouchedEyeSet = nil, -- cm: the CrouchedEyeHeight the mod wrote last, while it is in place
     standingEye = nil, -- cm: the standing eye the last eye write used, for the report
     standingEyeSource = nil, -- where it came from
+    late = nil, -- what the eye was made of in this frame, for the smoothing after Unreal's movement
+    lateOff = 0, -- cm the game camera's height was put from BaseEyeHeight by the smoothing (the view check)
 }
 
 function camera.isActive()
@@ -688,6 +703,34 @@ local function writeEye(pawn, cfg, info, verify)
     elseif st.moved and math.abs(E + cameraOffset - st.moved.eye) > EYE_MOVE then
         placeAtEyes(st.moved, E + cameraOffset)
     end
+    -- What the view's smoothing after Unreal's movement needs (camera.lateEye), on frames
+    -- Half-Life's player is on the ground at the end of the frame's updates.
+    if lateHook and cfg.ViewSmoothing and info and info.ground and finite(info.view) and finite(info.drop) then
+        st.late = { E = E, view = info.view, drop = info.drop, delta = finite(info.delta) and info.delta
+            or DUCKED_EYE_DROP_HULL * cfg.UnitScale, crouched = crouched, ducked = E + ducked, base = E + offset,
+            stillZ = info.stillZ, hookX = info.hookX, hookY = info.hookY, hookZ = info.hookZ,
+            paused = not st.lastUnpaused }
+    end
+end
+
+-- Called at the start of each eye write (camera.applyEye): the last frame's stash for the
+-- late hook is dropped, and one it never took (not in a frame Unreal ran as paused, when the
+-- character doesn't tick) is counted: LATE_MISSES in a row get one line.
+local function dropLate()
+    local late = st.late
+    st.late = nil
+    if late and not late.paused then
+        st.lateOff, smooth.still = 0, false -- (the camera stayed where the frame hook put it)
+        smooth.missed = smooth.missed + 1
+        if smooth.missed == LATE_MISSES and not smooth.missLogged then
+            smooth.missLogged = true
+            log.info("The view isn't smoothed: the character's own update (%s) hasn't come after Unreal's movement "
+                .. "for %d frames in a row for the character the mod moves, so a rise of the view shows at once, as "
+                .. "in 0.4.0. Please report UE4SS.log.", tostring(lateHook), LATE_MISSES)
+        end
+    elseif not late then
+        smooth.missed = 0
+    end
 end
 
 -- Where the game's camera goes on the capsule when it is moved there: the eye height
@@ -1171,7 +1214,7 @@ local function eyeDistance(pcm, pawn)
     end
     local dx = cameraAt.X - pawnAt.X
     local dy = cameraAt.Y - pawnAt.Y
-    local dz = cameraAt.Z - (pawnAt.Z + eye)
+    local dz = cameraAt.Z - (pawnAt.Z + eye + (st.method == "game" and st.lateOff or 0))
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
@@ -1467,9 +1510,151 @@ end
 ---     before it could be read off the standing capsule (nil if not known) }.
 function camera.applyEye(pawn, cfg, info)
     eyeLate = true
+    dropLate()
     if st.pawnAddr and ue.address(pawn) == st.pawnAddr then -- first person is on for it (a release clears it)
         writeEye(pawn, cfg, info, st.refresh)
     end
+end
+
+--- main.lua's hook after Unreal's movement, which runs camera.lateEye: its path, or nil.
+function camera.setLateHook(path)
+    lateHook = path
+    if not path then
+        st.lateOff, smooth.still = 0, false
+    end
+end
+
+-- Whether the hook after the movement really comes after it: on the last frame it found the
+-- character where the frame hook had (smooth.still, sx, sy, sz), and this frame's hook (hx,
+-- hy, hz) finds it elsewhere, so Unreal moved it after the late hook. LATE_MISSES such frames
+-- with none in between that the late hook found moved get one line. (A frame the character
+-- didn't move, against a wall, tells nothing either way.)
+local function checkOrder(hx, hy, hz, at)
+    if not (finite(hx) and finite(hy) and finite(hz)) then
+        smooth.still = false
+        return
+    end
+    local function far(x, y, z)
+        return math.abs(x - hx) + math.abs(y - hy) + math.abs(z - hz) > LATE_TOLERANCE
+    end
+    if smooth.still and far(smooth.sx, smooth.sy, smooth.sz) then
+        smooth.early = smooth.early + 1
+        if smooth.early == LATE_MISSES and not smooth.earlyLogged then
+            smooth.earlyLogged = true
+            log.info("The view's smoothing comes before Unreal's movement: the character's own update (%s) found "
+                .. "it where the frame hook had, and Unreal moved it after that, on %d frames in a row, so a rise "
+                .. "of the view is a frame late (and a stand-up shows Unreal's class default eye). Please report "
+                .. "UE4SS.log.", tostring(lateHook), LATE_MISSES)
+        end
+    end
+    smooth.still = not far(at.X, at.Y, at.Z)
+    if smooth.still then
+        smooth.sx, smooth.sy, smooth.sz = at.X, at.Y, at.Z
+    elseif far(at.X, at.Y, at.Z) then
+        smooth.early = 0 -- moved before the late hook: the order is right
+    end
+end
+
+--- Half-Life's smoothing of the view's rises on the ground (ViewSmoothing): called from the
+--- character's own update, after Unreal's movement and before the view is worked out, on
+--- frames the frame hook wrote the eye with Half-Life's player on the ground (else it only
+--- forgets where the smoothing was). Half-Life's client keeps a smoothed height of the
+--- player's origin: on the ground, when the origin is higher, it follows at 150 units a
+--- second and is never more than 18 behind, and the view goes down by the lag; a fall, and
+--- anything in the air, takes it to the origin at once. So a stand-up from the duck shows its
+--- view height's 16 units at once and its origin's 18 over about 0.12 s, and a stair or a
+--- steep slope is climbed with the view a little behind. Here the origin is the capsule's
+--- middle less the duck's drop (movement.eyeInfo), with Unreal's crouch or stand-up in this
+--- update taken in (the middle moved by the hulls' difference, the feet kept), and the eye
+--- written is the one the frame hook wrote less the lag: BaseEyeHeight with the engine's view
+--- (also where Unreal wrote its class default at a stand-up), the game camera's height on the
+--- capsule with the game's. Reads: bIsCrouched, and the location unless Unreal can't have
+--- moved the character; one write only when the eye differs. dt: the frame's length.
+function camera.lateEye(pawn, cfg, dt)
+    local L = st.late
+    st.late = nil
+    if not (L and st.active and st.pawnAddr == ue.address(pawn)) then
+        smooth.oldz, smooth.lag, st.lateOff, smooth.still = nil, 0, 0, false
+        return
+    end
+    smooth.runs = smooth.runs + 1
+    local s = cfg.UnitScale
+    local crouched = ue.get(pawn, "bIsCrouched") == true
+    local drop, moved = L.drop, 0
+    if crouched ~= L.crouched then
+        -- Unreal crouched or stood the capsule up in this update, keeping its feet: the middle
+        -- moved by the hulls' difference, and Half-Life's origin with it no longer lies below.
+        moved = L.crouched and L.delta or -L.delta
+        drop = drop + moved
+    end
+    local middle
+    if L.stillZ then
+        middle = L.stillZ + moved
+        smooth.still = false
+    else
+        local ok, at = ue.call(pawn, "K2_GetActorLocation")
+        if not (ok and type(at) == "table" and finite(at.X) and finite(at.Y) and finite(at.Z)) then
+            smooth.oldz, smooth.lag, st.lateOff, smooth.still = nil, 0, 0, false
+            return
+        end
+        checkOrder(L.hookX, L.hookY, L.hookZ, at)
+        middle = at.Z
+    end
+    local origin = middle - drop
+    local old, lag = smooth.oldz, 0
+    if not old and finite(L.hookZ) then
+        -- After a frame without the smoothing (in the air, a release, root motion), Half-Life's
+        -- client had the smoothed origin where the player was: where the capsule was at the
+        -- frame hook, before Unreal's movement (a landing's first walk up a step is smoothed).
+        old = L.hookZ - L.drop
+    end
+    if old and origin > old then
+        old = old + RISE_SPEED * s * (finite(dt) and dt > 0 and dt or 0)
+        if old > origin then
+            old = origin
+        elseif origin - old > RISE_LAG * s then
+            old = origin - RISE_LAG * s
+        end
+        lag = origin - old
+    else
+        old = origin
+    end
+    smooth.oldz, smooth.lag = old, lag
+    if lag > 0 then
+        smooth.lagged = smooth.lagged + 1
+        smooth.most = math.max(smooth.most, lag / s)
+    end
+    local eye = L.E + L.view - drop - lag
+    if crouched and eye > L.ducked then
+        eye = L.ducked -- (never above the ducked eye while the capsule reads crouched)
+    end
+    if st.method == "engine" then
+        st.lateOff = 0
+        local now = ue.number(pawn, "BaseEyeHeight")
+        if now == nil or math.abs(now - eye) > LATE_TOLERANCE then
+            if crouched and not L.crouched then
+                adoptCrouchedEye(pawn, true) -- Unreal's copy of the mod's ducked eye, as at the next hook
+            end
+            overrides:set(pawn, "BaseEyeHeight", eye, false)
+            smooth.writes = smooth.writes + 1
+        end
+    elseif st.moved then
+        -- The view check measures against BaseEyeHeight, which keeps the frame hook's eye.
+        st.lateOff = eye - L.base
+        if math.abs(st.moved.eye - eye) > LATE_TOLERANCE then
+            placeAtEyes(st.moved, eye)
+            smooth.writes = smooth.writes + 1
+        end
+    end
+end
+
+--- For the report: the view's smoothing (runs: frames it ran with Half-Life's player on the
+--- ground; lagged: frames the view was behind a rise; most: the largest lag, units; writes:
+--- eye writes after Unreal's movement; lag: the lag now, units; missed: frames in a row its
+--- hook didn't come).
+function camera.smoothStatus(cfg)
+    return { hook = lateHook, runs = smooth.runs, lagged = smooth.lagged, most = smooth.most, writes = smooth.writes,
+        lag = smooth.lag / ((cfg and cfg.UnitScale) or 2.5), missed = smooth.missed }
 end
 
 --- For the report: the standing eye the last eye write used (cm above the middle of
@@ -1571,12 +1756,14 @@ function camera.release()
     st.pawnAddr = nil
     st.pcmAddr = nil
     st.eyePawn, st.eyeCrouched = nil, nil -- the standing eye stays known for the character
+    st.late, st.lateOff, smooth.oldz, smooth.lag, smooth.still = nil, 0, nil, 0, false
 end
 
 --- Forgets everything without touching the game: for a new level, whose loading
 --- destroyed the objects the mod had changed.
 function camera.forget()
     overrides:forget()
+    st.late, st.lateOff, smooth.oldz, smooth.lag, smooth.still = nil, 0, nil, 0, false
     crouchedOverrides:forget()
     st.crouchedEyeSet = nil
     st.eyePawn, st.eyeCrouched = nil, nil

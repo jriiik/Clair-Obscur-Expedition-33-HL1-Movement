@@ -139,6 +139,14 @@ local FLOOR_BANDS = { 1, 2, 4, 8, 16 }
 -- The duck tap lines and the "Duck:" lines, until the reload key starts their counts again.
 local MAX_TAP_LINES = 30
 local MAX_DUCK_LINES = 30
+-- The lines about a sudden loss of speed (see speedLoss) and about the game playing an animation
+-- that moves the character itself (root motion, see noteRootMotion), until the reload key.
+local MAX_LOSS_LINES = 10
+local MAX_ROOT_LINES = 10
+-- A sudden loss: the speed Unreal moved with under this share of what the mod wrote, and
+-- lower by at least LOSS_MIN u/s.
+local LOSS_SHARE = 0.75
+local LOSS_MIN = 100
 
 -- What was read of the floor in this frame, so that nothing is read twice: the
 -- movement component's CurrentFloor, if it is a floor the character walks on, and how
@@ -177,6 +185,8 @@ local st = {
     taps = 0, -- duck taps landed in this session: the tap lines' numbers
     tapLines = 0, -- tap lines written since the count last started (see movement.logAgain)
     duckLines = 0, -- "Duck:" lines written since then
+    lossLines = 0, -- lines about a sudden loss of speed written since then
+    rootLines = 0, -- lines about the game's root motion written since then
     duckClock = 0, -- s: the Half-Life updates the duck ran, added up (for the Duck lines' times)
     pressedAt = nil, -- duckClock at the press of the transition in progress
     duckedAt = nil, -- duckClock when the character last became fully ducked
@@ -250,9 +260,12 @@ local st = {
     -- taps: duck taps (lifts the game had room for), tapLandings their landings; groundDucks,
     -- airDucks, groundStands, airStands: Half-Life's ducks and stand-ups; runInPresses: duck
     -- tap presses that ran into an upward slope instead (Half-Life's slope boost, no tap).
+    -- speedLosses: frames Unreal moved the character much slower than the mod wrote (see
+    -- speedLoss); rootMotions: animations the game moved the character with while the mod had it.
     counts = { cuts = 0, restores = 0, rewrites = 0, wakes = 0, leaks = 0, jumpChanges = 0, slopeLandings = 0,
         slopeHits = 0, slopeUnknown = 0, slides = 0, launches = 0, stoppedJumps = 0, groundedJumps = 0, taps = 0,
-        tapLandings = 0, groundDucks = 0, airDucks = 0, groundStands = 0, airStands = 0, runInPresses = 0 },
+        tapLandings = 0, groundDucks = 0, airDucks = 0, groundStands = 0, airStands = 0, runInPresses = 0,
+        speedLosses = 0, rootMotions = 0 },
 }
 
 -- What happened since the last status line (see movement.takeStats).
@@ -261,7 +274,7 @@ local function newStats()
         airHops = 0, airGain = 0, airTurn = 0, landingLoss = 0, steps = 0, cuts = 0, restores = 0, rewrites = 0,
         wakes = 0, leaks = 0, slopeLandings = 0, slopeHits = 0, slopeGain = 0, slides = 0, launches = 0,
         groundedJumps = 0, taps = 0, tapLandings = 0, groundDucks = 0, airDucks = 0, groundStands = 0,
-        airStands = 0, runInPresses = 0 }
+        airStands = 0, runInPresses = 0, speedLosses = 0, rootMotions = 0 }
 end
 local stats = newStats()
 
@@ -531,6 +544,8 @@ function movement.apply(pawn, cmc, cfg, P, now)
         st.slide, st.flight = nil, nil
         st.eye, st.eyeFrame, st.duckKey = nil, nil, false
         st.pressedAt, st.duckedAt, st.standLine, st.groundRun, st.airRefusal = nil, nil, nil, nil, nil
+        st.rootMotion = nil
+        st.breakfall = nil
         if not st.worldGravity then
             log.once("gravity", "Could not read the game's gravity, so the game's own gravity stays.")
         end
@@ -579,6 +594,19 @@ function movement.apply(pawn, cmc, cfg, P, now)
         end
     end
     takeCurve(cmc)
+    if not cfg.LandingRoll then
+        -- ALS's breakfall: on a landing with movement input it plays a roll, whose root motion
+        -- takes the movement from the mod (and most of the speed with it). Half-Life has no roll.
+        -- Every frame, one read (written when the game set it again): the game's value comes back
+        -- at the release. Only on a character that has it (ALS's; a flag it doesn't have reads as
+        -- no boolean).
+        if st.breakfall == nil then
+            st.breakfall = type(ue.get(pawn, "bBreakfallOnLand")) == "boolean"
+        end
+        if st.breakfall then
+            overrides:set(pawn, "bBreakfallOnLand", false, refresh)
+        end
+    end
     if refresh then
         applyValues(pawn, cmc, P)
         if first then
@@ -650,7 +678,8 @@ end
 
 -- A cut of the speed the mod wrote last frame, with the direction kept, although
 -- the character moved the whole way (at is where it is now), is the game capping
--- the speed. Logged, and undone with KeepSpeed. Returns the velocity to start from.
+-- the speed. Logged, and undone with KeepSpeed. Returns the velocity to start from, and
+-- true as the third value if it was a cut.
 local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
     local w = st.written
     if not w then
@@ -719,11 +748,11 @@ local function checkCut(cmc, cfg, P, vx, vy, vz, mode, landed, at)
             cuts == MAX_CUT_LINES and " (not logged again)" or "")
     end
     if not cfg.KeepSpeed then
-        return vx, vy
+        return vx, vy, true
     end
     count("restores")
     local scale = written / speed
-    return vx * scale, vy * scale
+    return vx * scale, vy * scale, true
 end
 
 -- The floor Unreal's walking found under the character (the movement component's
@@ -1566,10 +1595,14 @@ local function hopLine(hop, landing, P, slope)
     if hop.landedDucked then
         ducking = ducking .. ", landed ducked"
     end
+    -- A sudden loss of speed in the hop (see speedLoss): what it ran into took this much, or the
+    -- game setting the speed itself.
+    local hit = (hop.hit and string.format(", ran into something, -%.0f u/s", hop.hit / u) or "")
+        .. (hop.gameSet and string.format(", the game set the speed, -%.0f u/s", hop.gameSet / u) or "")
     log.info("Hop %d (%.0f fps, %.1f updates per frame): take-off %.0f u/s, landing %.0f u/s (%+.0f)%s, %.2f s in "
-        .. "the air, view turned %.0f deg (%.0f deg/s), keys %s%s, speed cuts %d%s%s", hop.n, hop.frames / time,
+        .. "the air, view turned %.0f deg (%.0f deg/s), keys %s%s%s, speed cuts %d%s%s", hop.n, hop.frames / time,
         hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, gain, onSlope, hop.time,
-        hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", ducking, st.counts.cuts - hop.cuts,
+        hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", ducking, hit, st.counts.cuts - hop.cuts,
         body, st.hopLines == MAX_HOP_LINES and " (further hops aren't logged)" or "")
 end
 
@@ -1698,6 +1731,103 @@ local function putBackSnapshot(snap, slide, floor)
     end
 end
 
+-- A sudden loss of speed in Unreal's last update: the horizontal speed it moved the character
+-- with (speed, cm/s, read back) under LOSS_SHARE of what the mod handed it (w, st.written)
+-- and lower by LOSS_MIN u/s or more, where it wasn't a cut of the game's (checkCut: undone with
+-- KeepSpeed, a cut line of its own without). Most likely the character ran into something: a
+-- wall, a prop, a person, a blocking volume the game doesn't show. Counted, noted in the hop's
+-- line, and one line within its budget: from what to what, on the ground or in the air, the
+-- heading, how far of its way the move got, Half-Life's duck, and where (at: the location the
+-- movement read at this hook). Nothing is read for it.
+local function speedLoss(P, w, speed, at, mode, d)
+    local written, s = horizontal(w.x, w.y), P.unitScale
+    if mode == FALLING and w.mode ~= FALLING and not st.stayBasedInAir then
+        -- Walking off a ledge, Unreal adds the velocity of the platform left (see checkCut),
+        -- which may be against the run; a long frame may leave from still ground without it.
+        written = math.min(written, horizontal(w.x + w.baseX, w.y + w.baseY))
+    end
+    if not (speed < written * LOSS_SHARE and written - speed >= LOSS_MIN * s) then
+        return
+    end
+    count("speedLosses")
+    -- A move that went (nearly) its whole way, the mode unchanged, wasn't stopped by
+    -- anything: the game set the velocity itself (stopped the character, or moved it).
+    local share, set = "an unknown share", false
+    if w.at and at and w.dt and w.dt > 0 then
+        local mx, my = (at.X - w.at.X) / w.dt - w.baseX, (at.Y - w.at.Y) / w.dt - w.baseY
+        local moved = horizontal(mx, my)
+        share = string.format("%.0f %%", moved / written * 100)
+        set = w.mode == mode and moved >= written * MOVED_MIN
+    end
+    if st.hop then
+        local key = set and "gameSet" or "hit"
+        st.hop[key] = (st.hop[key] or 0) + written - speed
+    end
+    st.lossLines = st.lossLines + 1
+    if st.lossLines > MAX_LOSS_LINES then
+        return
+    end
+    local how = "walking"
+    if w.mode == FALLING then
+        how = mode == FALLING and "in the air" or "in the air, landing"
+    elseif mode == FALLING then
+        how = "walking off the ground"
+    end
+    local ducked = d.state == duck.DUCKED and "ducked" or (d.state == duck.IN_DUCK and "ducking" or "standing")
+    log.info("Speed lost: from %.0f to %.0f u/s in one frame (%s, %s, heading %.0f deg; the move got %s of its "
+        .. "way; at X=%s Y=%s Z=%s): %s%s", written / s, speed / s, how,
+        ducked, math.deg(math.atan(w.y, w.x)), share, at and string.format("%.0f", at.X) or "?",
+        at and string.format("%.0f", at.Y) or "?", at and string.format("%.0f", at.Z) or "?",
+        set and "the game set the speed itself (nothing cut the move short)"
+            or "the character most likely ran into something",
+        st.lossLines == MAX_LOSS_LINES and " (further losses aren't logged)" or "")
+end
+
+-- The game moving the character with an animation of its own (root motion: ALS's roll on a
+-- landing, for one), which the mod leaves to it (see main.lua): on its first frame right
+-- after a frame the mod moved the character, what plays (the character's GetCurrentMontage)
+-- and the speed the mod had written are noted, and counted; the line comes once the mod has
+-- the movement again (rootMotionLine), with the speed then. Nothing is read on other frames.
+local function noteRootMotion(pawn, P, dt, frame)
+    local r = st.rootMotion
+    if r then
+        r.frames, r.time = r.frames + 1, r.time + dt
+        return
+    end
+    if st.lastStepFrame ~= frame - 1 then
+        return -- (the mod hadn't been moving the character)
+    end
+    local name = "unknown"
+    local ok, montage = ue.call(pawn, "GetCurrentMontage")
+    if ok and ue.valid(montage) then
+        name = ue.name(montage) or name
+    elseif ok then
+        name = "no montage"
+    end
+    count("rootMotions")
+    st.rootMotion = { montage = name, before = st.lastSpeed, frames = 1, time = dt, s = P.unitScale }
+end
+
+-- The root motion's line, within its budget: after is the horizontal speed (cm/s) as the mod
+-- has the movement again, nil if it gave the movement back first.
+local function rootMotionLine(after)
+    local r = st.rootMotion
+    st.rootMotion = nil
+    if not r then
+        return
+    end
+    st.rootLines = st.rootLines + 1
+    if st.rootLines > MAX_ROOT_LINES then
+        return
+    end
+    local s = r.s
+    log.info("Root motion: the game moved the character itself, playing %s, for %d frames (%.2f s): %.0f u/s "
+        .. "before it, %s%s", r.montage, r.frames, r.time, (r.before or 0) / s,
+        after and string.format("%.0f as the mod had the movement again", after / s)
+            or "and the mod gave the movement back before it ended",
+        st.rootLines == MAX_ROOT_LINES and " (not logged again)" or "")
+end
+
 -- What a duck tap's flight keeps, for its line: the speed before its ground updates (at the
 -- landing, or at its press if it came later: before), the speed at the lift, the ground
 -- updates, the frames, time and updates in the air, and the keys.
@@ -1772,6 +1902,9 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt, owned)
 
     local velocity = cmc.Velocity
     local rx, ry, rz = velocity.X, velocity.Y, velocity.Z
+    if st.rootMotion then
+        rootMotionLine(horizontal(rx, ry)) -- the game's animation is over: the speed it left
+    end
     local okAt, at = ue.call(pawn, "K2_GetActorLocation")
     at = okAt and type(at) == "table" and at or nil
 
@@ -1810,10 +1943,13 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt, owned)
             st.airBaseX, st.airBaseY = w.baseX, w.baseY
         end
     end
-    local vx, vy = checkCut(cmc, cfg, P, rx, ry, rz, mode, landed, at)
+    local vx, vy, cut = checkCut(cmc, cfg, P, rx, ry, rz, mode, landed, at)
     st.limiterWoke = false
     -- The frame of ALS's braking a crouch or a stand-up on the ground brought back, given back.
     vx, vy = hull.brakeBack(st.written, vx, vy)
+    if st.written and not cut then
+        speedLoss(P, st.written, horizontal(vx, vy), at, mode, d)
+    end
     local vz = rz
     if not onGround and st.lastMode and st.lastMode ~= FALLING and not st.slide
         and rz <= GAME_JUMP_SHARE * P.jumpSpeed then
@@ -2290,6 +2426,20 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt, owned)
     -- camera, ahead of a crouch Unreal makes keeping the feet (see movement.eyeInfo).
     st.eye = { offset = duck.eyeOffset(d, s, crouched, false), crouched = crouched, standHalf = hull.standHalf(),
         aheadOffset = hull.aheadBase() and duck.eyeOffset(d, s, crouched, true) or nil }
+    -- For the view's smoothing of rises on the ground, after Unreal's movement (camera.lateEye):
+    -- Half-Life's player on the ground after the frame's updates, its view height against the
+    -- standing one and its origin's drop below the capsule's middle (cm), the hull difference
+    -- Unreal's crouch moves the middle by, where the middle was at this hook (hookZ: where the
+    -- smoothing starts from after a frame without it), and stillZ, the same, if Unreal can't
+    -- have moved the character (no speed written, no platform rising or sinking).
+    if hlGround and not leaving and not st.slide then
+        st.eye.ground, st.eye.view, st.eye.drop = true, (d.view - duck.VIEW_STAND) * s, d.drop
+        st.eye.delta = hull.delta() or duck.SHIFT * s
+        st.eye.hookX, st.eye.hookY, st.eye.hookZ = at and at.X, at and at.Y, at and at.Z
+        if at and horizontal(wx, wy) < 1 and math.abs(baseZ or 0) < 1 then
+            st.eye.stillZ = at.Z
+        end
+    end
     st.eyeFrame = frame
 
     -- What the game should hand back next frame, once its braking took the extra,
@@ -2324,6 +2474,9 @@ end
 --- with no Half-Life update. P: the movement's numbers (P.gravity, P.unitScale); dt: the
 --- frame's length.
 function movement.keepHull(pawn, cmc, P, dt, frame)
+    if st.active then
+        noteRootMotion(pawn, P, dt, frame)
+    end
     local d = st.duck
     if not st.active or not d then
         return
@@ -2337,6 +2490,7 @@ function movement.keepHull(pawn, cmc, P, dt, frame)
         st.eye.crouched = crouched
         st.eye.offset = duck.eyeOffset(d, P.unitScale, crouched, false)
         st.eye.aheadOffset = nil
+        st.eye.ground, st.eye.stillZ = nil, nil -- (the game moves the character: no smoothing)
         st.eyeFrame = frame
     end
 end
@@ -2411,6 +2565,7 @@ function movement.release()
     overrides:restore()
     putCurveBack()
     resumeLimiter()
+    rootMotionLine(nil) -- (an animation of the game's still playing: the mod gives the movement back first)
     hull.release()
     st.active = false
     st.cmc = nil
@@ -2436,6 +2591,7 @@ function movement.forget()
     st.curveName = nil
     hull.forget()
     st.active = false
+    st.rootMotion = nil
     st.cmc = nil
     st.cmcName = nil
     st.written = nil
@@ -2452,7 +2608,7 @@ end
 --- part it wants in the log.
 function movement.logAgain()
     st.hopLines, st.slideLines, st.landingLines, st.keptLines = 0, 0, 0, 0
-    st.tapLines, st.duckLines = 0, 0
+    st.tapLines, st.duckLines, st.lossLines, st.rootLines = 0, 0, 0, 0
     st.noteLines = {}
     hull.logAgain()
 end
@@ -2484,6 +2640,12 @@ function movement.duckStatus()
     }
 end
 
+--- The game's own value of a property the movement changed (the one put back at the release),
+--- or nil if it hasn't changed it: for the report.
+function movement.gameValue(obj, name)
+    return overrides:saved(obj, name)
+end
+
 --- What the movement side is doing, for the diagnostics report.
 function movement.status()
     local limiter = "not looked for"
@@ -2511,6 +2673,9 @@ function movement.status()
         counts = st.counts,
         hops = st.hops,
         hopLinesLeft = math.max(0, MAX_HOP_LINES - st.hopLines),
+        lossLinesLeft = math.max(0, MAX_LOSS_LINES - st.lossLines),
+        rootLinesLeft = math.max(0, MAX_ROOT_LINES - st.rootLines),
+        rootMotion = st.rootMotion and st.rootMotion.montage,
     }
 end
 

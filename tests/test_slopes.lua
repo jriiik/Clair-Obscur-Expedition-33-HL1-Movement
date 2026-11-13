@@ -3560,8 +3560,9 @@ t.test("the report shows the floor, the floor settings, the slopes, the fall det
         "  slopes (SlopeLandings=true, SlopeBoosts=true): landings on one 0, slides up one 0, flights off one 0, "
             .. "the game's jumps held back while sliding 0",
         "  BP_FallDetectorComponent: EnableKillDetection=true, KillDistance=3000, KillTime=4",
-        "  ALS on landing: bRagdollOnLand=false, RagdollOnLandVelocity=1000, bBreakfallOnLand=true, "
-            .. "BreakfallOnLandVelocity=700" }) do
+        -- (The mod writes bBreakfallOnLand false while it moves the character: LandingRoll.)
+        "  ALS on landing: bRagdollOnLand=false, RagdollOnLandVelocity=1000, bBreakfallOnLand=false, "
+            .. "BreakfallOnLandVelocity=700; LandingRoll=false, the game's own bBreakfallOnLand: true" }) do
         t.contains(g.log, text)
     end
     -- In the air the floor is cleared, and without these parts the report goes on.

@@ -204,6 +204,12 @@ function diagnostics.report(env)
         cameraStatus.method == "engine" and (" (style set through " .. cameraStatus.styleRoute .. ")") or "",
         cameraStatus.hiddenParts, cameraStatus.animatedParts, cameraStatus.partsMoved,
         show(cameraStatus.lastDistance), waitingFor and (", waiting because: " .. waitingFor) or "")
+    -- Half-Life's smoothing of the view's rises on the ground, after Unreal's movement.
+    local smooth = camera.smoothStatus(cfg)
+    line("  view smoothing (ViewSmoothing=%s): %s; ran on %d frames on the ground, the view behind a rise on %d "
+        .. "(at most %.1f units, %.1f now), eye writes after Unreal's movement %d%s", tostring(cfg.ViewSmoothing),
+        smooth.hook and ("from " .. smooth.hook) or "no hook", smooth.runs, smooth.lagged, smooth.most, smooth.lag,
+        smooth.writes, smooth.missed > 0 and string.format(", %d frames in a row without it", smooth.missed) or "")
     if cameraStatus.moved then
         line("  game camera at the eyes: %s, put back on its arm by the game %d times", cameraStatus.moved,
             cameraStatus.reattached)
@@ -236,6 +242,9 @@ function diagnostics.report(env)
         .. "%d, the game's input reaching Unreal %d, velocity changed at a jump %d, jumps that landed again within "
         .. "their own frame %d", counts.cuts, counts.restores, counts.rewrites, counts.wakes, counts.leaks,
         counts.jumpChanges, counts.groundedJumps)
+    line("  sudden speed losses %d (the next %d get a line), animations the game moved the character with while the "
+        .. "mod had it %d (the next %d get a line)%s", counts.speedLosses, moveStatus.lossLinesLeft, counts.rootMotions,
+        moveStatus.rootLinesLeft, moveStatus.rootMotion and (", playing " .. moveStatus.rootMotion .. " now") or "")
     -- The landings on slopes by kind: those a Half-Life update ran into, with what they
     -- gained and lost in all, apart (hopping down a hill and up it again cancels out);
     -- those Half-Life's ground check set down first, which keep their speed; and those
@@ -667,8 +676,10 @@ function diagnostics.report(env)
             local fallDetector = ue.object(pawn, "BP_FallDetectorComponent")
             line("  BP_FallDetectorComponent: %s", fallDetector and values(fallDetector, { "EnableKillDetection",
                 "KillDistance", "KillTime" }) or "not found")
-            line("  ALS on landing: %s", values(pawn, { "bRagdollOnLand", "RagdollOnLandVelocity", "bBreakfallOnLand",
-                "BreakfallOnLandVelocity" }))
+            local breakfall = movement.gameValue(pawn, "bBreakfallOnLand")
+            line("  ALS on landing: %s; LandingRoll=%s, the game's own bBreakfallOnLand: %s", values(pawn, {
+                "bRagdollOnLand", "RagdollOnLandVelocity", "bBreakfallOnLand", "BreakfallOnLandVelocity" }),
+                tostring(cfg.LandingRoll), breakfall == nil and "not changed by the mod" or show(breakfall))
             -- ALS's crouching settings, which it hands the movement component at each stance
             -- change: a movement curve there brakes the character for a frame (Q7).
             local data = ue.get(pawn, "MovementData")

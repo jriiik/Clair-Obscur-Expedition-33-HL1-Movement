@@ -36,6 +36,8 @@ return {
     PitchLimit = 89,        -- how far up and down you can look, in degrees
     BodyFollowsView = true, -- turn the character to face where you look
     BodyFollowsHop = true,  -- in the air, turn the character towards where it is going (seen in third person)
+    ViewSmoothing = true,   -- as in Half-Life: on the ground the view follows a rise (standing up from a duck,
+                            -- a stair, a slope) at 150 units a second, never more than 18 behind; false: at once
 
     -- Movement. These are Half-Life 1's default values.
     Movement = true,        -- false: first person with the game's own movement
@@ -84,6 +86,8 @@ return {
                             -- u/s on 20 degrees, 855 on 30, 585 on 40; never at a run, and never on 10 degrees;
                             -- at PhysicsRate 100 from 540 on 20 degrees), you leave the ground and go on down it
                             -- in long low leaps, as in Half-Life; false: neither
+    LandingRoll = false,    -- true: keep the game's roll on landing with a movement key held (its breakfall),
+                            -- which takes the movement from the mod and most of your speed; Half-Life has none
 
     -- Ducking, as in Half-Life: ducked, you move at a third of the speed and fit under low things.
     -- On the ground the duck takes 0.4 s (the view sinks, the speed stays), in the air it is at once
