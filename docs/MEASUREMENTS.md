@@ -5,16 +5,24 @@ The figures that the rules in `CLAUDE.md` rest on, by the sections of that file.
 descriptions; the probes and the references stayed in the reviews' scratch folders and are not in the repository.
 Nothing here was measured in the game itself. Each part says what it was measured on:
 
+- **0.4.0**: the merged 0.4.0 tree (ducking and the keys wired in, `PhysicsRate` 250 by default);
+- **0.4.0 rate**: 0.3.1 with `PhysicsRate` 250 as its default and nothing of ducking, measured to move the docs'
+  figures to the new default (ducking changes none of them but the run-in, see "How fast");
 - **0.3.1**: the merged 0.3.1 tree, measured in the final review of 0.3.1 (November 2026);
 - **0.3.1 candidate**: the first 0.3.1 candidate, before the final review's fixes; where the final review changed
   nothing that the figure depends on, it says so;
 - **0.3 review**: during the review of 0.3.0.
 
-Speeds are in Half-Life units per second (u/s), `PhysicsRate` 100 and the default settings unless a line says
-otherwise. "The reference" is the final review's model of Half-Life's updates (with Half-Life's ground move, slide
-move and edge friction), started from the same state as the mod.
+Speeds are in Half-Life units per second (u/s), with the default settings of the version a part names: `PhysicsRate`
+250 for 0.4.0 and 0.4.0 rate, 100 for 0.3.1 and before, unless a line says otherwise. "The reference" is the final
+review's model of Half-Life's updates (with Half-Life's ground move, slide move and edge friction), started from the
+same state as the mod.
 
 ## Movement
+
+**One update a frame against the default** (0.4.0 rate; `PhysicsRate` 0 against 250, D held turning 120°/s, the gain
+a hop): −46 % at 30 fps, −30 % at 45, −22 % at 60, −15 % at 80, −11 % at 100, −5 % at 144, −2 % at 200, 0 at 250
+(against 100: −39, −22, −12, −5, 0, +6, +10, +12 %).
 
 **Each update gets the view of its own time** (0.3.1, against the 0.3.1 candidate). With a frame's turn shared out
 evenly among its updates, as in the candidate, a steady turn reached the updates unevenly: 1.25, 1.25, 1.25, 0.62,
@@ -44,18 +52,44 @@ a second from 510 u/s, 27 from 480, 20 from 460; on 40°, 20 a second at running
 alone, on 30° at 80 fps from 600 to 1000 u/s, 0 to 4 of the 10 to 24 jumps of the first second land again in their
 frame, and the speed is 370 to 450 u/s after it (0.3.1 candidate).
 
-**Line counts.** Without F7, five minutes of strafing hops leave 221 lines, 145 of them the automatic report, at 60
-and at 30 fps (0.3.1). A play of `docs/TESTING.md` in the fake game, as the 0.3 review proposed the text (a typical
-owner at 80 fps: 24 minutes, 326 hops, 16 presses of F7): every part's lines were in the log but 27 hop lines on the
-way between step 7's activities and to the platform: 299 of 326 hop lines, 84 of 84 landing lines, 28 of 28 for
-slides and flights, 59 of 59 status lines, none of which said nothing, 80 of 80 state lines, 1898 log lines in all;
-an owner who does twice as much of everything loses the hops after the 30th of a part. In that play a hill hopped
-down had 12 landings that all kept their speed, and hopped up 13 that all ran into it (from standing with W and
-Space pressed together, at the air cap's 30 u/s, every landing going up a 10° hill ends 2.0 units above it and loses
-15 u/s). The text has more parts since, each with its own F7, and wasn't played again as a whole; the reordered last
-part of step 9 keeps every hop line at 60, 80 and 144 fps with 3 to 13 landings each way on the hill (0.3.1).
+The same at `PhysicsRate` 250 (0.4.0 rate): the jump's own frame doesn't depend on the rate.
+
+**Line counts.** Without F7, five minutes of strafing hops leave 244 lines, 163 of them the automatic report, at 60 and
+at 30 fps, 30 hop lines and 30 status lines; five minutes of +ducktap strafing the same with 30 tap lines (0.4.0; 0.3.1:
+221 and 145, the same at 250 in 0.4.0 rate). A play of `docs/TESTING.md` in the fake game, as the 0.3 review proposed
+the text (a typical owner at 80 fps: 24 minutes, 326 hops, 16 presses of F7): every part's lines were in the log but 27
+hop lines on the way between step 7's activities and to the platform: 299 of 326 hop lines, 84 of 84 landing lines, 28
+of 28 for slides and flights, 59 of 59 status lines, none of which said nothing, 80 of 80 state lines, 1898 log lines in
+all; an owner who does twice as much of everything loses the hops after the 30th of a part. In that play a hill hopped
+down had 12 landings that all kept their speed, and hopped up 13 that all ran into it (from standing with W and Space
+pressed together, at the air cap's 30 u/s, every landing going up a 10° hill ends 2.0 units above it and loses 15 u/s).
+The text has more parts since, each with its own F7, and wasn't played again as a whole; the reordered last part of step
+9 keeps every hop line at 60, 80 and 144 fps with 3 to 13 landings each way on the hill (0.3.1).
 
 ## Facing
+
+**At `PhysicsRate` 250** (0.4.0 rate, D held, the view turning 180°/s for 8 s, up to 970 u/s; the 0.3.1 figures at 100
+in brackets, which the table below has too):
+
+| Frame rate | Target's largest step | Body off the heading, at most | Body's turn against the view's | ... against the heading's |
+| --- | --- | --- | --- | --- |
+| 60 fps | 3.60° (3.60) | 2.67 (2.91) | 0.10 (0.12) | 0.56 (1.22) |
+| 72 | 2.88 (3.60) | 2.37 (2.88) | 0.08 (0.12) | 0.40 (1.07) |
+| 80 | 2.88 (3.60) | 2.11 (2.46) | 0.07 (0.10) | 0.60 (1.30) |
+| 100 | 2.16 (1.80) | 1.67 (1.58) | 0.05 (0.04) | 0.40 (0.05) |
+| 120 | 2.16 (1.80) | 1.62 (1.96) | 0.05 (0.06) | 0.64 (1.50) |
+| 144 | 1.44 (1.80) | 1.48 (1.98) | 0.04 (0.05) | 0.55 (1.26) |
+| 240 | 1.44 (1.80) | 1.05 (1.47) | 0.02 (0.03) | 0.68 (1.04) |
+| 300 (frames without an update) | 0.72 (1.80) | 0.88 (1.19) | 0.01 (0.02) | 0.60 (1.19) |
+| 80 fps, 250°/s | 4.13 (5.10) | 4.85 (5.04) | 0.17 (0.16) | 0.92 (1.85) |
+
+The turn limit per update at 250 is 733° ÷ the speed in u/s (1830 at 100): the view's 180°/s is 0.72° an update, so
+the heading follows the view update by update up to about 1020 u/s, as at 100. The hop lines' N at 250 (D held, 20
+lines each): at 80 fps 150°/s −1 to 0, 200 −1 to 0, 240 −2 to 0, 300 −13 to −10, 360 −25 to −20; at 60 fps −1 to 0,
+−1 to 0, −1 to 0, −12 to −9, −23 to −19; at 144 fps −1 to 0, −1 to 0, −3 to 0, −15 to −12, −27 to −22; A and D every
+hop up to 1 at 150 to 240°/s, 8 to 9 at 300, 16 to 18 at 360 (144 fps: 2, 10 to 11, 18 to 21). The A and D test of
+`tests/test_facing.lua`: worst 4.1 to 5.5° by the frame phase (at 100 5.2 to 6.3), about 1.0° on average in the 0.2 s
+after a change. The 125 Hz mouse case wasn't measured at 250. The rest of this section is 0.3.1's, at 100:
 
 **The body against the view and the heading** (0.3.1, D held, the view turning 180°/s for 8 s, up to 838 u/s):
 
@@ -98,6 +132,48 @@ stop (see `CLAUDE.md`), the body stayed about 30° past where it headed after a 
 view turning 180°/s at 80 fps (0.3.1 candidate: −0.1° with it; 31° with one paused frame right after the wall).
 
 ## Slopes
+
+### At `PhysicsRate` 250
+
+0.4.0 rate unless it says 0.4.0. An update lasts 4 ms, so a hop closes in on the floor by less than the ground check's
+2 units in one update far more often than at 100: a plain hop along an even slope closes in at 268 u/s plus (going
+down) or less (going up) the speed along the fall line times the slope's tangent, so at 250 it can run into the slope
+only going down, with that tangent-speed over about 232 u/s (at 100 over −68, always but up a rise; at 144 over 20).
+
+- Air strafing for 10 s from 320 u/s (A and D at 85 or 150°/s, 6 starts): no landing ran into an even slope of 2, 5,
+  10 or 20°, up or down (at 100: 67 % and 20 % of the landings down 10°, 56 % down 5°, 31 % down 2°, 76 % down 20°,
+  31 % up 5°, 24 % up 2°, 0 up 10°). Plain hops at 320 to 800 u/s on 2 to 20°: none either. A landing runs into an
+  even slope going down it from 1314 u/s on 10°, 865 on 15°, 637 on 20°, 497 on 25° and 401 on 30° (along the fall
+  line); then the clip is as large as at 100 (down 10° from 1400: +88, 1 landing of 3).
+- Hopping on the spot on 10°: 166 updates a hop, the last 1.81 units above where it rests (1.84 above the plane; the
+  hop lines say "set down from 1.8 u up"), 12 hops in 8 s at 60, 80 and 144 fps, nothing moves (at 100: 67 updates,
+  0.22 units; at 144: 96, 1.11). With W and Space on an even slope the speed stays from the first landing.
+- Hops at 320 u/s from level ground onto 10°: every landing set down, from 1.1 to 1.9 units (at 100, two of seven ran
+  into it, −44 and −49 u/s).
+- Rough but level ground (a profile of flat facets 0.5 to 2 m long along the way, tilts drawn with the given root mean
+  square, Space only, 40 hops, 12 profiles; not the 0.3 review's triangles and waves): no landing of 360 ran into a
+  facet at 320 and 600 u/s on 4, 7 or 10°; after 40 hops 320 u/s stays 320 on all three, 600 stays 600 on 4 and 7°
+  and is 565 (473 to 600) on 10°; from 1000 on 7°: 926 (800 to 1000). The same probe at 100: 288 (155 to 349), 237
+  (138 to 305) and 144 (0 to 389) at 320; 543, 372 and 226 at 600; 613 from 1000 on 7°; 16 to 23 % of the landings
+  ran in.
+- Over the tests' rounded top: flies off from 925 u/s at 60 fps, 950 at 80, 875 at 144 (at 100: 950, 950, 900); run
+  into at 1000 u/s at 80 fps "flew off the slope at 898 u/s, rising 176 u/s: the slide ended 6.1 units above it",
+  tops out 13.2 units up, lands 0.40 s later.
+- The 8 units: bumps of ±4° at 800 u/s: no launch at 60, 80, 144 and 240 fps (settles 190 to 215); with 7 units a
+  launch at 240 fps, and from 840 u/s at 144; with 6 from 80 fps up; faster, launches from 960 u/s at 60 fps, 920 at
+  80, 880 at 144, 840 at 240 (as at 100). A slide that ends 2.1 to 3.6 units above a bump flies 0.00 to 0.07 s (at
+  100: 0.01 to 0.05), and at 60 fps such a flight can begin and land within one frame.
+- A duck tap's landing on a slope (0.4.0; the tap lifted 18 units from its rest, falling onto a plane rising under it,
+  against a model of Half-Life's updates): 95 of 95 first landings the same kind, with the same heights to 0.1 unit,
+  on 20° and 30°, 150 to 420 u/s, at 100 and 250 updates a second and with `PhysicsRate` 0 at 80 fps. At 100 some run
+  into the slope (30° from 255 u/s: 245 to 151 u/s); at 250 none of these.
+- The owner's ducked hop on the spot on his 17.7° ramp (0.4.0, Ctrl pressed 3 frames after the jump; Valve's map
+  compiler puts the ducked hull's floor 17 units below the standing one's there, `duck.restGap`): at `PhysicsRate`
+  100 and 100 fps it runs into the ramp and leaves at 90 u/s after 0.73 s in the air, as in the owner's log (90.47);
+  ducked throughout, or standing, it is set down from 0.3 units after 0.67 s. At 250 and 80 fps all three are set
+  down (from 1.6, 1.8 and 1.8 units).
+
+The rest of "Slopes" is 0.3.1's, at `PhysicsRate` 100.
 
 ### The landing rule against Half-Life
 
@@ -259,6 +335,41 @@ it is 113 (106 at 144 fps).
 
 ### How fast
 
+**The table at 250** (0.4.0 rate, the slides' columns; 0.4.0 for the run-in). In steps of 5 u/s, with 200 places of
+the slope's foot along the hop at 80 fps: every approach slides from 1270, 840, 615 (on 20°, all 200 from 485 to 545
+too, then 1 to 2 of 200 miss from 550 to 590) and 595 on 25°, and on 30° all from 390 to 440, 1 to 5 of 200 miss from
+445 to 570, all from 575. Some slide from 1270, 835 (1 of 200), 615, 480 (1 of 200) and 390. On 10° and 15° nothing
+slides below the speed from which all do: no landing there can run into the slope, and the hop after a set-down
+landing slides from about (180 + 268 − g/rate) / (2 tan θ) (1262, 831, 611, 477 and 385 on paper). 20° is 675, not
+625: from 637 u/s a landing that falls at the full 268 u/s can run into the slope (in about 1 % of the updates' phases
+at 650), and below 663 its clip leaves too little rise and speed for a slide. The log's slide ends read 1029 to 1030,
+677 to 678, 498 to 499, 388 to 395 and 313 to 320. At the table's "every hop" speeds, of 200 approaches, the slides
+that began at the landing: 0, 0, 0, 2 and 4 on 10° to 30°; in the hop after a set-down landing: 200, 200, 200, 6 and
+10; from the held jump's own update: 0, 0, 0, 192 and 186 (at 950 u/s on 20°: 9, 11 and 180). The speed along the
+slope's rise at the "every hop" speeds: 225, 228, 246, 280 and 332 u/s. Drops as a slide begins: 5 to 24 u/s on 20°,
+7 to 10 on 10° and 15°, 5 to 35 for the jump on 25° and 30°; the rare one at the landing 178 (20°), 204 to 207 (25°),
+226 to 257 (30°).
+
+On paper at 250: a slide needs a rise over 181.6 u/s at the clip (`staysUp`'s half update is 1.6 u/s, 4 at 100), and a
+slide ends between 181.6 and that less one update's loss, g cos² θ / 250 (2.8 u/s on 20°; 7 at 100): slide ends 1029.9,
+677.7, 498.9, 389.4 and 314.5. **Running into it** (0.4.0): the run-in is decided per update after the update's ground
+move, so its threshold is (180 + g/(2 · rate)) / (sin θ cos θ (1 − `Friction`/rate)): 1079, 738, 574, 482 and 426 u/s on
+paper, 1080, 739, 575, 482 and 427 in the fake game (0.3.1's hook-time rule, before the update's friction: 1062, 727,
+566, 475 and 420 at 250).
+
+**Slides at 250** (0.4.0 rate). On a long 20° slope from 700 u/s: 0.69 to 0.76 s and 10.0 to 11.3 m (at 100: 0.11 to
+0.74 s, 1.5 to 11.0 m); from 800: 0.47 to 1.14 s, 6.6 to 18.2 m. On 30°: from 600 0.07 to 0.72 s, 0.6 to 7.9 m; from
+800 0.54 to 1.16 s, 5.4 to 14.8 m. Off a 4 m ramp of 20° at 700 u/s, 30 of 50 approaches fly, rising 234 to 252 u/s,
+0.59 to 0.62 s in the air (at 100: 25 of 50, 180 to 252, 0.45 to 0.62 s); 30° at 600: 46 of 50, rising 262 to 299,
+0.65 to 0.75 s. The shortcut (800 u/s): a 6 m ramp of 20° run into slides and flies off at 708 u/s rising 258; hopped
+onto, the jump slides ("rising 267 u/s: sliding up it at 792 u/s, rising 288") and flies off at 757 rising 276; on 30°
+run into: off at 635 rising 367; hopped onto: the jump slides at 715 rising 413, off at 635 rising 367. A long 20°
+slope with W and Space held: one slide, then hops at 498 u/s that keep it. W held, no Space, 6 s: 11 slides on 15°,
+14 on 20°, 14 on 30°. With both slope settings off the jump lands again in its own frame on 30° from 580 u/s and on
+40° from 400 at 80 fps (545 and 375 at 60, 675 and 465 at 144), as at 100.
+
+The rest of "How fast" is 0.3.1's, at 100:
+
 **The table in `docs/TESTING.md`** (0.3.1). At the table's "every hop" speeds (1275, 825, 675, 625 and 600 u/s on 10°,
 15°, 20°, 25° and 30°), with the slope's foot at 200 places along the hop at 80 fps, every approach slides: 72, 69,
 75, 93 and 105 of 200 at the landing, the rest in the hop after it. In steps of 5 u/s (measured on the final review's
@@ -296,6 +407,18 @@ their speed. With W held and no Space a new slide begins each time one ends: 10 
 15°. Running with W down a hill of 14° or more leaps down it (12° or less: no).
 
 ### Running down a slope
+
+**At 250** (0.4.0 rate; the speed set on the slope, 80 fps): leaves the ground from 1355 u/s on 20°, 1840 on 15°, 1055
+on 25°, 855 on 30°, 705 on 35°, 585 on 40° and 510 on 44° (on paper, (2 − 1/32) × 250 / tan θ: 1352, 1837, 1055, 852,
+703, 587, 510); never on 10° (2791 u/s on paper, over `MaxVelocity`), and never at a run (it needs over 496 u/s on
+Unreal's steepest walkable 44.77°; a plain run of 320 u/s would leave slopes over 57°). The same probe at 100: 1120,
+735, 545, 425, 355, 295, 245 and 215. Each touch costs one update of friction, 1.6 % (4 % at 100): down 20° from 1500
+u/s 1500, 1476, 1452; 30° from 900: 900, 886, 871; 35° from 800: 800, 787, 775; 40° from 700: 700, 689, 678 (no
+landing ran into the slope in these; at 100 the same 20° run gained: 1500, 1610, 1727). In the air 99 % of the time.
+The shortcut's 800 u/s leaps from 32° (not on 30°; at 100 from 14°). The log's line from 800 on 35°: "the floor falls
+2.2 units in one Half-Life update"; 30° from 900: 2.1; 20° from 1500: 2.2.
+
+The rest of this part is 0.3.1's, at 100:
 
 0.3.1, against the reference from the same speed. 20° from 700 u/s without keys: the leaps take off at 700, 672, 645,
 619 and 595 u/s at 30, 60, 80, 100 and 144 fps, the reference at 700, 672, 645, 619, 595 and 571 (its sixth falls just
@@ -381,6 +504,37 @@ for both). A hop at 60 fps with one frame of 0.25 s reads "48 fps ... 1.19 s in 
 
 ## Strafe gain
 
+**At 250** (0.4.0 rate, the mod in the fake game at 80 fps, level ground, the strafing test's hops; the gain per
+strafing hop with the default 250, and what the lower rates and the higher air caps change):
+
+| Turn | Default 250 | `PhysicsRate` 100 | 144 | 200 | `AirSpeedCap` 35 | 40 |
+| --- | --- | --- | --- | --- | --- | --- |
+| A and D, 85°/s | +26.7 u/s | −7.5 % | −3.9 % | −2.2 % | +15.6 % | +30.7 % |
+| A and D, 120°/s | +36.1 | −11.4 % | −5.9 % | −3.2 % | +15.3 % | +29.7 % |
+| A and D, 150°/s | +43.0 | −14.7 % | −7.6 % | −4.2 % | +14.3 % | +26.9 % |
+| A and D, 165°/s (the test's) | +45.8 | −16.2 % | −8.4 % | −4.7 % | +13.0 % | +23.1 % |
+| A and D, 180°/s | +47.8 | −17.2 % | −8.9 % | −5.3 % | +10.1 % | +15.3 % |
+| D held, 30°/s | +10.6 | −2.0 % | −1.1 % | −0.4 % | +17.0 % | +33.9 % |
+| D held, 60°/s | +20.6 | −4.6 % | −2.3 % | −0.8 % | +17.1 % | +34.1 % |
+| D held, 120°/s | +39.3 | −11.4 % | −5.8 % | −2.0 % | +17.4 % | +34.9 % |
+
+The test's strafe over twelve frame phases: 100 loses 14.7 to 16.2 % (15.5 on average), 144 7.9 to 9.0 (8.5), 200 1.4
+to 4.7 (3.2); the docs say 16, 8 and 3. At 60 fps 100 and 144 within 1.6 points of these, but 200 with A and D −0.7 to
+−1.4 %. 100 with `AirSpeedCap` 35 gains about what 250 does (−2.5 to +7.7 % with A and D). At 250 an update's
+acceleration (10 × 320 / 250 = 12.8 u/s) is under the cap of 30, so the best wish angle is a little under 90° (86.9° at
+320 u/s, 88.0 at 500, 88.8 at 800) and the gain 604 in v² an update (151,000 a second, against 90,000 at 100). Level
+ground, A and D at 85°/s for 10 s from 320 at 80 fps: 711 to 713 u/s at 250, 679 to 685 at 100. The owner's 0.2.6
+turns and the human-spread rows below weren't measured at 250.
+
+**Duck taps** (0.4.0, 80 fps, from a run at 320 u/s, Shift held, W let go, A and D swinging every 0.335 s for 10 s):
+at 120°/s 537 u/s with +ducktap against 849 with hops; at 160°/s 635 against 960. At 250 the same within about 30 u/s
+at 30, 60, 144 and 240 fps and with frames ±10 %. At `PhysicsRate` 100: 316 and 369 u/s with +ducktap (a tap costs
+4 % there, 1.6 % at 250), 784 and 854 with hops. The owner's own +ducktap holds from his Adrenaline Gamer demo,
+replayed at 80 fps and 250 from each hold's start: 554.8 u/s over the last 2 s of the longest (the spec's model of the
+same hands: 562), and the next three end at 465.1, 508.2 and 509.2 (470, 505, 506).
+
+The rest of this section is 0.3.1's, at 100:
+
 **What the settings add** (0.3.1, the mod in the fake game at 80 fps, level ground, a run and three straight hops, then
 11 strafing hops with A and D, or 20 with D held; gain per strafing hop, and each setting against the defaults):
 
@@ -416,6 +570,53 @@ runs at worse than the others (at 100 fps `PhysicsRate` 144 then reads +17 to +2
 Life's 2005 version, whose updates at 144 fps are 6 ms, gains 19, 30 and 35 % at 144 there; today's Steam version
 (updates of 7 and 6 ms) within 0.3 u/s a hop of `PhysicsRate` 144.
 
+## Ducking
+
+0.4.0, in the fake game, 80 fps, `PhysicsRate` 250, unless a line says otherwise.
+
+- **The duck on the ground**: 0.40 s (100 updates) in the transition; the eye from 173 to 88 cm above the floor (115.5
+  at 0.25 s); the ducked walk 106.56 u/s (the speedometer: 107); Ctrl held from a run at 320 u/s: 0.68 to 0.73 s to
+  the ducked walk at 30 to 240 fps (the 0.40 s, then friction), and the same at 100. Let go: standing on the next
+  frame, the eye at 173 cm on the one after.
+- **Hops**: standing, the feet 112.5 cm (45.0 units) up and 0.66 s in the air; ducked from the frame after the jump
+  63.0 units and 0.72 s. A notch of the wheel down standing: the feet 37 to 38 cm (15 units) up.
+- **A duck tap** is 1 ground update and about 0.20 s in the air. Updates a cycle with Shift held standing (the press,
+  the lift, the flight to the landing): 54.2 at 60 fps, 53.1 at 80, 51.0 at 144, 52.1 at 240, 58.4 at 30, 51.4 at 80
+  with frames ±10 %; Half-Life's is 52. At `PhysicsRate` 100: 22.5 at 60 and 80 fps, 21.4 at 144 (Half-Life's 22).
+  4.2 to 4.8 taps a second. The owner's demo replayed (one update a frame, the command's lengths): every +ducktap hold
+  within 0.171 u/s of the demo's, tap landings within one frame of the demo's 180 of 180; at 80 fps and 250, one
+  ground update a tap and cycles of 53 ± 1 updates in 90 of 90.
+- **The wheel by hand** (the owner's wheel stretch from his demo, 21 taps, fed by the moves' signs): the mod keeps
+  more speed than Half-Life, +15.2 % at a steady 60 fps (a model of the two predicted +17.7), +7.8 % at a steady 80
+  (+7.7), and −4.1 % at 80 fps with frame times ±10 % (−2.5): at a steady rate that is a multiple of 5 fps a
+  tap's contact falls just after a hook, so its landing is seen nearly a frame late every time.
+- **Running into a ramp on a duck tap's press**: Shift held at 500 u/s onto 30°: "ran into a 30 degree slope at 492
+  u/s: sliding up it, rising 213 u/s ..., on a duck tap's press (no tap: Half-Life's slope boost)", the slide ending
+  at 314 u/s; against the model of Half-Life's updates at 250 (the mod at 250 fps), +ducktap onto 30° at 500 u/s and
+  20° at 600: the same speeds on both sides (492.0 then 459.9; 590.4 then 581.3).
+- **The acceptance replay** (the owner's Adrenaline Gamer demo and his Bunnymod XT log, read at run time, against
+  the specs' model): 13,430 of 13,430 rows the same velocity (within 0.0005 u/s; 19 rows use the tolerance), duck
+  state, view height and duck button; the duck buttons of 400,000 and 800,000 random updates the same, both rules;
+  jumps 237 (2022) and 137 (2020) differ, all where +ducktap is let go with jump held (Bunnymod XT's autojump against
+  OpenAG's, a choice), 0 elsewhere; 5,856 notches, 1,156 of them at a hook with no update, 0 lost; the log's 13,419
+  updates of 13,419.
+- **Cost** (game calls a frame, the cost tests' frames; 0.3.1 in brackets): W held at 60 fps 28.40 (25.33; the limit
+  30), reads 18.13 (15.90; limit 45); a ducked walk 27.33; standing still with the stick asked 30.40 (27.33; limit 31);
+  +ducktap strafing at 80 fps 28.91 (limit 30); third person in a dialogue that leaves the movement input on 20.13
+  (22.00). The mod's Lua time strafe hopping at 80 fps: 0.063 ms a frame at 250 against 0.058 at 100 (0.4.0 rate).
+
+## Keys
+
+0.4.0, in the fake game.
+
+- An old `config.lua` (0.3.1's): no warning; the report's `Settings not at their defaults: JumpKeys={ "SpaceBar",
+  "Gamepad_FaceButton_Bottom" }, PhysicsRate=100`; the duck keys from the defaults (taken: LeftControl,
+  MouseScrollDown, LeftShift, SpaceBar, Gamepad_FaceButton_Bottom). With `"MouseScrollDown"` added to its `JumpKeys`,
+  as its comment advised: one warning, `MouseScrollDown is in DuckKeys and JumpKeys: it does both`.
+- TESTING.md's ducking steps D1 to D13, played in order at 80 fps with the default `config.lua` and F7 at each step: no
+  warning and no error line in any step; F5 off: Ctrl toggles the fake game's walk, Shift its sprint; F5 on: 320 u/s,
+  the game's run kept; Shift held standing 14 taps in 3 s.
+
 ## Camera
 
 **`BodySounds`** (0.3.1 candidate, unless it says 0.3.1). A character that carries a mesh the game keeps hidden for good
@@ -432,7 +633,8 @@ every case tried (the candidate left it invisible when the skin was attached 70 
 was pressed twice 12 frames before it, and when the move came in the frame a battle starts). A skin of four parts
 taken off and put back twice: 3 log lines, and the report counts 8.
 
-**The report** is 145 lines long in the fake game (0.3.1).
+**The report** is 163 lines long in the fake game, standing or ducked (0.4.0; 145 in 0.3.1). In the game it is longer:
+E33's character has about 14 cameras and 4 skinned meshes against the fake's 3 and 2, so likely about 200.
 
 ## Speedometer
 
@@ -463,7 +665,22 @@ before it, 200 stays (not changed, see `CLAUDE.md`).
 
 ## Tests
 
-0.3.1.
+0.4.0.
+
+- The suite: 631 tests (622 before the final review's fixes), about 36 s by the clock on WSL's mount of the Windows disk (0.4.0 rate's 422: about 20 s).
+- The shipped `config.lua` with one value changed: `PhysicsRate = 100` fails 9 tests, `PhysicsRate = 144` 10,
+  `TakeKeys = false` 15, `DuckHull = false` 27; the first failure is always `test_settings`' check of the file.
+- The frame phase: all 631 pass with the 190 frames before each test made 191, 192, 193, 195, 200 or 215 (622 on the
+  candidate); the 615
+  before the report's 7 tests passed at every length from 187 to 215 and at 225, 250 and 300 (at 185 and 186 the
+  old "a mesh the game keeps invisible isn't started, ..." fails, as in 0.3.1).
+- The doc tests: the slope boosting table test and the strafing figures test (now "what config.lua, the README and
+  docs/TESTING.md say a lower PhysicsRate takes from air strafing") catch each of 37 wrong edits of the 0.4.0 docs,
+  one at a time (every "every hop" and "some hops" speed 25 u/s up and down, run-in speeds 1 u/s up and down,
+  0.3.1's rows and quotes, the strafing figures and words). On paper the table test now takes the run-in after the
+  update's friction: need / (sin θ cos θ (1 − `Friction` / rate)), within 1.5 u/s.
+
+0.3.1 (the rest of this part):
 
 - The suite: 422 tests, about 17 to 23 s by the clock on WSL's mount of the Windows disk (the 0.3.1 candidate's 392,
   which loaded the mod for every game: 54 s).

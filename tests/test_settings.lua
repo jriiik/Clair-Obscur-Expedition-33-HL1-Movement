@@ -53,15 +53,16 @@ t.test("defaults are copied, not shared", function()
 end)
 
 t.test("valid values are used", function()
+    -- (MouseScrollDown is a duck key by default: in JumpKeys too it would get a warning.)
     local cfg, warnings = settings.load({ MaxSpeed = 400, AutoHop = false, EyeHeight = 70, ToggleKey = "f9",
-        JumpInput = "Keys", JumpKeys = { "MouseScrollDown" } }, KEYS)
+        JumpInput = "Keys", JumpKeys = { "MouseScrollUp" } }, KEYS)
     t.eq(#warnings, 0)
     t.eq(cfg.MaxSpeed, 400)
     t.eq(cfg.AutoHop, false)
     t.eq(cfg.EyeHeight, 70)
     t.eq(cfg.ToggleKey, "F9", "key names are upper case")
     t.eq(cfg.JumpInput, "keys")
-    t.eq(cfg.JumpKeys[1], "MouseScrollDown")
+    t.eq(cfg.JumpKeys[1], "MouseScrollUp")
 end)
 
 t.test("a hotkey can be turned off", function()
@@ -169,7 +170,8 @@ t.test("changes lists the settings that differ from the defaults, or from other 
         texts[i] = change.name .. " = " .. change.value .. " (was " .. change.was .. ")"
     end
     t.eq(table.concat(texts, "; "), 'BodyFollowsHop = false (was true); CameraKey = false (was "F6"); '
-        .. 'JumpKeys = { "SpaceBar" } (was { "SpaceBar", "Gamepad_FaceButton_Bottom" }); PhysicsRate = 144 (was 100)')
+        .. 'JumpKeys = { "SpaceBar" } (was { "SpaceBar", "MouseScrollUp", "Gamepad_FaceButton_Bottom" }); '
+        .. 'PhysicsRate = 144 (was 250)')
     -- Against other settings: what a reload changed.
     local after = settings.load({ PhysicsRate = 144, JumpKeys = { "SpaceBar" }, CameraKey = false }, KEYS)
     changes = settings.changes(after, cfg)

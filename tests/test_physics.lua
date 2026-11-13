@@ -137,6 +137,37 @@ t.test("falling keeps vertical speed for the game's gravity", function()
     t.eq(vz, -100)
 end)
 
+-- Fails with: the stop left out; the stop only with a wish (inside its branch), or only
+-- without one; the stop before the ground acceleration; 1 cm/s instead of 1 u/s.
+t.test("Half-Life's walk move stops a player that friction and the ground acceleration leave slower than 1 u/s, "
+    .. "with no movement key too: 1.89 u/s ends at 0 at 250 updates a second", function()
+    local dt = 1 / 250 -- friction takes 1.6 u/s an update below StopSpeed
+    for _, v in ipairs({ { 1.89, 0 }, { 1.68, 0 }, { 1.3, 1.3 } }) do
+        local vx, vy, vz = physics.step(v[1], v[2], 0, true, 0, 0, 0, false, P, dt)
+        t.eq(vx, 0, "no key, from " .. v[1] .. ", " .. v[2])
+        t.eq(vy, 0)
+        t.eq(vz, 0)
+    end
+    t.near(physics.step(2.7, 0, 0, true, 0, 0, 0, false, P, dt), 1.1, 1e-12, "1 u/s or more is kept")
+    -- A key against the motion: friction leaves 0.4 of 2 u/s, a wish of 1 u/s takes 0.04 more.
+    local vx, vy = physics.step(2, 0, 0, true, -1, 0, 1, false, P, dt)
+    t.eq(vx, 0, "with a key, from 0.36 u/s")
+    t.eq(vy, 0)
+    -- A key along it: the stop comes after the ground acceleration (12.8 an update at 320).
+    t.near(physics.step(2, 0, 0, true, 1, 0, P.maxSpeed, false, P, dt), 13.2, 1e-9, "accelerated from what was left")
+    -- Not in the air, nor on a jump's update.
+    t.eq(physics.step(0.5, 0, -10, false, 0, 0, 0, false, P, dt), 0.5, "in the air")
+    local jx, _, jz, jumped = physics.step(0.5, 0, 0, true, 0, 0, 0, true, P, dt)
+    t.truthy(jumped)
+    t.eq(jx, 0.5, "the jump's update has no friction and no stop")
+    t.near(jz, P.jumpSpeed, 1e-9)
+    -- In centimetres, as the mod runs it (UnitScale 2.5): friction takes 4 cm/s an update.
+    local cm = settings.physics(settings.load({}))
+    t.eq(cm.unitScale, 2.5)
+    t.eq(physics.step(6.4, 0, 0, true, 0, 0, 0, false, cm, dt), 0, "2.4 cm/s is under 1 u/s")
+    t.near(physics.step(6.6, 0, 0, true, 0, 0, 0, false, cm, dt), 2.6, 1e-9, "2.6 cm/s is over it")
+end)
+
 t.test("bunny-hop cap is off by default and cuts speed when on", function()
     local vx = physics.capBhop(1000, 0, 0, 320, 0)
     t.eq(vx, 1000)

@@ -27,6 +27,13 @@
 --
 -- Both hide the character's body from the player's view and widen the pitch
 -- limits. Everything changed is put back when first person switches off.
+--
+-- The eye: the standing eye (EyeHeight, or 0.78 of the standing capsule's half
+-- height, read while it stands and kept for the character) plus what Half-Life's duck
+-- does to its eye, which the movement works out in its updates. So the eye is written
+-- after the movement step (camera.applyEye), and with the engine's view the
+-- character's CrouchedEyeHeight is the ducked eye, which Unreal makes the eye height
+-- when it crouches the character.
 
 local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
@@ -36,7 +43,12 @@ local Overrides = require("hl1movement.overrides")
 
 local camera = {}
 
-local EYE_FACTOR = 0.78 -- "auto" eye height, as a share of the capsule's half height
+local EYE_FACTOR = 0.78 -- "auto" eye height, as a share of the standing capsule's half height
+-- Units the ducked eye is below the standing one: Half-Life's view heights above its
+-- origin, 28 standing and 12 ducked (duck.VIEW_STAND and duck.VIEW_DUCK).
+local DUCKED_EYE_DROP = 28 - 12
+local EYE_MOVE = 0.5 -- cm the game's camera has to be off its height on the capsule to be moved
+local CROUCHED_EYE = "CrouchedEyeHeight"
 local REFRESH = 0.5 -- seconds between re-checks of the pitch limits, the body and the shakes
 local MAX_EYE_DISTANCE = 50 -- cm between the camera and the eyes that still counts as first person
 local GIVE_UP_TIME = 2 -- seconds of the camera not being at the eyes before trying something else
@@ -73,6 +85,18 @@ local BLEND_WAIT = 3
 local DRAW_WAIT = 5
 
 local overrides = Overrides.new()
+-- The character's CrouchedEyeHeight, set only while the engine's view runs and put back
+-- as soon as it stops, the rest of first person going on (see putCrouchedEyeBack).
+local crouchedOverrides = Overrides.new()
+-- The standing eye (see refreshStandingEye): cm above the middle of the standing
+-- capsule, read while it stands, and kept for that character (address and full name)
+-- across first person's releases (F6, a dialogue's wait, F5). EyeHeight with it: a
+-- change of the setting (F7) forgets it.
+local standing = { pawnAddr = nil, fullName = nil, eye = nil, setting = nil }
+-- Whether a caller writes the eye after the movement step, with camera.applyEye
+-- (main.lua from 0.4.0 on). Until one does, camera.apply writes it itself, as it did
+-- before, with nothing known of a duck.
+local eyeLate = false
 local hidden = {} -- address -> { obj, fullName, how, was, skinned, tick, refused }
 local waiting = {} -- address -> full name of parts seen once, hidden if still there next pass
 local notPrimitive = {} -- address -> true for attached components that can't be seen
@@ -112,6 +136,12 @@ local st = {
     blendWaited = nil, -- seconds (not paused) the camera manager has been seen blending to the character
     blendLast = nil, -- when that was last checked
     blendStuck = false, -- a blend didn't end in BLEND_WAIT seconds: not waited for again until it ends
+    refresh = false, -- this frame is one of first person's refreshes (the eye's writes check full names then)
+    eyePawn = nil, -- the character whose eye the mod wrote last
+    eyeCrouched = nil, -- whether its capsule read crouched then
+    crouchedEyeSet = nil, -- cm: the CrouchedEyeHeight the mod wrote last, while it is in place
+    standingEye = nil, -- cm: the standing eye the last eye write used, for the report
+    standingEyeSource = nil, -- where it came from
 }
 
 function camera.isActive()
@@ -391,8 +421,10 @@ end
 
 -- Every frame: undoes what the game did to its camera meanwhile, and remembers
 -- the game's values to put back. Returns false if the camera can't be put back
--- at the eyes.
-local function keepAtEyes(m, eye, cfg, refresh, paused)
+-- at the eyes. The camera goes back to the height on the capsule the mod gave it
+-- last (m.eye); the eye's own changes are writeEye's, after the movement step.
+local function keepAtEyes(m, cfg, refresh, paused)
+    local eye = m.eye
     local cam = m.cam
     local ok, parent = ue.call(cam, "GetAttachParent")
     if not ok or ue.address(parent) ~= m.capsuleAddr then
@@ -434,8 +466,6 @@ local function keepAtEyes(m, eye, cfg, refresh, paused)
             -- A new camera setting from the game, meant for its arm: that is what to put back.
             m.location = { X = x, Y = y, Z = z }
             noteMove(m)
-        end
-        if moved or math.abs(eye - m.eye) > 0.5 then
             placeAtEyes(m, eye)
         end
     end
@@ -491,21 +521,183 @@ local function putCameraBack()
     end
 end
 
--- The body ------------------------------------------------------------------
+-- The eye -------------------------------------------------------------------
+--
+-- Half-Life's eye is its view height above its origin: 28 units standing, 12 fully
+-- ducked and a curve between them during the duck's 0.4 s, with the origin 18 units
+-- lower on the ground once ducked. The movement works that out in its updates and
+-- hands the result to camera.applyEye after its step, as centimetres to add to the
+-- standing eye. While the capsule reads crouched the eye never goes above the ducked
+-- eye, 16 units below the standing one: a stand-up that Unreal refuses, under
+-- something low, would otherwise put the view inside it.
+--
+-- The engine's view looks from BaseEyeHeight above the capsule's middle, and Unreal
+-- sets that itself inside its movement update, after the frame hook: to
+-- CrouchedEyeHeight when it crouches the character, to the class's default when it
+-- stands it up. So while the engine's view runs, CrouchedEyeHeight is the ducked eye,
+-- and a crouch leaves the eye where it was in the world although the capsule's middle
+-- drops; at a stand-up Unreal's own value shows for that one frame. The game's camera
+-- hangs on the capsule instead, so on a frame on which Unreal will crouch the character
+-- keeping its feet, its height leads the crouch (info.aheadOffset).
 
-local function eyeHeight(pawn, cfg)
+local function finite(x)
+    return type(x) == "number" and x == x and x > -math.huge and x < math.huge
+end
+
+-- The same eye height, as the game stores it (single precision): Overrides' own test of
+-- a value read back being the one written.
+local function sameEye(a, b)
+    return a ~= nil and b ~= nil and math.abs(a - b) <= math.max(1, math.abs(a), math.abs(b)) * 1e-5
+end
+
+-- The standing eye: read off the capsule (EyeHeight "auto") at first person's start
+-- and at each refresh, while the capsule reads standing. While it reads crouched the
+-- last standing reading stays: Unreal holds a crouched capsule at its crouched half
+-- height, whose 0.78 would put the eye 35 cm low. starting: first person starts in this
+-- frame, maybe after a release, so a reading kept from before is checked to be this
+-- character's.
+local function refreshStandingEye(pawn, cfg, starting)
+    if cfg.EyeHeight ~= standing.setting then
+        standing.eye, standing.setting = nil, cfg.EyeHeight
+    end
     if type(cfg.EyeHeight) == "number" then
-        return cfg.EyeHeight
+        return
+    end
+    if ue.get(pawn, "bIsCrouched") == true then
+        if starting and standing.eye and standing.pawnAddr == st.pawnAddr
+            and ue.fullName(pawn) ~= standing.fullName then
+            standing.eye = nil -- another character at the same address
+        end
+        return
     end
     local capsule = ue.object(pawn, "CapsuleComponent")
-    if capsule then
-        local ok, half = ue.call(capsule, "GetScaledCapsuleHalfHeight")
-        if ok and type(half) == "number" and half > 0 then
-            return half * EYE_FACTOR
+    if not capsule then
+        return
+    end
+    local ok, half = ue.call(capsule, "GetScaledCapsuleHalfHeight")
+    if not (ok and finite(half) and half > 0) then
+        return -- the last reading, if any, stays
+    end
+    if starting or standing.pawnAddr ~= st.pawnAddr then
+        standing.pawnAddr, standing.fullName = st.pawnAddr, ue.fullName(pawn)
+    end
+    standing.eye = half * EYE_FACTOR
+end
+
+-- The standing eye in cm above the middle of the standing capsule, and where it came
+-- from; nil keeps the game's own eye. Before the first standing reading: 0.78 of the
+-- standing half height the movement knows (info.standHalf: for a character first seen
+-- crouched, the class default's capsule), else, standing, the game's eye height.
+local function standingEyeOf(pawn, cfg, crouched, info)
+    if type(cfg.EyeHeight) == "number" then
+        return cfg.EyeHeight, "EyeHeight"
+    end
+    if standing.eye and standing.pawnAddr == st.pawnAddr then
+        return standing.eye, "the standing capsule"
+    end
+    local half = info and info.standHalf
+    if finite(half) and half > 0 then
+        return half * EYE_FACTOR, "the standing half height"
+    end
+    if not crouched then
+        local own = overrides:saved(pawn, "BaseEyeHeight") or ue.number(pawn, "BaseEyeHeight")
+        if finite(own) then
+            return own, "the game's eye height"
         end
     end
-    return nil -- keep the game's eye height
+    return nil
 end
+
+-- The adopt rule (engine's view): Unreal crouching the character copies the mod's
+-- CrouchedEyeHeight into BaseEyeHeight. Read back where the capsule reads crouched for
+-- the first time since the eye was last written, that value is the mod's own, and
+-- without the mod the game would have its own crouched eye there: that is what a
+-- release puts back, also one under something low, where the character stays crouched.
+-- Once per crouch: the mod's ducked eye is that value too (in the air the mod has
+-- written it before Unreal crouches), so later in the same crouch a reading of it says
+-- nothing, and a value the game writes meanwhile stays the one put back, as does a
+-- stand-up's class default.
+local function adoptCrouchedEye(pawn, crouched)
+    local mine = st.crouchedEyeSet
+    if not (crouched and mine) or st.eyeCrouched then
+        return
+    end
+    local reading = ue.number(pawn, "BaseEyeHeight")
+    local own = crouchedOverrides:saved(pawn, CROUCHED_EYE)
+    if reading and own and sameEye(reading, mine) then
+        overrides:adopt(pawn, "BaseEyeHeight", reading, own)
+    end
+end
+
+-- CrouchedEyeHeight while the engine's view runs: one read a frame, written when it
+-- differs (a value the game writes is the one put back).
+local function setCrouchedEye(pawn, value, verify)
+    if crouchedOverrides:saved(pawn, CROUCHED_EYE) == nil and not ue.number(pawn, CROUCHED_EYE) then
+        return -- a character without one
+    end
+    crouchedOverrides:set(pawn, CROUCHED_EYE, value, verify)
+    st.crouchedEyeSet = value
+end
+
+-- Puts the character's own CrouchedEyeHeight back, as soon as the engine's view stops:
+-- at a release, and where "auto" moves on to the game's camera. The adopt rule first,
+-- for a crouch Unreal made after the eye was last written (a release in the very next
+-- frame, before the eye is written again).
+local function putCrouchedEyeBack(pawn)
+    if st.crouchedEyeSet and ue.valid(pawn) then
+        pcall(adoptCrouchedEye, pawn, ue.get(pawn, "bIsCrouched") == true)
+    end
+    crouchedOverrides:restore()
+    st.crouchedEyeSet = nil
+end
+
+-- Writes the eye (camera.applyEye has what info holds; nil: the movement doesn't steer
+-- the character, and the eye follows the game's hull): BaseEyeHeight with either
+-- method (the view check measures against it), CrouchedEyeHeight with the engine's
+-- view, the game camera's height on the capsule with the game's. verify: a refresh,
+-- when full names are checked.
+local function writeEye(pawn, cfg, info, verify)
+    local crouched
+    if info then
+        crouched = info.crouched == true
+    else
+        crouched = ue.get(pawn, "bIsCrouched") == true
+    end
+    local E, source = standingEyeOf(pawn, cfg, crouched, info)
+    st.standingEye, st.standingEyeSource = E, source
+    if not E then
+        return
+    end
+    local ducked = -DUCKED_EYE_DROP * cfg.UnitScale
+    local offset, cameraOffset = 0, 0 -- no info: the game's hull, so the ducked eye while it reads crouched
+    if info then
+        offset = finite(info.offset) and info.offset or 0
+        cameraOffset = finite(info.aheadOffset) and info.aheadOffset or offset
+    end
+    if crouched then
+        offset, cameraOffset = math.min(offset, ducked), math.min(cameraOffset, ducked)
+    end
+    local engine = st.method == "engine"
+    if engine then
+        adoptCrouchedEye(pawn, crouched) -- before the write, which would take Unreal's copy for the game's
+    end
+    overrides:set(pawn, "BaseEyeHeight", E + offset, verify)
+    st.eyePawn, st.eyeCrouched = pawn, crouched
+    if engine then
+        setCrouchedEye(pawn, E + ducked, verify)
+    elseif st.moved and math.abs(E + cameraOffset - st.moved.eye) > EYE_MOVE then
+        placeAtEyes(st.moved, E + cameraOffset)
+    end
+end
+
+-- Where the game's camera goes on the capsule when it is moved there: the eye height
+-- as it is (the game's, or the engine's view's when "auto" moves on from it). writeEye
+-- moves it on from there in the same frame, unless no standing eye is known.
+local function startEye(pawn)
+    return ue.number(pawn, "BaseEyeHeight") or 0
+end
+
+-- The body ------------------------------------------------------------------
 
 -- Whether actor is the character, or is owned by it directly or through others.
 local function ownedByPawn(actor, pawnAddr)
@@ -1014,8 +1206,7 @@ local function startMethod(method, pawn, pcm, cam, cfg)
     st.method = method
     resetCheck()
     if method == "game" then
-        local eye = eyeHeight(pawn, cfg) or ue.number(pawn, "BaseEyeHeight") or 0
-        moveCamera(pawn, pcm, cam, cfg, eye)
+        moveCamera(pawn, pcm, cam, cfg, startEye(pawn))
     end
 end
 
@@ -1029,6 +1220,7 @@ local function failed(pawn, pcm, cam, cfg)
         log.info("First person: the engine's first-person view doesn't work here (%s). Moving the game's camera "
             .. "to the eyes instead.", reason)
         putStyleBack()
+        putCrouchedEyeBack(pawn)
         local ok, err = pcall(startMethod, "game", pawn, pcm, cam, cfg)
         if ok then
             return
@@ -1197,6 +1389,8 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
         st.moveLines = 0
         st.nextRefresh = 0
         st.hasTargetRotation = ue.typeOf(ue.get(pawn, "TargetRotation")) == "UScriptStruct"
+        -- A start is a refresh: the standing eye is read before the game's camera is moved.
+        refreshStandingEye(pawn, cfg, true)
         if not startOrGiveUp(method, pawn, pcm, cam, cfg) then
             return
         end
@@ -1212,20 +1406,24 @@ function camera.apply(pc, pawn, pcm, cam, cfg, now, paused)
     st.frames = st.frames + 1
 
     local refresh = now >= st.nextRefresh
-    -- Set every frame, in case the game sets its own (Unreal resets the eye height).
-    local eye = eyeHeight(pawn, cfg)
-    if eye then
-        overrides:set(pawn, "BaseEyeHeight", eye, refresh)
+    st.refresh = refresh
+    if refresh and not started then
+        refreshStandingEye(pawn, cfg, false)
     end
     if st.method == "engine" then
         useFirstPersonStyle(pc, pcm, refresh)
         overrides:set(pcm, "DefaultFOV", cfg.FieldOfView, refresh)
     elseif st.moved and not justMoved then
-        if not keepAtEyes(st.moved, eye or st.moved.eye, cfg, refresh, paused) then
+        if not keepAtEyes(st.moved, cfg, refresh, paused) then
             giveUp(pcm, cfg, "Unreal refused to attach the game's camera to the character's capsule again, after "
                 .. "the game had attached it elsewhere, with " .. METHOD_NAMES.game)
             return
         end
+    end
+    if not eyeLate then
+        -- No caller writes the eye after the movement step (main.lua before 0.4.0): it is
+        -- written here, every frame (Unreal resets the eye height), with no duck known.
+        writeEye(pawn, cfg, nil, refresh)
     end
     if refresh then
         -- Counted from when it was due, not from this frame: counted from the frame,
@@ -1253,6 +1451,32 @@ end
 --- When first person's next refresh is due (nil while it is off).
 function camera.nextRefresh()
     return st.active and st.nextRefresh or nil
+end
+
+--- Writes the eye, after the movement step, on every frame first person is on (after
+--- camera.apply in the same frame). Nothing else writes it once a caller does this.
+--- info: what the movement knows of Half-Life's duck while it steers the character
+--- (movement.eyeInfo; a pause and root motion keep the last), or nil, and then the eye
+--- follows the game's hull (the standing eye, or the ducked one while the capsule reads
+--- crouched). info = {
+---   offset: cm to add to the standing eye for Half-Life's eye now;
+---   aheadOffset: the same for the game's camera, on a frame on which Unreal will crouch
+---     the character keeping its feet (nil on others);
+---   crouched: the capsule read crouched at this hook (bIsCrouched);
+---   standHalf: the standing capsule's scaled half height in cm, for the standing eye
+---     before it could be read off the standing capsule (nil if not known) }.
+function camera.applyEye(pawn, cfg, info)
+    eyeLate = true
+    if st.pawnAddr and ue.address(pawn) == st.pawnAddr then -- first person is on for it (a release clears it)
+        writeEye(pawn, cfg, info, st.refresh)
+    end
+end
+
+--- For the report: the standing eye the last eye write used (cm above the middle of
+--- the standing capsule) and where it came from ("EyeHeight", "the standing capsule",
+--- "the standing half height", "the game's eye height"), or nil.
+function camera.standingEye()
+    return st.standingEye, st.standingEyeSource
 end
 
 --- Lets first person start again after it was given up (a new character, the
@@ -1333,9 +1557,11 @@ function camera.release()
     st.waiting = nil
     st.bodyWaited = 0 -- the next start gets the whole wait for the body again
     st.blendWaited, st.blendLast = nil, nil -- a blend seen from now on gets the whole wait again
+    -- (CrouchedEyeHeight is only set after BaseEyeHeight, so overrides isn't empty then.)
     if not st.active and overrides:isEmpty() and next(hidden) == nil and not st.styleSetter and not st.moved then
         return
     end
+    putCrouchedEyeBack(st.eyePawn) -- first: its adopt rule decides what BaseEyeHeight gets back
     overrides:restore()
     putStyleBack()
     putCameraBack()
@@ -1344,12 +1570,18 @@ function camera.release()
     st.method = nil
     st.pawnAddr = nil
     st.pcmAddr = nil
+    st.eyePawn, st.eyeCrouched = nil, nil -- the standing eye stays known for the character
 end
 
 --- Forgets everything without touching the game: for a new level, whose loading
 --- destroyed the objects the mod had changed.
 function camera.forget()
     overrides:forget()
+    crouchedOverrides:forget()
+    st.crouchedEyeSet = nil
+    st.eyePawn, st.eyeCrouched = nil, nil
+    standing = { pawnAddr = nil, fullName = nil, eye = nil, setting = nil } -- the level's characters are gone
+    st.standingEye, st.standingEyeSource = nil, nil
     for _, entry in pairs(hidden) do
         journal.forget("hide", entry.fullName, entry.how)
         if entry.tick ~= nil then

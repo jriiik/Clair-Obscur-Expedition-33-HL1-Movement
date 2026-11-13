@@ -1,7 +1,7 @@
 -- Half-Life movement for Clair Obscur: Expedition 33.
 -- UE4SS runs this file when the game starts. See README.md for what the mod does.
 
-local VERSION = "0.3.1"
+local VERSION = "0.4.0"
 
 -- The folder this file is in, so the mod's modules and config.lua are found
 -- wherever the mod is installed.
@@ -25,8 +25,12 @@ local ue = require("hl1movement.ue")
 local guard = require("hl1movement.guard")
 local journal = require("hl1movement.journal")
 local input = require("hl1movement.input")
+-- (After journal.lua: keys.lua registers its journal kind's restorer as it loads, before the
+-- first frame puts back what a previous copy of the mod left.)
+local keys = require("hl1movement.keys")
 local view = require("hl1movement.view")
 local camera = require("hl1movement.camera")
+local hull = require("hl1movement.hull")
 local movement = require("hl1movement.movement")
 local diagnostics = require("hl1movement.diagnostics")
 local speedometer = require("hl1movement.speedometer")
@@ -52,6 +56,9 @@ end
 -- (see guard.lua), so one that keeps failing is turned off without the others.
 local CAMERA_STEP = "the first-person camera"
 local MOVEMENT_STEP = "the Half-Life movement"
+local EYE_STEP = "placing the view at the eyes"
+local KEYS_STEP = "taking the mod's keys from the game"
+local KEYS_WATCH_STEP = "watching the keys the mod gave back"
 local FACING_STEP = "turning the character to the view"
 local HEADING_STEP = "turning the character to where it heads"
 local SPEEDOMETER_STEP = "the speedometer"
@@ -80,9 +87,14 @@ local mod = {
     pawnAllowed = false,
     settleUntil = 0,
     missing = {}, -- functions the game's objects turned out not to have
+    moved = false, -- this frame: the mod moved the character, why not, a refresh frame (see movementStep)
+    moveWhy = nil,
+    moveRefresh = false,
     queue = {}, -- hotkey actions waiting for the next frame
+    queued = {}, -- a hotkey's prepare function -> true while its action waits there (it isn't queued twice)
     now = 0,
     frames = 0,
+    lastPaused = false, -- the last frame was one Unreal ran as paused (for the keys' hand-back guard)
     errors = 0,
     errorsInARow = 0,
     broken = false,
@@ -96,6 +108,14 @@ local mod = {
     offSettleUntil = 0,
     givenUpReported = false,
     cameraBlock = nil, -- why first person waits, if it does
+    -- What the game shows instead of the character, first person on or off: "dialogue",
+    -- "cinematic", "view-target" or nil. The mod's keys are the game's meanwhile.
+    gameShows = nil,
+    -- The frames the mod moved the character on while the game showed one of those, by what it
+    -- showed, since loading (for the report: does the game's dialogue leave movement input on?).
+    movedWhileShown = { dialogue = 0, cinematic = 0, ["view-target"] = 0 },
+    keysOwned = nil, -- whether the keys were the mod's on the last frame the movement ran
+    keysValidated = false, -- the key names were checked with the game since loading or the reload key
     announceCamera = false, -- say what first person does on the next frame, even if nothing changed
     lastYaw = nil,
     nextStatus = nil,
@@ -167,10 +187,16 @@ local function loadSettings()
         or "Restart the game to try again"
 end
 
-local function releaseAll()
+-- Gives everything back to the game, the mod's keys too. why: for the keys' log line
+-- ("off", "area" ...); "area" and "character" (the game may be replacing the character)
+-- arm no guard of the keys given back (see keys.give).
+local function releaseAll(why)
     camera.release()
     movement.release()
     speedometer.release()
+    if mod.pc then
+        guard.run(KEYS_STEP, keys.give, mod.pc, why)
+    end
 end
 
 -- For a new level: its loading destroyed the objects the mod had changed, so
@@ -179,6 +205,7 @@ local function forgetAll()
     camera.forget()
     movement.forget()
     speedometer.forget()
+    guard.run(KEYS_STEP, keys.forget)
 end
 
 -- Calls a function that answers true or false, such as IsInBattle. Returns nil
@@ -285,6 +312,8 @@ local function cameraBlocker(pc, pawn, pcm, inBattle, viewTarget)
         return "battle", "off (battle)"
     elseif not pcm then
         return "no-camera-manager", "waiting (the controller has no camera manager)"
+    elseif guard.isOff(EYE_STEP) then
+        return "eye", "off (the eye height couldn't be set)"
     end
     view.update(pc, pawn, cfg, mod.now)
     return view.blocker(pawn, viewTarget)
@@ -293,6 +322,11 @@ end
 local function cameraStep(pc, pawn, pcm, inBattle, viewTarget, paused)
     local force = mod.announceCamera
     mod.announceCamera = false
+    -- What the game shows instead of the character, asked on every frame the mod acts, in
+    -- first person or third: the mod's keys are the game's while it shows a dialogue, a
+    -- cinematic or another view target (Space skips its lines).
+    view.watchGame(pc, mod.now)
+    mod.gameShows = view.gameBlock(pawn, viewTarget)
     camera.watchBlend(pcm, pawn)
     local key, text = cameraBlocker(pc, pawn, pcm, inBattle, viewTarget)
     mod.cameraBlock = key
@@ -377,14 +411,26 @@ local function movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
     return nil
 end
 
+-- Whether the duck, duck tap and jump keys are the mod's on this frame: not while the game
+-- shows a dialogue, a cinematic or another view target (TakeKeys = false: always, as in 0.3).
+local function keysOwned()
+    return cfg.TakeKeys == false or mod.gameShows == nil
+end
+
+-- Sets mod.moved (the mod moves the character on this frame, or keeps it in root motion),
+-- mod.moveWhy (why not: the blocker's key, or "paused") and mod.moveRefresh (a frame of the
+-- movement's half-second refresh), for the keys step.
 local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused, frameDt)
     local key, text = movementBlocker(pc, pawn, cmc, inBattle, yaw, mode)
     if key then
         movement.release()
         state("Half-Life movement", key, text)
+        mod.moveWhy = key
         return
     end
-    if movement.apply(pawn, cmc, cfg, P, mod.now) and camera.isActive() then
+    local first, refresh = movement.apply(pawn, cmc, cfg, P, mod.now)
+    mod.moveRefresh = refresh
+    if first and camera.isActive() then
         -- Taken over while first person is on: its refreshes go between first person's.
         movement.stagger(mod.now, camera.nextRefresh())
     end
@@ -393,8 +439,39 @@ local function movementStep(pc, pawn, cmc, inBattle, yaw, dt, mode, paused, fram
     end)
     if paused then
         movement.hold(mod.frames)
-    elseif ask(pawn, "IsPlayingRootMotion") ~= true then
-        movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames, frameDt)
+        mod.moveWhy = "paused"
+        return
+    end
+    -- A duck or duck tap key held as the mod takes over, or as the keys are the mod's again
+    -- after the game showed something, was the game's (it acted on the press): it counts
+    -- once it has been let go.
+    local owned = keysOwned()
+    if first or (owned and mod.keysOwned == false) then
+        input.ignoreHeld(pc, cfg)
+    end
+    mod.keysOwned = owned
+    mod.moved = true
+    if mod.gameShows then
+        mod.movedWhileShown[mod.gameShows] = (mod.movedWhileShown[mod.gameShows] or 0) + 1
+    end
+    if ask(pawn, "IsPlayingRootMotion") ~= true then
+        movement.step(pc, pawn, cmc, cfg, P, dt, yaw, mod.frames, frameDt, owned)
+    else
+        movement.keepHull(pawn, cmc, P, frameDt or dt, mod.frames)
+    end
+end
+
+-- The keys step: the mod's duck, duck tap and jump keys taken from the game on frames the
+-- mod moves the character and the game shows nothing of its own, and given back otherwise.
+-- moved, why, refresh: what movementStep returned.
+local function keysStep(pc, moved, why, refresh)
+    if refresh then
+        keys.check(mod.now)
+    end
+    if moved and keysOwned() then
+        keys.take(pc, input.lastPolls(mod.frames), cfg) -- (with TakeKeys = false, only its state line)
+    else
+        keys.give(pc, why or mod.gameShows)
     end
 end
 
@@ -467,13 +544,17 @@ local function statusLine()
     local window = mod.window
     mod.window = newWindow()
     local moved = movement.takeStats()
+    local _, keysText = keys.takeStats()
     if mod.statusLines >= MAX_STATUS_LINES or (moved.frames == 0 and not camera.isActive()) then
         return
     end
     -- Ten seconds in which nothing happened get no line and don't count: the game
     -- paused in its menu, or the character standing still with the view at rest. (A
     -- test has many such breaks, and 0.3.0 spent most of its status lines on them.)
-    if moved.hops == 0 and moved.top < 1 and window.turn < 1
+    -- Duck taps and ducks are something (ten seconds of taps on the spot move nothing).
+    local ducking = moved.taps + moved.groundDucks + moved.airDucks + moved.groundStands + moved.airStands
+        + moved.hull.refusedLifts + moved.hull.standRefusals
+    if moved.hops == 0 and moved.top < 1 and window.turn < 1 and ducking == 0
         and moved.cuts + moved.wakes + moved.rewrites + moved.leaks == 0 then
         return
     end
@@ -517,6 +598,16 @@ local function statusLine()
                 .. "%d times, set MaxWalkSpeed %d times; its input reached Unreal on %d frames", moved.cuts,
                 moved.restores, moved.wakes, moved.rewrites, moved.leaks)
         end
+        if ducking > 0 or moved.hull.brakeGiven > 0 then
+            local h = moved.hull
+            parts[#parts + 1] = string.format("ducking: %d taps (%d without room), %d ducks on the ground and %d in "
+                .. "the air, %d stand-ups (%d waited for room), ALS's braking given back %d times (%.0f u/s)",
+                moved.taps, h.refusedLifts, moved.groundDucks, moved.airDucks, moved.groundStands + moved.airStands,
+                h.lateStands, h.brakeGiven, h.brakeTotal / u)
+        end
+    end
+    if keysText then
+        parts[#parts + 1] = keysText
     end
     parts[#parts + 1] = string.format("the view turned %.0f deg", window.turn)
     log.info("Status (%ds)%s: %s", STATUS_INTERVAL, mod.statusLines == MAX_STATUS_LINES and ", the last one" or "",
@@ -539,6 +630,12 @@ local function onFrame(pc, dt)
     mod.now = mod.now + dt
     mod.frames = mod.frames + 1
     mod.pc = pc
+    -- Before anything that returns early (the mod switched off above all): a key the mod
+    -- gave back while it was held may make the game act (its walk or run), which is put back
+    -- until the key is let go.
+    local wasPaused = mod.lastPaused
+    mod.lastPaused = false
+    guard.run(KEYS_WATCH_STEP, keys.watch, pc, mod.now, wasPaused)
     if not mod.enabled then
         writeReport(function()
             return waitingWhileOff(pc)
@@ -555,7 +652,7 @@ local function onFrame(pc, dt)
         if mod.worldAddr and worldAddr ~= mod.worldAddr then
             forgetAll()
         else
-            releaseAll()
+            releaseAll("character")
         end
         camera.retry()
         speedometer.retry()
@@ -580,7 +677,7 @@ local function onFrame(pc, dt)
         mod.pawnClass, mod.pawnAllowed = describePawn(pawn)
     end
     if not pawn or not mod.pawnAllowed then
-        releaseAll()
+        releaseAll("character")
         state("First person", "no-character", "off (no supported character)")
         state("Half-Life movement", "no-character", "off (no supported character)")
         writeReport(function()
@@ -591,7 +688,7 @@ local function onFrame(pc, dt)
     -- While the game changes area (loads another level), everything is given back
     -- while its objects still exist, and the mod waits.
     if ue.bool(pc, "IsChangingArea") == true then
-        releaseAll()
+        releaseAll("area")
         state("First person", "changing-area", "waiting (the game is changing area)")
         state("Half-Life movement", "changing-area", "waiting (the game is changing area)")
         mod.settleUntil = mod.now + SETTLE_TIME
@@ -611,6 +708,11 @@ local function onFrame(pc, dt)
         mod.cameraReportAt = mod.now + CAMERA_REPORT_DELAY
     end
     mod.nextStatus = mod.nextStatus or (mod.now + STATUS_INTERVAL)
+    if not mod.keysValidated then
+        -- The key names of config.lua, asked of the game (a game call: not in the key callback).
+        mod.keysValidated = true
+        guard.run(KEYS_STEP, keys.validate, pc, cfg)
+    end
 
     local cmc = ue.object(pawn, "CharacterMovement")
     local pcm = ue.object(pc, "PlayerCameraManager")
@@ -626,11 +728,19 @@ local function onFrame(pc, dt)
     end
     mod.lastYaw = yaw
     local paused = isPaused(pc)
+    mod.lastPaused = paused
 
     guard.run(CAMERA_STEP, cameraStep, pc, pawn, pcm, inBattle, viewTarget, paused)
 
     local mode = cmc and ue.number(cmc, "MovementMode") or 0
+    mod.moved, mod.moveWhy, mod.moveRefresh = false, nil, false
     guard.run(MOVEMENT_STEP, movementStep, pc, pawn, cmc, inBattle, yaw, dt, mode, paused, frameDt)
+
+    -- The eye, after the movement step, which knows where Half-Life's eye is.
+    if camera.isActive() then
+        guard.run(EYE_STEP, camera.applyEye, pawn, cfg, movement.eyeInfo(mod.frames))
+    end
+    guard.run(KEYS_STEP, keysStep, pc, mod.moved, mod.moveWhy, mod.moveRefresh)
 
     -- Which way the body faces: in first person where you look (and while the mod
     -- moves the character in the air, ALS's in-air rotation with it); otherwise, in
@@ -694,7 +804,7 @@ local function safeFrame(pc, dt)
         mod.broken = true
         mod.enabled = false
         mod.offPawnAddr, mod.offSettleUntil = mod.pawnAddr, mod.settleUntil -- a settle under way goes on
-        pcall(releaseAll)
+        pcall(releaseAll, "errors")
         log.warn("Turned off after %d errors in a row. Press %s to try again, and please report UE4SS.log.",
             mod.errorsInARow, tostring(cfg.ToggleKey))
     end
@@ -715,7 +825,7 @@ local function runQueued()
         return
     end
     local queue = mod.queue
-    mod.queue = {}
+    mod.queue, mod.queued = {}, {}
     for _, action in ipairs(queue) do
         runAction(action)
     end
@@ -724,7 +834,11 @@ end
 -- After UE4SS restarts its mods, the previous copy of this mod is gone without
 -- having put the game back. Its changes are in the journal: put them back first.
 local function restoreLeftovers()
-    local restored, total = journal.restorePending()
+    local restored, total = journal.restorePending(function(kind, fullName, id)
+        if kind == "prop" and id == "bWantsToCrouch" then
+            hull.restoredWish(fullName) -- the old copy's crouch, if it is still on
+        end
+    end)
     log.info("UE4SS restarted its mods while this mod was active. Put back %d of %d game values "
         .. "the previous copy had changed.", restored, total)
     if restored < total then
@@ -757,13 +871,17 @@ local function tick(context, deltaSeconds)
     mod.lateHook = late
     local started = clock()
     safeFrame(obj, ue.unwrap(deltaSeconds))
-    if mod.broken and mod.reportWhy and ue.valid(obj) then
-        -- The frame update is off, so the report key still gets its report here,
+    if mod.broken and ue.valid(obj) then
+        -- The frame update is off: the keys given back as the mod turned itself off are
+        -- still watched (see keys.watch), and the report key still gets its report here,
         -- about this frame's controller.
-        mod.pc = obj
-        writeReport(function()
-            return waitingWhileOff(obj)
-        end)
+        guard.run(KEYS_WATCH_STEP, keys.watch, obj, mod.now)
+        if mod.reportWhy then
+            mod.pc = obj
+            writeReport(function()
+                return waitingWhileOff(obj)
+            end)
+        end
     end
     mod.window.ticks = mod.window.ticks + 1
     mod.window.cpu = mod.window.cpu + (clock() - started)
@@ -846,6 +964,8 @@ local function turnOn()
     mod.broken = false
     mod.errorsInARow = 0
     guard.reset()
+    hull.reset()
+    keys.retry()
     camera.retry(true)
     speedometer.retry()
     log.info("Half-Life movement on")
@@ -855,7 +975,7 @@ local function toggleMod()
     if mod.enabled then
         mod.enabled = false
         mod.offPawnAddr, mod.offSettleUntil = mod.pawnAddr, mod.settleUntil -- a settle under way goes on
-        releaseAll()
+        releaseAll("off")
         log.info("Half-Life movement off")
         state("First person", "mod-off", "off (the mod is switched off)")
         state("Half-Life movement", "mod-off", "off (the mod is switched off)")
@@ -897,12 +1017,15 @@ end
 -- game did to the speed, changes of state, errors): a test presses the reload key
 -- before each part it wants in the log.
 local function applyReloadedSettings(changed)
-    releaseAll()
+    releaseAll("reload")
     speedometer.retry() -- made again on this frame, with the new place, size and colour
     mod.recheck = true -- check the character again with the new settings
     guard.reset()
+    hull.reset()
+    mod.keysValidated = false -- the key lists are checked with the game again (and the keys' context tried again)
     camera.retry(true)
     movement.logAgain()
+    keys.logAgain()
     log.again()
     mod.statusLines = 0
     local texts = {}
@@ -914,8 +1037,10 @@ local function applyReloadedSettings(changed)
         #texts > 0 and table.concat(texts, ", ") or "nothing")
 end
 
-local function reportKey()
-    local why = "asked for with " .. tostring(cfg.DiagnosticsKey)
+-- modifier: "Ctrl", "Shift" or "Ctrl+Shift" when the report key was pressed with them held
+-- (the report's title says so: ducking on Ctrl, the report comes from a ducked character).
+local function reportKey(modifier)
+    local why = "asked for with " .. tostring(cfg.DiagnosticsKey) .. (modifier and (", " .. modifier .. " held") or "")
     if mod.tickHook then
         -- Written at the end of this frame, once the mod has looked at the game
         -- (see writeReport). Pressing the key again doesn't start the wait again.
@@ -948,8 +1073,10 @@ local KEYS = {
             applyReloadedSettings(changed)
         end
     end,
-    report = function()
-        return reportKey
+    report = function(_, modifier)
+        return function()
+            reportKey(modifier)
+        end
     end,
     speedometer = function()
         return toggleSpeedometer
@@ -960,7 +1087,9 @@ local KEYS = {
 -- no hook of this mod runs meanwhile, and registering hooks is safe. The game isn't
 -- touched there: the action waits for the next frame. Before the frame hook exists
 -- (no save loaded yet), it is handed to ExecuteInGameThread instead, which some
--- UE4SS setups don't support.
+-- UE4SS setups don't support. Each hotkey is bound plain and with Ctrl, Shift and both
+-- held (keys.bindAll: the duck and duck tap keys are Ctrl and Shift), and its action
+-- isn't queued again while it waits there (the reload key reads config.lua once).
 local function bindKey(name, prepare)
     if not name then
         return
@@ -970,14 +1099,18 @@ local function bindKey(name, prepare)
         log.warn("Unknown key %s in config.lua", name)
         return
     end
-    local ok, err = pcall(RegisterKeyBind, code, function()
+    local ok, err = keys.bindAll(code, function(modifier)
         local wasHooked = mod.tickHook ~= nil
         if not wasHooked or mod.hooksWanted then
             ensureHooks()
         end
-        local action = prepare(wasHooked)
+        if mod.queued[prepare] then
+            return
+        end
+        local action = prepare(wasHooked, modifier)
         if mod.tickHook then
             mod.queue[#mod.queue + 1] = action
+            mod.queued[prepare] = true
             return
         end
         local handed = pcall(ExecuteInGameThread, function()
@@ -985,6 +1118,7 @@ local function bindKey(name, prepare)
         end)
         if not handed then
             mod.queue[#mod.queue + 1] = action
+            mod.queued[prepare] = true
         end
     end)
     if not ok then
@@ -999,11 +1133,23 @@ mod.speedometerOn = cfg.Speedometer
 
 guard.whenOff(CAMERA_STEP, function()
     -- First: the release may be what keeps failing. The camera step no longer says
-    -- why first person waits, so the speedometer doesn't stay hidden for its last answer.
-    mod.cameraBlock = nil
+    -- why first person waits (nor what the game shows), so the speedometer doesn't stay
+    -- hidden for its last answer.
+    mod.cameraBlock, mod.gameShows = nil, nil
     camera.release()
 end)
-guard.whenOff(MOVEMENT_STEP, movement.release)
+guard.whenOff(MOVEMENT_STEP, function()
+    movement.release()
+    if mod.pc then
+        guard.run(KEYS_STEP, keys.give, mod.pc, "errors")
+    end
+end)
+guard.whenOff(EYE_STEP, camera.release)
+guard.whenOff(KEYS_STEP, function()
+    if mod.pc then
+        keys.give(mod.pc, "errors")
+    end
+end)
 guard.whenOff(SPEEDOMETER_STEP, speedometer.release)
 journal.load() -- what a previous copy of the mod left changed, if UE4SS restarted the mods
 
@@ -1047,6 +1193,6 @@ if not restartHooked then
         .. "mod. If nothing happens, please report UE4SS.log.", tostring(restartError), tostring(cfg.ToggleKey))
 end
 
-log.info("Version %s loaded. %s turns it on and off, %s switches the camera, %s writes a report to this log, "
-    .. "%s shows the speedometer.", VERSION, tostring(cfg.ToggleKey), tostring(cfg.CameraKey),
-    tostring(cfg.DiagnosticsKey), tostring(cfg.SpeedometerKey))
+log.info("Version %s loaded. %s turns it on and off (also with Ctrl or Shift held), %s switches the camera, %s "
+    .. "writes a report to this log, %s shows the speedometer.", VERSION, tostring(cfg.ToggleKey),
+    tostring(cfg.CameraKey), tostring(cfg.DiagnosticsKey), tostring(cfg.SpeedometerKey))

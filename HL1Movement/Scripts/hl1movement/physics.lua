@@ -10,6 +10,8 @@
 -- velocities and the parameters use the same one; the mod uses centimetres,
 -- Unreal's unit.
 
+local duck = require("hl1movement.duck")
+
 local physics = {}
 
 local sqrt = math.sqrt
@@ -113,8 +115,9 @@ end
 --- One movement update. Gravity is not applied here: the game's physics does it.
 ---
 --- p holds accelerate, airAccelerate, airSpeedCap, friction, stopSpeed, minSpeed,
---- jumpSpeed, maxSpeed, bhopCap and maxVelocity. `jump` says whether to jump this
---- update if on the ground. Returns the new vx, vy, vz and whether a jump started.
+--- jumpSpeed, maxSpeed, bhopCap, maxVelocity and unitScale (the length of one Half-Life
+--- unit in the velocities' unit; 1 if missing). `jump` says whether to jump this update
+--- if on the ground. Returns the new vx, vy, vz and whether a jump started.
 function physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jump, p, dt)
     local jumped = false
     if onGround and jump then
@@ -130,6 +133,13 @@ function physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jump, p, dt)
         vx, vy, vz = physics.friction(vx, vy, vz, dt, p.friction, p.stopSpeed, p.minSpeed)
         if wishSpeed > 0 then
             vx, vy, vz = physics.accelerate(vx, vy, vz, wx, wy, wishSpeed, wishSpeed, p.accelerate, dt)
+        end
+        -- Half-Life's walk move: a player left slower than 1 u/s by friction and the ground
+        -- acceleration stops, wish or not (with no movement key too: friction alone leaves
+        -- 0.3 u/s of 1.9 at 250 updates a second).
+        local unit = p.unitScale or 1
+        if vx * vx + vy * vy < unit * unit then
+            vx, vy = 0, 0
         end
     elseif wishSpeed > 0 then
         local limit = wishSpeed < p.airSpeedCap and wishSpeed or p.airSpeedCap
@@ -210,6 +220,37 @@ local function slideMove(slide, vx, vy, vz, p, stepTime)
     return vx, vy, vz
 end
 
+-- The slide a run-in starts at one of a frame's updates (simulate's dk.runIn), with the
+-- fields of the slides movement.lua starts at a hook: Half-Life's step move leaves the
+-- player on the slope, 1/32 unit off it (h, straight up), and the path's travel (dx, dy)
+-- and the rise of the plane under it (rise) count from the frame's start, as for a slide
+-- that was on then (travelX, travelY: the frame's updates on the ground so far).
+local function runInSlide(p, up, n, travelX, travelY)
+    return { vz = up, nx = n.nx, ny = n.ny, nz = n.nz, h = p.restHeight / n.nz, clipped = true, push = 0, time = 0,
+        dx = travelX, dy = travelY, rise = -(travelX * n.nx + travelY * n.ny) / n.nz, ox = 0, oy = 0 }
+end
+
+local OPEN = {} -- room for every stand-up and lift
+
+-- A frame with no update, with ducking: no duck step (a waiting notch waits, the timer
+-- doesn't run), and the jump at once only where the first update would jump. Where its
+-- duck step, tried on a copy of the state, lifts a duck tap (the player is in the air
+-- before that update's jump) or stands up from the full duck (Half-Life stands up first and
+-- jumps standing), the jump button waits for that update, with no "jump is down" mark set,
+-- and so does a jump notch alone in the air (Unreal may land the character before the next
+-- update, which then begins on the ground): a notch waits in d.jumpWait. A held jump key in
+-- the air is judged at once, as 0.3.1's one decision a frame did (a fresh press without
+-- AutoHop, or under a ducktap key, is used up there). Returns whether to jump now.
+local function jumpWithoutUpdate(d, onGround, room)
+    local c = duck.copy(d)
+    local _, event = duck.step(c, duck.button(c, onGround and not c.airSeen), onGround, room, 0)
+    if (onGround and (event == "lift" or event == "stood")) or (not onGround and d.jumpNotch and not d.jumpKey) then
+        d.jumpWait = d.jumpNotch
+        return false
+    end
+    return duck.jump(d, duck.jumpButton(d, true), onGround)
+end
+
 --- Runs the Half-Life update at a fixed rate within one game frame. Half-Life
 --- updates the player once per input command, usually 100 times a second, and
 --- air strafing gains speed in small steps: at a low frame rate, one big update
@@ -222,7 +263,8 @@ end
 --- the short way round, as each of Half-Life's updates has the view of its own), or
 --- { x = wx, y = wy, speed = s } (a fixed direction), or nil for none. With a rate
 --- of 0 there is one update per frame. A jump can only start on the first step, or
---- on the update a slide ends on (slide.jump, below).
+--- on the update a slide ends on (slide.jump, below); with dk, on an update its keys
+--- and the duck step decide (below).
 ---
 --- slide, if given, is a slide up a slope: the player is in the air for Half-Life,
 --- rising at vz along a floor the game walks it up, so the game applies no gravity and
@@ -243,8 +285,37 @@ end
 --- misses it (see physics.leavesFloor), the player is in the air from the next update
 --- on, and floor.left is set to the number of that update.
 ---
+--- dk, if given, adds Half-Life's ducking and decides the jump update by update:
+--- { d = the duck state (duck.new; the caller keeps it between frames and gives it the
+--- hook's keys with duck.frame), room = { ground, air, lift } (false where Unreal has no
+--- room to stand up on the ground, in the air, or to lift a duck tap; nil or missing:
+--- room), runIn = nil or { nx, ny, nz }, out = {} }. The jump argument and slide.jump are
+--- not used then. Each update, in Half-Life's order: its duck and jump buttons, with "on
+--- the ground" as the update before left the player (duck.button, duck.jumpButton); a
+--- slide's ground check; the duck step (duck.step: in a slide no stand-up, the slope
+--- being too close below; a duck in a slide ends it, slide.ducked, with no more gravity
+--- or clips this frame); a slide's gravity; the wish, capped to maxSpeed, times the duck
+--- step's scale; the jump (duck.jump); the move. runIn is the unit normal of an upward
+--- slope the player walks on: an update that ran on the ground and didn't jump runs into
+--- it with the velocity it left (after its friction and acceleration), and if the clip's
+--- rise is still over p.airborneSpeed half an update of gravity later, the player is in
+--- the air from the next update on, sliding up it, with that rise and its level velocity
+--- as it was (Half-Life's step move). Only in a frame that starts on the ground (not
+--- after a slide that was on). A rise over p.airborneSpeed that isn't half an update later
+--- leaves the player on the ground, but in the air for the next update's duck button
+--- (d.airSeen): Half-Life's last ground check of the update had it there. dk.out gets: events
+--- (a list of { k = the update, what = duck.step's event, ground = whether that update's
+--- duck step found the player on the ground }), lifted (the update of a duck tap's lift),
+--- jumped (the update a jump started on, 0 in a frame with no update), scaled (updates
+--- with their moves scaled), ground (updates run on the ground), runIn ({ k, vx, vy, up }:
+--- the run-in's update, its velocity and rise) and slide (the slide it started, a table
+--- as a slide given here), and at the end state (the duck state's), button (the last
+--- update's duck button) and held (the duck button was down on every update of the last
+--- frame that ran one; kept in d.held). A frame with no update runs no duck step and
+--- jumps at once only where its first update would (not where it lifts a duck tap).
+---
 --- Returns the new vx, vy, vz, whether a jump started, and the number of steps.
-function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rate, slide, floor)
+function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rate, slide, floor, dk)
     local fromYaw = sim.yaw or yaw
     sim.yaw = yaw
     local steps, stepTime
@@ -264,18 +335,40 @@ function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rat
             sim.time = math.max(0, total - steps * stepTime)
         end
     end
+    local d, out, room, slideRoom
+    if dk then
+        d, room = dk.d, dk.room or OPEN
+        slideRoom = { ground = room.ground, air = false, lift = room.lift }
+        out = dk.out or {}
+        dk.out = out
+        out.events, out.lifted, out.jumped, out.scaled, out.ground = {}, nil, nil, 0, 0
+        out.runIn, out.slide = nil, nil
+    end
     if steps == 0 then
         -- Less than one step of time so far. A jump can't wait for the next frame,
         -- since the game moves the character in between: it starts now.
         local jumped = false
+        if d then
+            -- (In a slide the player is in the air, where no lift can be and no jump starts.)
+            jump = jumpWithoutUpdate(d, onGround, room)
+            out.state, out.button, out.held = d.state, d.wasDown, d.held
+        end
         if jump and onGround then
             vx, vy, vz, jumped = physics.step(vx, vy, vz, true, 0, 0, 0, true, p, 0)
+            if out then
+                out.jumped = 0
+            end
         end
         return vx, vy, vz, jumped, 0
     end
     local turn = physics.turn(fromYaw, yaw)
     local jumped = false
     local sliding = slide ~= nil and not onGround
+    -- (A frame with a slide on starts in the air: its updates after the slide's end run
+    -- into no slope.)
+    local runIn = d and onGround and dk.runIn or nil
+    local held = true -- the duck button on every update so far
+    local travelX, travelY = 0, 0 -- the frame's travel on the ground so far, for a run-in's slide
     for k = 1, steps do
         local wx, wy, wishSpeed = 0, 0, 0
         if wish and wish.speed then
@@ -290,6 +383,13 @@ function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rat
                 p.inputSpeed, p.maxSpeed)
         end
         local jumpNow = jump and k == 1
+        local button, jumpButton
+        if d then
+            -- The buttons as OpenAG's client builds them, from where the update before left
+            -- the player (d.airSeen: in the air, though this update finds the floor).
+            button, jumpButton = duck.button(d, onGround and not d.airSeen), duck.jumpButton(d, k == 1)
+            d.airSeen = false
+        end
         if sliding then
             if vz - 0.5 * p.gravity * stepTime <= p.airborneSpeed and (slide.h or 0) < p.groundCheck then
                 -- The ground check at the update's start: the slide is over, with the
@@ -297,10 +397,36 @@ function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rat
                 sliding, onGround = false, true
                 slide.ended, slide.endX, slide.endY, slide.endZ = true, vx, vy, vz
                 jumpNow = slide.jump
-            else
+            elseif not d then
                 vz = vz - p.gravity * stepTime
             end
         end
+        if d then
+            -- The duck step, then (still sliding) the slide's gravity: an update that ducks
+            -- out of a slide is the flight's, whose gravity is Unreal's.
+            local before = onGround
+            local scale, event
+            scale, event, onGround = duck.step(d, button, onGround, sliding and slideRoom or room, 1000 * stepTime)
+            if event then
+                out.events[#out.events + 1] = { k = k, what = event, ground = before }
+                if event == "lift" then
+                    out.lifted = k
+                elseif event == "ducked" and sliding then
+                    -- The ducked hull's lower edge is 18 units higher: off the slope.
+                    sliding, slide.ducked = false, true
+                end
+            end
+            if sliding then
+                vz = vz - p.gravity * stepTime
+            end
+            if scale < 1 then
+                wishSpeed = wishSpeed * scale
+                out.scaled = out.scaled + 1
+            end
+            jumpNow = duck.jump(d, jumpButton, onGround)
+            held = held and button
+        end
+        local ground = onGround
         local started
         local walked = onGround and floor and not floor.left
         vx, vy, vz, started = physics.step(vx, vy, vz, onGround, wx, wy, wishSpeed, jumpNow, p, stepTime)
@@ -315,6 +441,36 @@ function physics.simulate(sim, vx, vy, vz, onGround, yaw, wish, jump, p, dt, rat
         elseif sliding and slide.nx then
             vx, vy, vz = physics.clip(vx, vy, vz, slide.nx, slide.ny, slide.nz)
         end
+        if d then
+            if started then
+                out.jumped = k
+            elseif ground then
+                out.ground = out.ground + 1
+            end
+        end
+        if runIn and not onGround then
+            runIn = nil -- in the air from here on: a jump, a lift or leaving the floor
+        elseif runIn then
+            -- Half-Life's ground move runs into the slope with the velocity this update left
+            -- and keeps the clip's rise (its step move): over 180 u/s at the next update's
+            -- ground check, the player is in the air from there on, sliding up the slope.
+            travelX, travelY = travelX + vx * stepTime, travelY + vy * stepTime
+            local _, _, up = physics.clip(vx, vy, 0, runIn.nx, runIn.ny, runIn.nz)
+            if up - 0.5 * p.gravity * stepTime > p.airborneSpeed then
+                slide = runInSlide(p, up, runIn, travelX, travelY)
+                out.slide, out.runIn = slide, { k = k, vx = vx, vy = vy, up = up }
+                vz, onGround, sliding, runIn = up, false, true, nil
+            elseif up > p.airborneSpeed then
+                -- Over 180 u/s at this update's last ground check, and not half an update of
+                -- gravity later at the next one's first: on the ground for the next update, in
+                -- the air for the client that builds its buttons (it ends this update so).
+                d.airSeen = true
+            end
+        end
+    end
+    if d then
+        d.held = held
+        out.state, out.button, out.held = d.state, d.wasDown, held
     end
     return vx, vy, vz, jumped, steps
 end

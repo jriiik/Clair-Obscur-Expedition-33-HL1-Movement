@@ -9,7 +9,8 @@ local t = require("testlib")
 _G.TEST_ROOT = root
 
 local TESTS = { "test_physics", "test_settings", "test_mod", "test_facing", "test_slopes", "test_sounds",
-    "test_speedometer" }
+    "test_speedometer", "test_fake_game", "test_duck", "test_keys", "test_hull", "test_eye", "test_duck_mod",
+    "test_duck_report" }
 for _, name in ipairs(TESTS) do
     t.section(name)
     local ok, err = pcall(dofile, root .. "tests/" .. name .. ".lua")

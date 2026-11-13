@@ -31,7 +31,7 @@ settings.DEFAULTS = {
 
     Movement = true,
     AutoHop = true,
-    PhysicsRate = 100,
+    PhysicsRate = 250,
     KeepSpeed = true,
     SlopeLandings = true,
     SlopeBoosts = true,
@@ -48,14 +48,21 @@ settings.DEFAULTS = {
     MaxVelocity = 2000,
     UnitScale = 2.5,
 
+    Ducking = true,
+    DuckHull = true,
+
     JumpInput = "auto",
-    JumpKeys = { "SpaceBar", "Gamepad_FaceButton_Bottom" },
+    DuckKeys = { "LeftControl", "MouseScrollDown" },
+    DuckTapKeys = { "LeftShift" },
+    JumpKeys = { "SpaceBar", "MouseScrollUp", "Gamepad_FaceButton_Bottom" },
     ForwardKeys = { "W" },
     BackKeys = { "S" },
     LeftKeys = { "A" },
     RightKeys = { "D" },
     GamepadStick = true,
     StickDeadzone = 0.25,
+    TakeKeys = true,
+    TakeJumpKeys = true,
 
     DisableSpeedLimiter = true,
     Debug = false,
@@ -82,6 +89,7 @@ end
 local BOOLEAN = { kind = "boolean" }
 local HOTKEY = { kind = "hotkey" }
 local NAMES = { kind = "names" }
+local KEYS = { kind = "keys" } -- a list of keys (see "Key lists" below)
 
 -- A list of count numbers, each from min to max.
 local function numbers(count, min, max)
@@ -131,14 +139,21 @@ local RULES = {
     MaxVelocity = number(0, 100000),
     UnitScale = number(0.25, 10),
 
+    Ducking = BOOLEAN,
+    DuckHull = BOOLEAN,
+
     JumpInput = { kind = "choice", choices = { auto = true, keys = true, game = true } },
-    JumpKeys = NAMES,
-    ForwardKeys = NAMES,
-    BackKeys = NAMES,
-    LeftKeys = NAMES,
-    RightKeys = NAMES,
+    DuckKeys = KEYS,
+    DuckTapKeys = KEYS,
+    JumpKeys = KEYS,
+    ForwardKeys = KEYS,
+    BackKeys = KEYS,
+    LeftKeys = KEYS,
+    RightKeys = KEYS,
     GamepadStick = BOOLEAN,
     StickDeadzone = number(0, 0.95),
+    TakeKeys = BOOLEAN,
+    TakeJumpKeys = BOOLEAN,
 
     DisableSpeedLimiter = BOOLEAN,
     Debug = BOOLEAN,
@@ -175,9 +190,243 @@ local function describe(value)
 end
 settings.describe = describe
 
--- Checks one value. Returns ok, value, note: when ok is false the value is an
--- error message; a note explains a change made to an accepted value.
-local function check(rule, value, keyTable)
+-- Key lists ------------------------------------------------------------------
+--
+-- The seven lists of keys the mod reads (the rule kind "keys"), in the order they are
+-- checked against each other. A name is Unreal's (Unreal's key table, InputCoreTypes) or
+-- Half-Life's (its bind names: CTRL, MWHEELDOWN, MOUSE4 ...), in any case.
+settings.KEY_LISTS = { "DuckKeys", "DuckTapKeys", "JumpKeys", "ForwardKeys", "BackKeys", "LeftKeys", "RightKeys" }
+
+local DIGITS = { "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine" }
+
+-- The keys and buttons the mod knows by Unreal's name, and lower case -> that spelling. A
+-- name the list lacks is kept (it can't hold every key: see keys.validate for the game's word).
+local KEY_NAMES, KNOWN = {}, {}
+local function known(list)
+    for _, name in ipairs(list) do
+        KEY_NAMES[#KEY_NAMES + 1] = name
+        KNOWN[name:lower()] = name
+    end
+end
+for c = string.byte("A"), string.byte("Z") do
+    known({ string.char(c) })
+end
+known(DIGITS)
+for i = 1, 12 do
+    known({ "F" .. i })
+end
+known({ "Up", "Down", "Left", "Right", "LeftShift", "RightShift", "LeftControl", "RightControl", "LeftAlt",
+    "RightAlt", "SpaceBar", "Enter", "Tab", "BackSpace", "CapsLock", "Insert", "Delete", "Home", "End", "PageUp",
+    "PageDown", "Escape" })
+for _, digit in ipairs(DIGITS) do
+    known({ "NumPad" .. digit })
+end
+known({ "Multiply", "Add", "Subtract", "Decimal", "Divide", "Semicolon", "Equals", "Comma", "Underscore", "Hyphen",
+    "Period", "Slash", "Tilde", "LeftBracket", "Backslash", "RightBracket", "Apostrophe" })
+known({ "LeftMouseButton", "RightMouseButton", "MiddleMouseButton", "ThumbMouseButton", "ThumbMouseButton2",
+    "MouseScrollUp", "MouseScrollDown" })
+known({ "Gamepad_FaceButton_Bottom", "Gamepad_FaceButton_Right", "Gamepad_FaceButton_Left", "Gamepad_FaceButton_Top",
+    "Gamepad_LeftShoulder", "Gamepad_RightShoulder", "Gamepad_LeftTrigger", "Gamepad_RightTrigger",
+    "Gamepad_LeftThumbstick", "Gamepad_RightThumbstick", "Gamepad_Special_Left", "Gamepad_Special_Right",
+    "Gamepad_DPad_Up", "Gamepad_DPad_Down", "Gamepad_DPad_Left", "Gamepad_DPad_Right", "Gamepad_LeftStick_Up",
+    "Gamepad_LeftStick_Down", "Gamepad_LeftStick_Left", "Gamepad_LeftStick_Right", "Gamepad_RightStick_Up",
+    "Gamepad_RightStick_Down", "Gamepad_RightStick_Left", "Gamepad_RightStick_Right" })
+
+-- Axes, not keys: they are never held or pressed.
+local AXES = {}
+for _, name in ipairs({ "MouseX", "MouseY", "Mouse2D", "MouseWheelAxis", "Gamepad_LeftX", "Gamepad_LeftY",
+    "Gamepad_Left2D", "Gamepad_RightX", "Gamepad_RightY", "Gamepad_Right2D", "Gamepad_LeftTriggerAxis",
+    "Gamepad_RightTriggerAxis" }) do
+    AXES[name:lower()] = name
+end
+
+-- Half-Life's key names, in small letters, and the Unreal keys each stands for. Its CTRL,
+-- SHIFT and ALT are either key of the pair. (ENTER, TAB, BACKSPACE, HOME, END, CAPSLOCK and
+-- the letters are Unreal's names but for case, so the list above has them.)
+local ALIASES = {
+    ctrl = { "LeftControl", "RightControl" }, lctrl = { "LeftControl" }, rctrl = { "RightControl" },
+    shift = { "LeftShift", "RightShift" }, lshift = { "LeftShift" }, rshift = { "RightShift" },
+    alt = { "LeftAlt", "RightAlt" },
+    space = { "SpaceBar" }, ins = { "Insert" }, del = { "Delete" }, pgup = { "PageUp" }, pgdn = { "PageDown" },
+    mwheelup = { "MouseScrollUp" }, mwheeldown = { "MouseScrollDown" },
+    mouse1 = { "LeftMouseButton" }, mouse2 = { "RightMouseButton" }, mouse3 = { "MiddleMouseButton" },
+    mouse4 = { "ThumbMouseButton" }, mouse5 = { "ThumbMouseButton2" },
+    uparrow = { "Up" }, downarrow = { "Down" }, leftarrow = { "Left" }, rightarrow = { "Right" },
+}
+for i, digit in ipairs(DIGITS) do
+    ALIASES[tostring(i - 1)] = { digit }
+end
+
+-- UE4SS's names for the hotkeys (ToggleKey ...) where Unreal's differ: F1 to F12 and the
+-- letters are the same in both.
+local UE4SS_KEYS = { SPACE = "SpaceBar", RETURN = "Enter", ESCAPE = "Escape", BACKSPACE = "BackSpace", TAB = "Tab",
+    LEFT_ARROW = "Left", UP_ARROW = "Up", RIGHT_ARROW = "Right", DOWN_ARROW = "Down", PAGE_UP = "PageUp",
+    PAGE_DOWN = "PageDown", INS = "Insert", DEL = "Delete", LEFT_MOUSE_BUTTON = "LeftMouseButton",
+    RIGHT_MOUSE_BUTTON = "RightMouseButton", MIDDLE_MOUSE_BUTTON = "MiddleMouseButton",
+    XBUTTON_ONE = "ThumbMouseButton", XBUTTON_TWO = "ThumbMouseButton2" }
+for _, digit in ipairs(DIGITS) do
+    UE4SS_KEYS[digit:upper()] = digit
+    UE4SS_KEYS["NUM_" .. digit:upper()] = "NumPad" .. digit
+end
+
+local HOTKEYS = { "ToggleKey", "CameraKey", "ReloadKey", "DiagnosticsKey", "SpeedometerKey" }
+
+--- Whether Unreal's name is one the mod knows (case aside), for keys.validate.
+function settings.isKnownKey(name)
+    return type(name) == "string" and (KNOWN[name:lower()] ~= nil or AXES[name:lower()] ~= nil)
+end
+
+-- The length of the longest common subsequence of two strings.
+local function commonLength(a, b)
+    local before = {}
+    for j = 0, #b do
+        before[j] = 0
+    end
+    for i = 1, #a do
+        local row, ca = { [0] = 0 }, a:byte(i)
+        for j = 1, #b do
+            if ca == b:byte(j) then
+                row[j] = before[j - 1] + 1
+            else
+                row[j] = math.max(before[j], row[j - 1])
+            end
+        end
+        before = row
+    end
+    return before[#b]
+end
+
+--- The known key name closest to a name the mod doesn't know: the one with the most letters
+--- in common in the same order (case aside), the nearest in length among equals; nil when
+--- the letters in common, counted in both names, are under half of the two names' letters
+--- ("Foo" and LeftControl: 3 in common, 6 of 14).
+function settings.suggestKey(name)
+    local lower = name:lower()
+    local best, bestCommon, bestGap
+    for _, candidate in ipairs(KEY_NAMES) do
+        if candidate ~= "Escape" then
+            local common = commonLength(lower, candidate:lower())
+            local gap = math.abs(#candidate - #name)
+            if not best or common > bestCommon or (common == bestCommon and gap < bestGap) then
+                best, bestCommon, bestGap = candidate, common, gap
+            end
+        end
+    end
+    if best and 2 * bestCommon >= (#name + #best) / 2 then
+        return best
+    end
+    return nil
+end
+
+local function joinAnd(list)
+    if #list <= 1 then
+        return list[1] or ""
+    end
+    return table.concat(list, ", ", 1, #list - 1) .. " and " .. list[#list]
+end
+
+-- The entries of one key list (the rule kind "keys"; listName is the setting): entries that
+-- aren't names are dropped and counted, Half-Life's names become Unreal's (noted), a name
+-- Unreal's key table has takes its spelling, and any other is kept with a warning. Refused
+-- with a warning: Escape, axes, and a wheel name in DuckTapKeys. Duplicates go silently.
+-- Returns ok, the list, a note and a list of warnings of their own.
+local function checkKeys(listName, value)
+    if type(value) ~= "table" then
+        return false, 'must be a list such as { "SpaceBar" }'
+    end
+    local result, seen, dropped, aliases, warnings = {}, {}, 0, {}, {}
+    local function warn(fmt, ...)
+        warnings[#warnings + 1] = string.format("%s: " .. fmt, listName, ...)
+    end
+    local function keep(name)
+        local lower = name:lower()
+        if AXES[lower] then
+            warn('"%s" is left out: it is an axis (a mouse or stick movement), not a key that can be held', name)
+        elseif lower == "escape" then
+            warn('"%s" is left out: Escape opens the game\'s menu', name)
+        elseif listName == "DuckTapKeys" and (lower == "mousescrollup" or lower == "mousescrolldown") then
+            warn('"%s" is left out: +ducktap does nothing on a wheel notch: it is over before the next update, as '
+                .. "in OpenAG; put it in DuckKeys for a duck tap by hand", name)
+        elseif not seen[lower] then
+            seen[lower] = true
+            result[#result + 1] = name
+        end
+    end
+    for _, entry in ipairs(value) do
+        if type(entry) ~= "string" or entry == "" then
+            dropped = dropped + 1
+        else
+            local lower = entry:lower()
+            local alias = ALIASES[lower]
+            if alias then
+                aliases[#aliases + 1] = string.format("%s is read as %s", entry, joinAnd(alias))
+                for _, name in ipairs(alias) do
+                    keep(name)
+                end
+            elseif KNOWN[lower] or AXES[lower] then
+                keep(KNOWN[lower] or AXES[lower])
+            else
+                local guess = settings.suggestKey(entry)
+                warn('"%s" is not a key name the mod knows%s. It is used as it is; if it is wrong it never reads as '
+                    .. "pressed", entry, guess and string.format(" (did you mean %s?)", guess) or "")
+                keep(entry)
+            end
+        end
+    end
+    local notes = aliases
+    if dropped > 0 then
+        notes[#notes + 1] = string.format("ignored %d %s that %s not a name", dropped,
+            dropped == 1 and "entry" or "entries", dropped == 1 and "is" or "are")
+    end
+    return true, result, #notes > 0 and table.concat(notes, "; ") or nil, warnings
+end
+
+-- What the key lists can only be checked for together, once every setting is known: the
+-- mod's own hotkeys are left out of them, and a key in two lists (of those the mod reads:
+-- not the duck lists with Ducking = false) is named, and kept in both.
+local function checkKeyLists(cfg, warnings)
+    local hotkeys = {}
+    for _, setting in ipairs(HOTKEYS) do
+        local key = cfg[setting]
+        if type(key) == "string" then
+            local unreal = UE4SS_KEYS[key:upper()] or key
+            hotkeys[unreal:lower()] = setting
+        end
+    end
+    local lists, order = {}, {}
+    for _, listName in ipairs(settings.KEY_LISTS) do
+        local kept = {}
+        for _, name in ipairs(cfg[listName]) do
+            local lower = name:lower()
+            if hotkeys[lower] then
+                warnings[#warnings + 1] = string.format('%s: "%s" is left out: it is the mod\'s %s', listName, name,
+                    hotkeys[lower])
+            else
+                kept[#kept + 1] = name
+                if cfg.Ducking ~= false or (listName ~= "DuckKeys" and listName ~= "DuckTapKeys") then
+                    if not lists[lower] then
+                        lists[lower] = {}
+                        order[#order + 1] = name
+                    end
+                    table.insert(lists[lower], listName)
+                end
+            end
+        end
+        cfg[listName] = kept
+    end
+    for _, name in ipairs(order) do
+        local where = lists[name:lower()]
+        if #where > 1 then
+            warnings[#warnings + 1] = string.format("%s is in %s: it does %s", name, joinAnd(where),
+                #where == 2 and "both" or "all of them")
+        end
+    end
+end
+
+-- Checks one value. Returns ok, value, note, warnings: when ok is false the value is an
+-- error message; a note explains a change made to an accepted value, and the key lists
+-- have warnings of their own (setting: the setting's name).
+local function check(rule, value, keyTable, setting)
     local kind = rule.kind
     if kind == "boolean" then
         if type(value) ~= "boolean" then
@@ -257,6 +506,8 @@ local function check(rule, value, keyTable)
                 dropped == 1 and "entry" or "entries", dropped == 1 and "is" or "are")
         end
         return true, result
+    elseif kind == "keys" then
+        return checkKeys(setting, value)
     end
     return false, "has an unknown type"
 end
@@ -286,11 +537,8 @@ function settings.environment(globals)
     return env, unknown
 end
 
---- Merges the table config.lua returned into the defaults. keyTable is UE4SS's
---- `Key` table, used to check hotkey names (pass nil to skip that check). unknown:
---- the words in config.lua that Lua didn't know (see settings.environment), if any.
---- Returns the settings and a list of warnings for the log.
-function settings.load(user, keyTable, unknown)
+-- settings.load without the checks of the key lists against each other.
+local function merge(user, keyTable, unknown)
     local cfg, warnings = {}, {}
     for name, default in pairs(settings.DEFAULTS) do
         cfg[name] = copy(default)
@@ -329,11 +577,14 @@ function settings.load(user, keyTable, unknown)
             warnings[#warnings + 1] = string.format(
                 "Unknown setting %s in config.lua (check the spelling); ignored", name)
         else
-            local ok, result, note = check(rule, value, keyTable)
+            local ok, result, note, more = check(rule, value, keyTable, name)
             if ok then
                 cfg[name] = result
                 if note then
                     warnings[#warnings + 1] = string.format("%s = %s: %s", name, describe(value), note)
+                end
+                for _, warning in ipairs(more or {}) do
+                    warnings[#warnings + 1] = warning
                 end
             else
                 warnings[#warnings + 1] = string.format("%s = %s %s; using the default, %s",
@@ -341,6 +592,17 @@ function settings.load(user, keyTable, unknown)
             end
         end
     end
+    return cfg, warnings
+end
+
+--- Merges the table config.lua returned into the defaults. keyTable is UE4SS's
+--- `Key` table, used to check hotkey names (pass nil to skip that check). unknown:
+--- the words in config.lua that Lua didn't know (see settings.environment), if any.
+--- Then the key lists are checked together (checkKeyLists), defaults included. Returns
+--- the settings and a list of warnings for the log.
+function settings.load(user, keyTable, unknown)
+    local cfg, warnings = merge(user, keyTable, unknown)
+    checkKeyLists(cfg, warnings)
     return cfg, warnings
 end
 
@@ -417,6 +679,15 @@ function settings.physics(cfg)
         -- rise this far above the new floor. Half-Life's ground layer is 2 units; on
         -- bumpy slopes that made strings of tiny launches and landings.
         leaveHeight = 8 * s,
+        -- Half-Life's two hulls are 72 and 36 units tall: a duck on the ground lowers the
+        -- origin by the difference of their lower halves, 18 units, and a duck in the air
+        -- raises the feet by that much.
+        duckShift = 18 * s,
+        -- The duck tap's lift is swept 18 units up (Half-Life's room test above the standing
+        -- head), and the character placed 16 1/32 units higher, less the walking gap, so
+        -- that Unreal's contact landing comes when Half-Life's ground check catches it.
+        tapRoom = 18 * s,
+        tapPlace = (16 + 1 / 32) * s,
         rate = cfg.PhysicsRate, -- updates per second; 0: one per frame
     }
 end

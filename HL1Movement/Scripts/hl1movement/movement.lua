@@ -43,8 +43,21 @@
 -- ALS to work out its walking speed again: that would lose a speed the game set
 -- for the area. (ALS's request flag is also a uint8, which UE4SS sets to 0 when
 -- given a Lua true.)
+--
+-- Ducking: Half-Life's duck runs update by update in physics.simulate (duck.lua), from
+-- the duck, duck tap and jump buttons of the frame (input.buttons); its state lives in
+-- st.duck, which outlives the frames the mod doesn't move the character. hull.lua makes
+-- Unreal's capsule follow it (the crouch, read back at the next hook) and gives the
+-- updates the room they have; the duck tap's lift is a third way of leaving the ground,
+-- beside the jump and the flight off a slope. The order in a frame: the hull's answers
+-- (hull.read), the keys, the landing and the speed checks, the slopes (which arm the run
+-- into an upward slope, decided per update), the room, the updates, the lift (or the
+-- frame run again without it), the slide a run-in started, leaving the ground, the
+-- velocity, and the hull request last (after every SetMovementMode of the frame).
 
 local physics = require("hl1movement.physics")
+local duck = require("hl1movement.duck")
+local hull = require("hl1movement.hull")
 local ue = require("hl1movement.ue")
 local log = require("hl1movement.log")
 local input = require("hl1movement.input")
@@ -123,6 +136,9 @@ local FLOOR_GAP = 3 -- cm
 -- last. A landing's clip changes the speed by about the speed times the lean's sine
 -- squared, so each band stands for about four times the one before.
 local FLOOR_BANDS = { 1, 2, 4, 8, 16 }
+-- The duck tap lines and the "Duck:" lines, until the reload key starts their counts again.
+local MAX_TAP_LINES = 30
+local MAX_DUCK_LINES = 30
 
 -- What was read of the floor in this frame, so that nothing is read twice: the
 -- movement component's CurrentFloor, if it is a floor the character walks on, and how
@@ -132,7 +148,9 @@ local FLOOR_BANDS = { 1, 2, 4, 8, 16 }
 -- updates on the ground to leave (see slopeStep, physics.simulate). leaveFall: where the
 -- character leaves such a floor in this frame, the second half of the gravity of the
 -- Half-Life update that left it (cm/s), for the leap's landing (see slopeLanding).
-local seenFloor, seenNz, seenGap, walkFloor, leaveFall = nil, nil, false, nil, nil
+-- runInFloor: a sloped floor the character walks on in this frame, for Half-Life's
+-- updates on the ground to run into if it rises under them (physics.simulate's dk.runIn).
+local seenFloor, seenNz, seenGap, walkFloor, leaveFall, runInFloor = nil, nil, false, nil, nil, nil
 
 local overrides = Overrides.new()
 local st = {
@@ -145,8 +163,31 @@ local st = {
     curveName = nil,
     curveBroken = false,
     limiter = nil, -- { obj, fullName, wasEnabled } once found; false: none found
-    jump = { latched = false },
     sim = {}, -- physics.simulate's state
+    -- Half-Life's duck state (duck.new): kept apart from st.sim, which is emptied after any
+    -- frame the mod didn't move the character, while a duck (and its timer, a waiting notch,
+    -- the duck tap's memory and the jump's mark) outlives a pause or root motion. A new one
+    -- at every take-over, from the capsule as it is.
+    duck = nil,
+    dkOut = {}, -- physics.simulate's dk.out, used again every frame
+    duckKey = false, -- a duck key read down at the last hook that read the keys (for root motion)
+    eye = nil, -- what the camera gets (see movement.eyeInfo), and its frame
+    eyeFrame = nil,
+    tap = nil, -- the duck tap in progress, for the tap lines
+    taps = 0, -- duck taps landed in this session: the tap lines' numbers
+    tapLines = 0, -- tap lines written since the count last started (see movement.logAgain)
+    duckLines = 0, -- "Duck:" lines written since then
+    duckClock = 0, -- s: the Half-Life updates the duck ran, added up (for the Duck lines' times)
+    pressedAt = nil, -- duckClock at the press of the transition in progress
+    duckedAt = nil, -- duckClock when the character last became fully ducked
+    -- Where the flight in progress took off with a hull of its own: how much higher than
+    -- usual Half-Life's player is above the floor's plane against the character (cm): a duck
+    -- tap's lift is placed lower than Half-Life's 18 units (takeoffLift), and a ducked take-off
+    -- rests on Valve's ducked floor, which lies duck.restGap below the standing one where
+    -- Unreal's crouched capsule rests 18 units lower (takeoffDuck). nil: none.
+    takeoffLift = nil,
+    takeoffDuck = nil,
+    hullAir = nil, -- how long the character had been in the air at the hook of the last hull change there
     lastStepFrame = nil,
     written = nil, -- the horizontal velocity the mod left for the game last frame, and the platform's
     lastMode = nil,
@@ -206,8 +247,12 @@ local st = {
     -- (Half-Life clips those) and slopeUnknown couldn't be told; the rest were caught by
     -- Half-Life's ground check and kept their speed. groundedJumps: jumps of the mod's that
     -- Unreal landed again within the frame they started in (not hops, see movement.step).
+    -- taps: duck taps (lifts the game had room for), tapLandings their landings; groundDucks,
+    -- airDucks, groundStands, airStands: Half-Life's ducks and stand-ups; runInPresses: duck
+    -- tap presses that ran into an upward slope instead (Half-Life's slope boost, no tap).
     counts = { cuts = 0, restores = 0, rewrites = 0, wakes = 0, leaks = 0, jumpChanges = 0, slopeLandings = 0,
-        slopeHits = 0, slopeUnknown = 0, slides = 0, launches = 0, stoppedJumps = 0, groundedJumps = 0 },
+        slopeHits = 0, slopeUnknown = 0, slides = 0, launches = 0, stoppedJumps = 0, groundedJumps = 0, taps = 0,
+        tapLandings = 0, groundDucks = 0, airDucks = 0, groundStands = 0, airStands = 0, runInPresses = 0 },
 }
 
 -- What happened since the last status line (see movement.takeStats).
@@ -215,7 +260,8 @@ local function newStats()
     return { frames = 0, keys = 0, stick = 0, game = 0, none = 0, hops = 0, landings = 0, top = 0, topGround = 0,
         airHops = 0, airGain = 0, airTurn = 0, landingLoss = 0, steps = 0, cuts = 0, restores = 0, rewrites = 0,
         wakes = 0, leaks = 0, slopeLandings = 0, slopeHits = 0, slopeGain = 0, slides = 0, launches = 0,
-        groundedJumps = 0 }
+        groundedJumps = 0, taps = 0, tapLandings = 0, groundDucks = 0, airDucks = 0, groundStands = 0,
+        airStands = 0, runInPresses = 0 }
 end
 local stats = newStats()
 
@@ -423,7 +469,6 @@ local function applyValues(pawn, cmc, P)
     overrides:set(cmc, "BrakingFriction", 0, true)
     overrides:set(cmc, "BrakingDecelerationWalking", TINY_BRAKING, true)
     overrides:set(cmc, "BrakingDecelerationFalling", TINY_BRAKING, true)
-    overrides:set(cmc, "MaxWalkSpeedCrouched", SPEED_LIMIT, true)
     -- The game's own jump (on the first press) gets the same height as the mod's.
     overrides:set(cmc, "JumpZVelocity", P.jumpSpeed, true)
     overrides:set(pawn, "JumpMaxHoldTime", 0, true)
@@ -446,9 +491,19 @@ local function checkMaxSpeed(cmc)
     end
 end
 
+-- One more line about the duck ("Duck: ..."), within its budget.
+local function duckLine(fmt, ...)
+    st.duckLines = st.duckLines + 1
+    if st.duckLines <= MAX_DUCK_LINES then
+        log.info("Duck: %s%s", string.format(fmt, ...),
+            st.duckLines == MAX_DUCK_LINES and " (further ducks and stand-ups aren't logged)" or "")
+    end
+end
+
 --- Takes over the character's movement, or keeps it taken over. Called every frame
 --- while the mod's movement should run. Returns true if it took over in this call
---- (its refreshes start then, see movement.stagger).
+--- (its refreshes start then, see movement.stagger), and whether this is a frame of
+--- the half-second refresh.
 function movement.apply(pawn, cmc, cfg, P, now)
     if st.active and not ue.same(st.cmc, cmc) then
         movement.release()
@@ -462,24 +517,30 @@ function movement.apply(pawn, cmc, cfg, P, now)
         st.worldGravity = measureGravity(cmc)
         st.stayBasedInAir = ue.bool(cmc, "bStayBasedInAir") == true
         st.nextRefresh = 0
-        st.jump.latched = false
         st.lastMode = nil
         st.emptyInputFrames = 0
         st.sim = {}
         st.lastStepFrame = nil
         st.written = nil
-        st.hop = nil
+        st.hop, st.tap = nil, nil
         st.airBaseX, st.airBaseY = 0, 0
         st.airNext, st.takeoffGap, st.takeoffRest, st.landRest = nil, nil, nil, nil
+        st.takeoffLift, st.takeoffDuck, st.hullAir = nil, nil, nil
         st.headingFrame, st.facedFrame = nil, nil
         st.inAirRotation = nil
         st.slide, st.flight = nil, nil
+        st.eye, st.eyeFrame, st.duckKey = nil, nil, false
+        st.pressedAt, st.duckedAt, st.standLine, st.groundRun, st.airRefusal = nil, nil, nil, nil, nil
         if not st.worldGravity then
             log.once("gravity", "Could not read the game's gravity, so the game's own gravity stays.")
         end
         log.first("movement", "Taking over the movement of %s (mode %s, world gravity %s cm/s2)",
             tostring(ue.className(pawn)), tostring(ue.number(cmc, "MovementMode")), tostring(st.worldGravity))
         log.debug("Movement taken over")
+        -- Half-Life's duck starts as the capsule is: fully ducked if it reads crouched (the
+        -- game's crouch, or one left from before), with the hull's way and values.
+        hull.takeOver(pawn, cmc, cfg, P)
+        st.duck = duck.new(cfg.Ducking ~= false and ue.bool(pawn, "bIsCrouched") == true)
     end
     local refresh = now >= st.nextRefresh
     if refresh then
@@ -495,19 +556,26 @@ function movement.apply(pawn, cmc, cfg, P, now)
             until st.nextRefresh > now
         end
     end
-    -- ALS sets the walking speed itself whenever the gait changes, and the game
-    -- sets it for some areas, so this is set every frame. The high value stops the
-    -- game from capping your speed.
-    st.gameWalkSpeed = nil
-    if overrides:set(cmc, "MaxWalkSpeed", SPEED_LIMIT, refresh) then
-        -- What the game wrote since the last frame: its speed cap may have cut the
-        -- speed to it meanwhile (see atMaxSpeed).
-        st.gameWalkSpeed = overrides:saved(cmc, "MaxWalkSpeed")
-        local rewrites = noted("rewrites")
-        if rewrites <= MAX_NOTE_LINES then
-            log.info("The game set MaxWalkSpeed to %s; the mod sets it back to %d%s",
-                tostring(overrides:saved(cmc, "MaxWalkSpeed")), SPEED_LIMIT,
-                rewrites == MAX_NOTE_LINES and " (not logged again)" or "")
+    -- ALS sets the walking speed itself whenever the gait or the stance changes (the
+    -- crouched one too, at every crouch and stand-up), and the game sets it for some
+    -- areas, so these are set every frame. The high value stops the game from capping
+    -- your speed.
+    st.gameWalkSpeed, st.gameCrouchedSpeed = nil, nil
+    for _, name in ipairs({ "MaxWalkSpeed", "MaxWalkSpeedCrouched" }) do
+        if overrides:set(cmc, name, SPEED_LIMIT, refresh) then
+            -- What the game wrote since the last frame: its speed cap may have cut the
+            -- speed to it meanwhile (see atMaxSpeed).
+            if name == "MaxWalkSpeed" then
+                st.gameWalkSpeed = overrides:saved(cmc, name)
+            else
+                st.gameCrouchedSpeed = overrides:saved(cmc, name)
+            end
+            local rewrites = noted("rewrites")
+            if rewrites <= MAX_NOTE_LINES then
+                log.info("The game set %s to %s; the mod sets it back to %d%s", name,
+                    tostring(overrides:saved(cmc, name)), SPEED_LIMIT,
+                    rewrites == MAX_NOTE_LINES and " (not logged again)" or "")
+            end
         end
     end
     takeCurve(cmc)
@@ -516,11 +584,12 @@ function movement.apply(pawn, cmc, cfg, P, now)
         if first then
             checkMaxSpeed(cmc)
         end
+        hull.refresh(pawn, cmc)
     end
     if cfg.DisableSpeedLimiter then
         guard.run("pausing the speed limiter", pauseLimiter, pawn, cmc, refresh)
     end
-    return first
+    return first, refresh
 end
 
 --- Puts the refreshes here a quarter period after first person's, between them:
@@ -553,15 +622,15 @@ local function checkInputLeak(cmc)
 end
 
 -- Whether the velocity read back was capped at the movement component's maximum,
--- or at a walking speed the game wrote since the last frame (the mod has already
--- set MaxWalkSpeed back this frame, so GetMaxSpeed() may no longer say it).
+-- or at a walking speed the game wrote since the last frame, crouched or not (the mod
+-- has already set MaxWalkSpeed back this frame, so GetMaxSpeed() may no longer say it).
 local function atMaxSpeed(cmc, vx, vy, vz)
     local speed, flat = math.sqrt(vx * vx + vy * vy + vz * vz), horizontal(vx, vy)
     local function at(cap)
         return type(cap) == "number" and cap > 0
             and (math.abs(speed - cap) <= cap * 0.01 or math.abs(flat - cap) <= cap * 0.01)
     end
-    if at(st.gameWalkSpeed) then
+    if at(st.gameWalkSpeed) or at(st.gameCrouchedSpeed) then
         return true
     end
     local ok, max = ue.call(cmc, "GetMaxSpeed")
@@ -829,7 +898,12 @@ end
 -- the real floor, a moment after Half-Life's player came down to its floor, so that
 -- time, tc, can lie before the last hook; the path is followed back as far as needed.
 -- (fx, fy, fz): the velocity of the floor, if it is a moving platform; (rx, ry, rz): the
--- velocity written at the last hook, relative to the floor.
+-- velocity written at the last hook, relative to the floor. ahead (cm, 0 or more): the
+-- part of `lift` by which Half-Life's player is still above its floor as Unreal lands the
+-- character, as after a duck tap's lift, placed lower than Half-Life's (see hull.lift),
+-- which times Unreal's landing to Half-Life's ground check: that player comes down after
+-- the frame's end, on the path the frame had, and the updates after the hook count too.
+-- Without it, the path must reach the plane within the frame.
 --
 -- Returns "caught" (the ground check found the floor: nothing is clipped) or "hit" (an
 -- update ran into it); the vertical speed of the update that hit (cm/s: Half-Life moves
@@ -838,7 +912,7 @@ end
 -- and the vertical speed there; and how far above that plane Half-Life's player rests
 -- afterwards (cm, straight up: 1/32 unit off it, or as low as the ground check found
 -- it). Or nil and why, if it can't be told.
-local function landingKind(P, w, at, nx, ny, nz, fx, fy, fz, rx, ry, rz, lift)
+local function landingKind(P, w, at, nx, ny, nz, fx, fy, fz, rx, ry, rz, lift, ahead)
     local from, length, g = w.at, w.dt, P.gravity
     if not (from and at) then
         return nil, "the mod has no position for it"
@@ -850,20 +924,31 @@ local function landingKind(P, w, at, nx, ny, nz, fx, fy, fz, rx, ry, rz, lift)
     local dx, dy, dz = from.X - at.X + fx * length, from.Y - at.Y + fy * length, from.Z - at.Z + fz * length
     local h0 = dz + (dx * nx + dy * ny) / nz
     local a = rz + (rx * nx + ry * ny) / nz
+    -- When the path above the plane, from the height h, comes down to it.
+    local function down(h)
+        if g > 0 then
+            -- (No root: inside Unreal's walking gap and never above the plane. The top of the path.)
+            local root = a * a + 2 * g * h
+            return root > 0 and (a + math.sqrt(root)) / g or a / g
+        elseif a < 0 then
+            return -h / a
+        end
+        return nil
+    end
+    ahead = math.max(0, ahead or 0)
     local tc
     if h0 < -FLOOR_GAP then
         tc = nil -- under this plane while still in the air: it came down on something else
     else
-        h0 = h0 + lift
-        if g > 0 then
-            -- (No root: inside Unreal's walking gap and never above the plane. The top of the path.)
-            local root = a * a + 2 * g * h0
-            tc = root > 0 and (a + math.sqrt(root)) / g or a / g
-        elseif a < 0 then
-            tc = -h0 / a
+        tc = down(h0 + lift - ahead)
+        if tc and tc > length + 1e-6 then
+            tc = nil -- it didn't come down to this plane within the frame
+        elseif tc and ahead > 0 then
+            tc = down(h0 + lift)
         end
+        h0 = h0 + lift
     end
-    if not tc or tc > length + 1e-6 then
+    if not tc then
         return nil, "the floor isn't the plane it came down on"
     end
     -- The last update that began at or before tc: when (tb), and how long it is.
@@ -872,6 +957,8 @@ local function landingKind(P, w, at, nx, ny, nz, fx, fy, fz, rx, ry, rz, lift)
         local air = w.air or 0
         step = 1 / P.rate
         tb = math.floor((air + tc) * P.rate + 1e-9) * step - air
+    elseif tc > length + 1e-6 then
+        tb, step = length, length -- (the update this hook begins: the next frame's length isn't known)
     else
         step = w.prevDt or length
         local back = math.ceil(-tc / step - 1e-9) -- frames before the last hook
@@ -891,12 +978,15 @@ local function landingKind(P, w, at, nx, ny, nz, fx, fy, fz, rx, ry, rz, lift)
         -- down from. (Not looked for with one update per frame: the lengths of the frames
         -- before the last two aren't kept. The height returned, which the log names, is
         -- then the last such update's, up to nearly 2 units lower, and the resting height
-        -- up to 1/32 unit lower. The kind is the same.)
+        -- up to 1/32 unit lower. The kind is the same.) Nor before the hook of the last
+        -- hull change in the air (w.hullAir): the updates before it had the other hull's
+        -- feet, 18 units off.
         if P.rate > 0 then
             for _ = 1, 64 do
                 local t = tb - step
                 local h, v = h0 + a * t - 0.5 * g * t * t, rz - g * t
-                if (w.air or 0) + t < step - 1e-9 or v > P.airborneSpeed or h >= P.groundCheck or h < 0 then
+                if (w.air or 0) + t < step - 1e-9 or v > P.airborneSpeed or h >= P.groundCheck or h < 0
+                    or (w.hullAir and (w.air or 0) + t < w.hullAir - 1e-9) then
                     break
                 end
                 tb, above, rising = t, h, v
@@ -1023,8 +1113,21 @@ local function slopeLanding(cfg, P, nx, ny, nz, vx, vy, touchdown, dt)
         if touchdown.gap and st.takeoffGap then
             lift = lift + touchdown.gap - st.takeoffGap
         end
+        -- A flight with a hull of its own. A duck tap's: Half-Life lifted its player 18 units,
+        -- the mod the character a little less (see hull.lift). Ducked at the take-off
+        -- (st.takeoffDuck) or here: Unreal's crouched capsule rests exactly 18 units below the
+        -- standing one on any slope, while on Valve's maps the ducked hull's floor lies
+        -- duck.restGap below the standing hull's (17 units on a 17.7 degree ramp), so a ducked
+        -- Half-Life player rests that much higher than the crouched capsule. Where these leave
+        -- Half-Life's player higher than the character, it is still above its floor as Unreal
+        -- lands the character (after a duck tap's lift by about 2 units: that is what times
+        -- Unreal's landing to Half-Life's ground check), and comes down after the frame's end.
+        local own = (st.takeoffLift or 0) + (st.takeoffDuck or 0)
+        if touchdown.ducked then
+            own = own + (duck.restGap(nz) - duck.SHIFT) * P.unitScale
+        end
         kind, fall, above, rising, st.landRest = landingKind(P, w, touchdown.at, nx, ny, nz, fx, fy, fz, rx, ry, rz,
-            lift)
+            lift + own, own)
         if not kind then
             -- Still rising faster than 180 u/s after the whole frame's gravity, it was in
             -- the air for Half-Life on every update of the frame, whatever the floor: the
@@ -1154,6 +1257,17 @@ local function walkOn(cfg, nx, ny, nz, vx, vy)
     end
 end
 
+-- A sloped floor the character walks on, for this frame's Half-Life updates on the ground
+-- to run into (see runInFloor): each update that ran on the ground and didn't jump or lift
+-- runs into it with the velocity it left, after its friction, and slides up it if the clip
+-- leaves a rise over 180 u/s at the next update's ground check (physics.simulate, Half-Life's
+-- order: its worked example has the friction first).
+local function armRunIn(cfg, nx, ny, nz)
+    if cfg.SlopeBoosts and nx and nz < 1 then
+        runInFloor = { nx = nx, ny = ny, nz = nz }
+    end
+end
+
 -- Half-Life's slopes, on the velocity this frame starts from (relative to a moving
 -- platform the character stands on; vz is Unreal's vertical speed). Unreal walks a
 -- character along any walkable floor keeping its horizontal speed, and lands it
@@ -1178,8 +1292,11 @@ end
 -- has the slide's gravity for all of it, as Unreal walks all of it (see slideRest). A
 -- flight off the slope starts with the rise the slide had, not that less this frame's
 -- gravity: Unreal's falling update takes the frame's gravity off itself, in the same
--- frame. jumpReady: a jump would start now if on the ground; Half-Life jumps before
--- its ground move, so it runs up a slope only without one.
+-- frame. Running into an upward slope is decided at each of the frame's Half-Life updates
+-- on the ground, after its friction and acceleration, as Half-Life's ground move runs:
+-- this arms it (see armRunIn; physics.simulate decides, and movement.step starts the slide),
+-- on a walkable slope and after a landing Half-Life leaves on the ground. An update that
+-- jumps or lifts a duck tap makes no ground move, so it never runs into the slope.
 -- Running down a slope (SlopeBoosts), Half-Life's ground move goes straight ahead and
 -- its ground check after it reaches 2 units down: where the floor falls further than
 -- that under one update's move, the player is in the air from the end of that update,
@@ -1198,7 +1315,7 @@ end
 -- walked it off the end of the slope); at a landing on a slope, what it did to the
 -- horizontal speed (see slopeLanding); and at a launch, what writes its line (see
 -- flewLine: movement.step writes it once the platform's velocity is known).
-local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady, pawn, at)
+local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, pawn, at)
     local slide = st.slide
     local u = P.unitScale
     if mode == FALLING then
@@ -1248,7 +1365,10 @@ local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady, p
         end
         local ground, cx, cy, cz, leave, slope = slopeLanding(cfg, P, nx, ny, nz, vx, vy, landed, dt)
         if ground then
+            -- On the ground for Half-Life (set down, not told apart, or run into without a
+            -- slide): this frame's updates walk on it, and may run into it.
             walkOn(cfg, nx, ny, nz, cx, cy)
+            armRunIn(cfg, nx, ny, nz)
         end
         return ground, cx, cy, cz, leave, slope
     end
@@ -1323,22 +1443,43 @@ local function slopeStep(cmc, cfg, P, mode, landed, vx, vy, vz, dt, jumpReady, p
             leaveFall = 0.5 * P.gravity * (P.rate > 0 and 1 / P.rate or (st.written and st.written.dt or dt))
             return false, vx, vy, 0, "launch", nil, leaveLine(P, nx, ny, nz, vx, vy, dt)
         end
-        if not jumpReady then
-            -- Running into an upward slope, Half-Life's ground move clips the velocity
-            -- against it and keeps its vertical part: if that still rises faster than 180
-            -- u/s at the next update's ground check, the player is in the air from then on.
-            local _, _, up = physics.clip(vx, vy, 0, nx, ny, nz)
+        -- Running into an upward slope, Half-Life's ground move clips the velocity against
+        -- it and keeps its vertical part: if that still rises faster than 180 u/s at the next
+        -- update's ground check, the player is in the air from then on. First the update
+        -- that took the character onto this floor: Unreal's walk after the last hook did, so
+        -- the last frame's updates had the floor before, and the last of them ran into this
+        -- one with the velocity it left, after its friction (what the mod wrote then: Half-
+        -- Life's order, as for the frame's own updates, which simulate decides one by one).
+        local w = st.written
+        if w and w.mode == WALKING and not w.jumped and not w.launched and not w.lifted then
+            local _, _, up = physics.clip(w.x, w.y, 0, nx, ny, nz)
             if staysUp(P, up, dt) then
                 st.slide = newSlide(P, up, nx, ny, nz)
                 count("slides")
                 slideLine("ran into a %.0f degree slope at %.0f u/s: sliding up it, rising %.0f u/s (Half-Life "
-                    .. "keeps you in the air above 180)", degrees(nz), horizontal(vx, vy) / u, up / u)
-                return false, vx, vy, up
+                    .. "keeps you in the air above 180)", degrees(nz), horizontal(w.x, w.y) / u, up / u)
+                return false, w.x, w.y, up
+            elseif up > P.airborneSpeed and st.duck then
+                -- In the air at that update's last ground check, on the ground at the next one's
+                -- first: the client builds the next duck button from the air (physics.simulate).
+                st.duck.airSeen = true
             end
         end
+        armRunIn(cfg, nx, ny, nz)
         walkOn(cfg, nx, ny, nz, vx, vy)
     end
     return true, vx, vy, 0
+end
+
+-- The line of a slide a run-in started at one of this frame's updates: the velocity and
+-- the rise that update left (after its friction: Half-Life's numbers). onPress: the update
+-- pressed the duck (+ducktap or a duck notch): Half-Life's slope boost from the ground,
+-- where there is no duck tap.
+local function runInLine(P, slide, runIn, onPress)
+    local u = P.unitScale
+    slideLine("ran into a %.0f degree slope at %.0f u/s: sliding up it, rising %.0f u/s (Half-Life keeps you in the "
+        .. "air above 180)%s", degrees(slide.nz), horizontal(runIn.vx, runIn.vy) / u, runIn.up / u,
+        onPress and ", on a duck tap's press (no tap: Half-Life's slope boost)" or "")
 end
 
 -- While the character slides up a slope it is in the air for Half-Life, where a jump
@@ -1411,11 +1552,54 @@ local function hopLine(hop, landing, P, slope)
     if hop.bodyOff then
         body = string.format(", body %+.0f deg from where it headed", math.abs(hop.bodyOff) < 0.5 and 0 or hop.bodyOff)
     end
+    -- Half-Life's duck in the hop: fully ducked as it left the ground, or ducked in the air
+    -- (after so long), stood up in the air, and ducked at the landing.
+    local ducking = ""
+    if hop.duckedTakeoff then
+        ducking = ", ducked as it took off"
+    elseif hop.duckedAt then
+        ducking = string.format(", ducked after %.2f s", hop.duckedAt)
+    end
+    if hop.stoodAt then
+        ducking = ducking .. string.format(", stood up in the air after %.2f s", hop.stoodAt)
+    end
+    if hop.landedDucked then
+        ducking = ducking .. ", landed ducked"
+    end
     log.info("Hop %d (%.0f fps, %.1f updates per frame): take-off %.0f u/s, landing %.0f u/s (%+.0f)%s, %.2f s in "
-        .. "the air, view turned %.0f deg (%.0f deg/s), keys %s, speed cuts %d%s%s", hop.n, hop.frames / time,
+        .. "the air, view turned %.0f deg (%.0f deg/s), keys %s%s, speed cuts %d%s%s", hop.n, hop.frames / time,
         hop.steps / math.max(hop.frames, 1), hop.takeoff / u, landing / u, gain, onSlope, hop.time,
-        hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", st.counts.cuts - hop.cuts, body,
-        st.hopLines == MAX_HOP_LINES and " (further hops aren't logged)" or "")
+        hop.turn, hop.turn / time, #keys > 0 and table.concat(keys) or "none", ducking, st.counts.cuts - hop.cuts,
+        body, st.hopLines == MAX_HOP_LINES and " (further hops aren't logged)" or "")
+end
+
+-- The landing of a duck tap: its line (a tap isn't a hop), within its own budget.
+-- landing: the horizontal speed it landed with (cm/s).
+local function tapLine(tap, landing, P)
+    st.taps = st.taps + 1
+    if st.tapLines >= MAX_TAP_LINES then
+        return
+    end
+    st.tapLines = st.tapLines + 1
+    local u = P.unitScale
+    local function signed(v)
+        v = v / u
+        return math.abs(v) <= 0.5 and 0 or v
+    end
+    local keys = {}
+    for _, key in ipairs({ "W", "A", "S", "D" }) do
+        if tap.keys[key] then
+            keys[#keys + 1] = key
+        end
+    end
+    local frames = math.max(tap.frames, 1)
+    log.info("Tap %d (%.0f fps, %.1f updates per frame): %.0f u/s before its ground update%s, %.0f at "
+        .. "the lift (%+.0f), %d ground update%s before the lift, %.2f s and %d updates in the air, landing %.0f u/s "
+        .. "(%+.0f), keys %s%s", tap.n, frames / math.max(tap.time, 1e-6), tap.updates / frames, tap.before / u,
+        tap.ground == 1 and "" or "s", tap.lifted / u, signed(tap.lifted - tap.before), tap.ground,
+        tap.ground == 1 and "" or "s", tap.time, tap.updates, landing / u, signed(landing - tap.lifted),
+        #keys > 0 and table.concat(keys) or "none", st.tapLines == MAX_TAP_LINES and " (further taps aren't logged)"
+            or "")
 end
 
 -- Where the character heads in the air (see movement.heading): the yaw of hx, hy,
@@ -1482,24 +1666,68 @@ local function bodyOffset(pawn, frame)
     return physics.turn(st.headingYaw, yaw)
 end
 
+-- The frame's Half-Life updates as physics.simulate ran them, kept to run them again
+-- without a duck tap's lift (see movement.step): the simulation's clock and view, the duck
+-- state, a slide's fields and a walked floor's leave.
+local function copy(t)
+    local c = {}
+    for k, v in pairs(t) do
+        c[k] = v
+    end
+    return c
+end
+
+local function snapshot(slide, floor)
+    return { time = st.sim.time, yaw = st.sim.yaw, duck = duck.copy(st.duck), slide = slide and copy(slide),
+        left = floor and floor.left }
+end
+
+local function putBackSnapshot(snap, slide, floor)
+    st.sim.time, st.sim.yaw = snap.time, snap.yaw
+    st.duck = snap.duck
+    if slide then
+        for k in pairs(slide) do
+            slide[k] = nil
+        end
+        for k, v in pairs(snap.slide) do
+            slide[k] = v
+        end
+    end
+    if floor then
+        floor.left = snap.left
+    end
+end
+
+-- What a duck tap's flight keeps, for its line: the speed before its ground updates (at the
+-- landing, or at its press if it came later: before), the speed at the lift, the ground
+-- updates, the frames, time and updates in the air, and the keys.
+local function newTap(before, lifted, ground, airUpdates)
+    return { n = st.taps + 1, before = before, lifted = lifted, ground = ground, time = 0, frames = 0,
+        updates = airUpdates, keys = {} }
+end
+
 --- One frame of Half-Life movement. yaw is the camera's yaw in degrees; frame is
 --- main.lua's frame counter; dt is the time to simulate, frameDt the frame's real
---- length (dt is limited for very long frames, Unreal's movement isn't).
-function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
+--- length (dt is limited for very long frames, Unreal's movement isn't). owned: the
+--- duck, duck tap and jump keys are the mod's on this frame (false while the game shows
+--- a dialogue, a cinematic or another view target: they read as up).
+function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt, owned)
     local mode = cmc.MovementMode
     local onGround = mode == WALKING or mode == NAVWALKING
-    seenFloor, seenNz, seenGap, walkFloor, leaveFall = nil, nil, false, nil, nil
+    seenFloor, seenNz, seenGap, walkFloor, leaveFall, runInFloor = nil, nil, false, nil, nil, nil
+    local s = P.unitScale
 
     -- What carries over from the last frame only does so if the mod moved the
-    -- character on the frame just before.
+    -- character on the frame just before. (Not the duck: st.duck outlives such frames.)
     local afterMove = st.lastStepFrame == frame - 1 and st.written ~= nil
     if st.lastStepFrame ~= frame - 1 then
         st.sim = {}
         st.written = nil
         st.lastMode = nil
-        st.hop = nil
+        st.hop, st.tap = nil, nil
         st.airBaseX, st.airBaseY = 0, 0
         st.airNext, st.takeoffGap, st.takeoffRest = nil, nil, nil
+        st.takeoffLift, st.takeoffDuck, st.hullAir = nil, nil, nil
         st.slide, st.flight = nil, nil
     elseif st.written and st.written.afterMove then
         -- Only if the mod moved the character on the frame before that one too: the
@@ -1542,26 +1770,50 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     stats[source] = stats[source] + 1
     stats.frames = stats.frames + 1
 
-    local jumpHeld = input.jumpHeld(pc, cfg, frame)
-
     local velocity = cmc.Velocity
     local rx, ry, rz = velocity.X, velocity.Y, velocity.Z
     local okAt, at = ue.call(pawn, "K2_GetActorLocation")
     at = okAt and type(at) == "table" and at or nil
+
+    -- What Unreal made of the last frame's hull request (told to Half-Life's duck), and
+    -- where Half-Life's origin is against the capsule's middle where Unreal walks.
+    st.duck = st.duck or duck.new(false)
+    local d = st.duck
+    local crouched = hull.read(pawn, cmc, d, at, mode, st.written, P)
+    if onGround and not st.slide then
+        duck.groundDrop(d, crouched, hull.delta() or duck.SHIFT * s, s)
+    end
+    local answer = hull.answer()
+    if answer == "stood late" then
+        duckLine("stood up late, once Unreal found room")
+    elseif answer == "stood" and st.standLine then
+        duckLine("%s", st.standLine)
+    end
+    st.standLine = nil
+    -- The duck, duck tap and jump buttons of this frame's Half-Life updates.
+    local k = input.buttons(pc, cfg, frame, frameDt or dt, owned, d.wiped)
+    st.duckKey = k.duckHeld
+    duck.frame(d, { held = k.duckHeld, notch = k.duckNotch, tap = k.tapHeld and not hull.liftOff(), jump = k.jumpHeld,
+        jumpNotch = k.jumpNotch, autoHop = cfg.AutoHop })
+
     local landed = st.lastMode == FALLING and onGround
     if not onGround and st.lastMode and st.lastMode ~= FALLING then
         -- Walked off a ledge in Unreal's last update: leaving a moving platform added
         -- its velocity (not with bStayBasedInAir), as the mod's jump does. (How far above
-        -- the floor it stood there wasn't read: the mod reads that at its own take-offs.)
+        -- the floor it stood there wasn't read: the mod reads that at its own take-offs.
+        -- A duck tap's lift, a ducked take-off and a hull change in the air belonged to
+        -- the flights they started in, and go with them.)
         local w = st.written
         st.airBaseX, st.airBaseY = 0, 0
-        st.takeoffGap, st.takeoffRest = nil, nil
+        st.takeoffGap, st.takeoffRest, st.takeoffLift, st.takeoffDuck, st.hullAir = nil, nil, nil, nil, nil
         if w and not st.stayBasedInAir then
             st.airBaseX, st.airBaseY = w.baseX, w.baseY
         end
     end
     local vx, vy = checkCut(cmc, cfg, P, rx, ry, rz, mode, landed, at)
     st.limiterWoke = false
+    -- The frame of ALS's braking a crouch or a stand-up on the ground brought back, given back.
+    vx, vy = hull.brakeBack(st.written, vx, vy)
     local vz = rz
     if not onGround and st.lastMode and st.lastMode ~= FALLING and not st.slide
         and rz <= GAME_JUMP_SHARE * P.jumpSpeed then
@@ -1578,8 +1830,13 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
     local touchdown
     if landed then
         landingSpeed = horizontal(vx, vy)
-        stats.landings = stats.landings + 1
-        stats.landingLoss = stats.landingLoss + math.max(0, st.lastSpeed - horizontal(rx, ry))
+        if st.tap then
+            -- (A duck tap's landing isn't a hop's: the speed lost at landing is about hops.)
+            count("tapLandings")
+        else
+            stats.landings = stats.landings + 1
+            stats.landingLoss = stats.landingLoss + math.max(0, st.lastSpeed - horizontal(rx, ry))
+        end
         if st.hop and st.hop.frames == 0 then
             -- Unreal landed the jump again within the frame it started in: the floor
             -- rose faster than the jump (a steep slope taken fast). With SlopeBoosts such
@@ -1604,7 +1861,9 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             leftWith = st.flight.leaveFall
             st.flight = nil
         end
-        touchdown = { at = at, x = 0, y = 0, z = 0, leaveFall = leftWith }
+        -- ducked: Half-Life's player came down fully ducked, and so did the capsule.
+        touchdown = { at = at, x = 0, y = 0, z = 0, leaveFall = leftWith,
+            ducked = crouched and d.state == duck.DUCKED }
         -- Landed on a moving platform: from now on Unreal carries the character with
         -- it, apart from its velocity, but leaves the velocity as it was in the air,
         -- so the platform's motion would count twice (and each hop on the platform
@@ -1632,15 +1891,21 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         st.landRest = nil -- (a landing in this frame sets it; a slide keeps its landing's)
     end
     if slopes then
-        hlGround, vx, vy, vz, leave, slope, launchLine = slopeStep(cmc, cfg, P, mode, touchdown, vx, vy, vz, dt,
-            jumpHeld and (cfg.AutoHop or not st.jump.latched), pawn, at)
+        hlGround, vx, vy, vz, leave, slope, launchLine = slopeStep(cmc, cfg, P, mode, touchdown, vx, vy, vz, dt, pawn,
+            at)
     end
     local launch = leave == "launch"
     if landed then
         if st.hop then
+            st.hop.landedDucked = d.state == duck.DUCKED
             hopLine(st.hop, landingSpeed, P, slope)
         end
         st.hop = nil
+        if st.tap then
+            tapLine(st.tap, landingSpeed, P)
+        end
+        st.tap = nil
+        st.airRefusal = nil
     end
     local slide = st.slide
     if slide then
@@ -1649,15 +1914,53 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             slide.floorZ, slide.ox, slide.oy = at.Z - (floorGap(cmc) or 0), 0, 0
         end
         holdGameJump(pawn)
-        -- With auto hop a held jump starts on the update the slide ends on (a press
-        -- without it was used up in the air, as in Half-Life).
-        slide.jump = jumpHeld and cfg.AutoHop
     end
-    local doJump = physics.wantJump(st.jump, jumpHeld, hlGround, cfg.AutoHop)
+    -- On the ground for Half-Life since the character last landed or took over, or since a
+    -- duck tap's press on a later frame: the speed then and the updates since, for the tap's line.
+    local hookSpeed = horizontal(vx, vy)
+    if hlGround and not st.groundRun then
+        st.groundRun = { before = hookSpeed, updates = 0 }
+    elseif not hlGround then
+        st.groundRun = nil
+    end
 
+    -- The room the frame's updates have: to stand up on the ground or in the air (where
+    -- Unreal would pop a capsule up near a floor, so the floor below is asked first), and
+    -- to lift a duck tap.
+    local roomBelow
+    if d.state == duck.DUCKED and mode == FALLING and not slide and not duck.heldInAir(d) then
+        roomBelow = hull.floorRoom(cmc, at)
+    end
+    local room = hull.room(d, slide ~= nil, roomBelow, mode == NAVWALKING)
     local floor = hlGround and not slide and walkFloor or nil
-    local nx, ny, nz, jumped, steps = physics.simulate(st.sim, vx, vy, vz, hlGround, yaw, wish, doJump, P, dt,
-        P.rate, slide, floor)
+    local dk = { d = d, room = room, runIn = hlGround and not slide and runInFloor or nil, out = st.dkOut }
+    local snap = snapshot(slide, floor)
+    local updateTime = P.rate > 0 and 1 / P.rate or dt
+    local clock = st.duckClock
+    local nx, ny, nz, jumped, steps = physics.simulate(st.sim, vx, vy, vz, hlGround, yaw, wish, nil, P, dt, P.rate,
+        slide, floor, dk)
+    local out = dk.out
+    -- A duck tap's lift: the take-off's readings while the character still stands on its
+    -- floor, then the lift (a swept move up first: Half-Life's room test). Without room the
+    -- frame's updates run again without it, before Unreal has moved anything.
+    local liftAt, liftH, liftBase
+    if out.lifted then
+        local gap = floorGap(cmc)
+        if not st.stayBasedInAir then
+            liftBase = { platformVelocity(cmc) }
+        end
+        liftAt, liftH = hull.lift(pawn, cmc, at, gap)
+        if not liftAt then
+            putBackSnapshot(snap, slide, floor)
+            d = st.duck
+            dk.d, room.lift = d, false
+            nx, ny, nz, jumped, steps = physics.simulate(st.sim, vx, vy, vz, hlGround, yaw, wish, nil, P, dt, P.rate,
+                slide, floor, dk)
+            out, liftBase = dk.out, nil
+        end
+    end
+    local lifted = out.lifted ~= nil and liftAt ~= nil
+    st.duckClock = clock + steps * updateTime
     stats.steps = stats.steps + steps
     if floor and floor.left and floor.left < steps and ue.bool(pawn, "bPressedJump") ~= true then
         -- Running down a slope, one of this frame's updates on the ground left the floor
@@ -1667,7 +1970,41 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         hlGround, leave, launch = false, "launch", true
         leaveFall = 0.5 * P.gravity * (P.rate > 0 and 1 / P.rate or dt)
     end
-    if slide then
+    if out.runIn then
+        -- One of this frame's updates on the ground ran into the upward slope fast enough to
+        -- slide up it from the next update on (Half-Life's step move): Unreal walks the
+        -- character up the slope for the rest of the frame, as for a slide that was on.
+        local runIn = out.runIn
+        slide = out.slide
+        st.slide = slide
+        count("slides")
+        local onPress = false
+        for _, e in ipairs(out.events) do
+            if e.k == runIn.k and e.what == "pressed" then
+                onPress = true
+            end
+        end
+        if onPress then
+            count("runInPresses")
+        end
+        runInLine(P, slide, runIn, onPress)
+        holdGameJump(pawn)
+        slide.floorZ = at and at.Z - (floorGap(cmc) or 0) or nil
+        hlGround = false
+    end
+    if slide and slide.ducked then
+        -- Ducked while sliding: the ducked hull's lower edge is 18 units higher, off the
+        -- slope, and Half-Life's player flies on with the rise the slide had (the gravity of
+        -- the update that ducked is Unreal's, in its falling update).
+        st.slide = nil
+        count("launches")
+        local rise = nz
+        launchLine = function(speed)
+            slideLine("ducked while sliding up the slope: flying off it at %.0f u/s, rising %.0f u/s", speed,
+                rise / P.unitScale)
+        end
+        hlGround, leave, launch = false, "launch", true
+    elseif slide then
         if slide.ended then
             -- Over at one of this frame's updates: the rest of them were on the ground.
             slideOver(P, slide.endX, slide.endY, slide.endZ)
@@ -1692,27 +2029,94 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
             end
         end
     end
-    local leaving = jumped or launch
+    -- Leaving the ground: the jump, a flight off a slope, or a duck tap's lift.
+    local leaving = jumped or launch or lifted
     st.groundSteps = (hlGround and not leaving) and st.groundSteps + steps or 0
+
+    -- The duck's events in this frame's updates: Half-Life's origin against the capsule's
+    -- middle (the eye's drop), the lines and counts, and what the hull request needs.
+    local groundChange, airChange, airDucked, groundPress = false, false, false, nil
+    for _, e in ipairs(out.events) do
+        local what, ground = e.what, e.ground
+        duck.eventDrop(d, what, ground, s, what == "lift" and liftH or nil)
+        local when = clock + e.k * updateTime
+        if what == "pressed" then
+            st.pressedAt = when
+            groundPress = ground and e.k or groundPress
+        elseif what == "ducked" or what == "stood" then
+            groundChange = ground
+            if not ground then
+                airChange = true
+            end
+            if what == "ducked" then
+                st.duckedAt = when
+                airDucked = airDucked or not ground
+                count(ground and "groundDucks" or "airDucks")
+                if ground then
+                    local since = st.pressedAt and when - st.pressedAt
+                    duckLine("ducked on the ground after %s", since and string.format("%.2f s (%d updates)", since,
+                        math.floor(since / updateTime + 0.5)) or "a press the mod didn't see")
+                elseif k.duckNotch and not k.duckHeld then
+                    duckLine("ducked in the air for a wheel notch (the feet 18 units higher)")
+                else
+                    duckLine("ducked in the air (the feet 18 units higher)")
+                end
+                if st.hop and not ground and not st.hop.duckedAt then
+                    st.hop.duckedAt = st.hop.time
+                end
+            else
+                count(ground and "groundStands" or "airStands")
+                if ground then
+                    local text = string.format("stood up on the ground after %s", st.duckedAt
+                        and string.format("%.1f s ducked", when - st.duckedAt) or "a duck from before")
+                    if crouched then
+                        st.standLine = text -- (said once Unreal has stood the capsule up: it may find no room)
+                    else
+                        duckLine("%s", text)
+                    end
+                else
+                    duckLine("stood up in the air")
+                end
+                if st.hop and not ground and not st.hop.stoodAt then
+                    st.hop.stoodAt = st.hop.time
+                end
+            end
+        elseif what == "refused" and not ground and roomBelow == false and not st.airRefusal then
+            st.airRefusal = true
+            duckLine("can't stand up in the air yet: the floor is closer under the ducked feet than the standing "
+                .. "hull needs (Half-Life's 18 units); standing up once there is room or on the ground")
+        end
+    end
 
     local bx, by, bz = 0, 0, 0
     if leaving then
         if jumped then
             log.first("jump", "First jump by the mod (speed %.0f cm/s)", horizontal(nx, ny))
-        else
+        elseif launch then
             log.first("launch", "First flight off a slope by the mod (speed %.0f cm/s)", horizontal(nx, ny))
         end
         -- How far above the floor it stands as it takes off, and where Half-Life's
         -- player rests there (as its landing left it, or 1/32 unit off this floor's
         -- plane if the floor was read in this frame), for the landing (see
-        -- slopeLanding): read before the floor is gone.
+        -- slopeLanding): read before the floor is gone. A take-off fully ducked rests on
+        -- Valve's ducked floor, which needs the floor's slope (st.takeoffDuck below): read
+        -- here if this frame didn't (slow on the ground, the floor isn't read otherwise).
+        if slopes and seenNz == nil and onGround and not lifted and d.state == duck.DUCKED and not airDucked then
+            floorNormal(cmc)
+        end
         st.takeoffGap = slopes and floorGap(cmc) or nil
         st.takeoffRest = st.landRest or (seenNz and P.restHeight / seenNz) or nil
+        st.takeoffLift = lifted and duck.SHIFT * s - liftH or nil
+        st.hullAir, st.airRefusal = nil, nil
         -- With bStayBasedInAir, Unreal keeps carrying the character with the
         -- platform in the air and adds nothing when it leaves the ground, so the
-        -- mod keeps nothing either.
+        -- mod keeps nothing either. (A lift read it before the character moved.)
         local platformX, platformY, platformZ = 0, 0, 0
-        if not st.stayBasedInAir then
+        if lifted then
+            if liftBase then
+                platformX, platformY, platformZ = liftBase[1], liftBase[2], liftBase[3]
+            end
+        elseif not st.stayBasedInAir then
             platformX, platformY, platformZ = platformVelocity(cmc)
         end
         cmc:SetMovementMode(FALLING, 0)
@@ -1729,6 +2133,7 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
                 if changes <= MAX_NOTE_LINES then
                     log.info("Something in the game changed the velocity by (X=%.0f Y=%.0f Z=%.0f) cm/s when %s", ux,
                         uy, uz, jumped and "the jump started; the mod's jump ignores it"
+                            or lifted and "the duck tap lifted the character; the mod ignores it"
                             or "the character flew off a slope; the mod ignores it")
                 end
             end
@@ -1750,9 +2155,39 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         -- of the moving platform it left.
         launchLine(st.lastSpeed / P.unitScale)
     end
+    -- A duck tap's press on the ground after the frame its run on the ground began on (walking,
+    -- standing, a wheel notch by hand): the tap's ground updates count from it, as the ones
+    -- before weren't the tap's. (At the landing's own hook, as +ducktap presses, they count
+    -- from the landing: a stand-up's update there is the tap's too.)
+    local run = st.groundRun
+    if groundPress and run and run.updates > 0 then
+        run.before, run.updates = hookSpeed, -(groundPress - 1)
+    end
+    if lifted then
+        -- A duck tap: not a hop (no hop line, not in the strafing numbers), a line of its own.
+        count("taps")
+        st.tap = newTap(run and run.before or st.lastSpeed, st.lastSpeed, (run and run.updates or 0) + out.ground,
+            steps - out.lifted + 1)
+    elseif st.tap and not onGround then
+        local tap = st.tap
+        tap.time = tap.time + (frameDt or dt)
+        tap.frames = tap.frames + 1
+        tap.updates = tap.updates + steps
+        for key in keysHeld(forward, right):gmatch(".") do
+            tap.keys[key] = true
+        end
+    end
+    if leaving or not hlGround then
+        st.groundRun = nil
+    elseif st.groundRun then
+        st.groundRun.updates = st.groundRun.updates + out.ground
+    end
     if jumped then
+        -- Half-Life's duck at the take-off: fully ducked as it jumped, or ducked in the air
+        -- on one of this frame's later updates.
         st.hop = { n = st.hops + 1, takeoff = st.lastSpeed, time = 0, turn = 0, frames = 0, steps = 0,
-            cuts = st.counts.cuts, keys = {}, yaw = yaw }
+            cuts = st.counts.cuts, keys = {}, yaw = yaw, duckedTakeoff = d.state == duck.DUCKED and not airDucked,
+            duckedAt = airDucked and 0 or nil }
     elseif st.hop and not onGround then
         local hop = st.hop
         if hop.frames == 0 then
@@ -1834,12 +2269,37 @@ function movement.step(pc, pawn, cmc, cfg, P, dt, yaw, frame, frameDt)
         end
     end
     st.airNext = air and air + (frameDt or dt)
+    if airChange and air then
+        -- The hull changed in the air in this frame: a landing doesn't look back past this
+        -- hook for an update that ended within reach (they had the other hull's feet).
+        st.hullAir = air
+    end
+
+    -- Last, after every SetMovementMode of the frame (ALS clears the crouch wish inside
+    -- it): the crouch Unreal is to make of Half-Life's duck in its next update.
+    hull.request(pawn, cmc, { state = d.state, button = out.held, falling = mode == FALLING or leaving,
+        navWalking = mode == NAVWALKING and not leaving, sliding = st.slide ~= nil, roomBelow = roomBelow,
+        groundChange = groundChange, leaving = leaving, duckKey = k.duckHeld, dt = frameDt or dt })
+    if leaving then
+        -- A ducked take-off rests on Valve's ducked floor, duck.restGap below the standing
+        -- one, where the crouched capsule rests 18 units lower (see slopeLanding).
+        local ducked = not lifted and d.state == duck.DUCKED and not airDucked and (crouched or hull.aheadBase())
+        st.takeoffDuck = ducked and (duck.SHIFT - duck.restGap(seenNz)) * s or nil
+    end
+    -- What the camera gets: Half-Life's eye against the standing eye, and for the game's
+    -- camera, ahead of a crouch Unreal makes keeping the feet (see movement.eyeInfo).
+    st.eye = { offset = duck.eyeOffset(d, s, crouched, false), crouched = crouched, standHalf = hull.standHalf(),
+        aheadOffset = hull.aheadBase() and duck.eyeOffset(d, s, crouched, true) or nil }
+    st.eyeFrame = frame
+
     -- What the game should hand back next frame, once its braking took the extra,
-    -- and where the character was before this frame's move. long: a frame longer than
-    -- the Half-Life updates count; prevDt: the length of the frame before this one.
+    -- and where the character was before this frame's move (after a duck tap's lift,
+    -- where the lift put it). long: a frame longer than the Half-Life updates count;
+    -- prevDt: the length of the frame before this one; hullAir: see landingKind.
     st.written = { x = nx + bx, y = ny + by, z = writtenZ, mode = leaving and FALLING or mode, jumped = jumped,
-        launched = launch, at = at, dt = frameDt or dt, baseX = baseX or 0, baseY = baseY or 0, baseZ = baseZ or 0,
-        afterMove = afterMove, air = air, prevDt = was and was.dt, long = frameDt ~= nil and frameDt > dt }
+        launched = launch, lifted = lifted, at = lifted and liftAt or at, dt = frameDt or dt, baseX = baseX or 0,
+        baseY = baseY or 0, baseZ = baseZ or 0, afterMove = afterMove, air = air, prevDt = was and was.dt,
+        long = frameDt ~= nil and frameDt > dt, hullAir = st.hullAir }
 end
 
 --- A frame Unreal runs as paused (see main.lua's isPaused). Unreal doesn't move the
@@ -1853,6 +2313,45 @@ function movement.hold(frame)
         st.lastStepFrame = frame
         st.written = nil
     end
+    -- The duck stays as it is (its timer doesn't run), and so does the eye.
+    if st.eye then
+        st.eyeFrame = frame
+    end
+end
+
+--- A frame of root motion, which the mod leaves to the game: the hull keeps Half-Life's
+--- duck as it is (the crouch the mod holds is asked for again, a game's crouch read),
+--- with no Half-Life update. P: the movement's numbers (P.gravity, P.unitScale); dt: the
+--- frame's length.
+function movement.keepHull(pawn, cmc, P, dt, frame)
+    local d = st.duck
+    if not st.active or not d then
+        return
+    end
+    local mode = ue.number(cmc, "MovementMode")
+    local crouched = hull.read(pawn, cmc, d, nil, mode, nil, P)
+    hull.request(pawn, cmc, { state = d.state, button = d.held, falling = mode == FALLING,
+        navWalking = mode == NAVWALKING, sliding = st.slide ~= nil, groundChange = false, leaving = false,
+        duckKey = st.duckKey, dt = dt })
+    if st.eye then
+        st.eye.crouched = crouched
+        st.eye.offset = duck.eyeOffset(d, P.unitScale, crouched, false)
+        st.eye.aheadOffset = nil
+        st.eyeFrame = frame
+    end
+end
+
+--- What the camera needs of Half-Life's duck for the eye (camera.applyEye), while the
+--- movement steers the character (a pause and root motion keep the last): { offset (cm to
+--- add to the standing eye), aheadOffset (the same for the game's camera, on a frame Unreal
+--- crouches the standing capsule keeping its feet; else nil), crouched (bIsCrouched at this
+--- hook), standHalf (the standing capsule's half height, cm, scaled; nil until known) }, or
+--- nil: then the camera follows the game's hull.
+function movement.eyeInfo(frame)
+    if st.active and st.eye and st.eyeFrame == frame then
+        return st.eye
+    end
+    return nil
 end
 
 --- Where the character heads in the air in this frame, for the body to face: the
@@ -1912,13 +2411,14 @@ function movement.release()
     overrides:restore()
     putCurveBack()
     resumeLimiter()
+    hull.release()
     st.active = false
     st.cmc = nil
     st.cmcName = nil
-    st.jump.latched = false
     st.written = nil
-    st.hop = nil
+    st.hop, st.tap = nil, nil
     st.slide, st.flight = nil, nil
+    st.duck, st.eye, st.groundRun = nil, nil, nil
     seenFloor, seenNz, seenGap = nil, nil, false
     log.debug("Movement given back to the game")
 end
@@ -1934,33 +2434,54 @@ function movement.forget()
     st.limiter = nil
     st.curve = nil
     st.curveName = nil
+    hull.forget()
     st.active = false
     st.cmc = nil
     st.cmcName = nil
-    st.jump.latched = false
     st.written = nil
-    st.hop = nil
+    st.hop, st.tap = nil, nil
     st.slide, st.flight = nil, nil
+    st.duck, st.eye, st.groundRun = nil, nil, nil
     seenFloor, seenNz, seenGap = nil, nil, false
 end
 
---- Starts the counts of this file's lines again (hops, landings on slopes of both
---- kinds, slides and flights, and what the game did: speed cuts, its limiter,
---- MaxWalkSpeed, a changed jump), so that what comes next is logged like a session's
---- first: for the reload key, which a test presses before each part it wants in the log.
+--- Starts the counts of this file's lines again (hops, duck taps, ducks, landings on
+--- slopes of both kinds, slides and flights, and what the game did: speed cuts, its
+--- limiter, MaxWalkSpeed, a changed jump, and the hull's), so that what comes next is
+--- logged like a session's first: for the reload key, which a test presses before each
+--- part it wants in the log.
 function movement.logAgain()
     st.hopLines, st.slideLines, st.landingLines, st.keptLines = 0, 0, 0, 0
+    st.tapLines, st.duckLines = 0, 0
     st.noteLines = {}
+    hull.logAgain()
 end
 
 --- What happened since the last call: frames moved, where the input came from,
 --- hops, top speeds, per jump the speed gained in the air and how far the view
---- turned meanwhile, the speed lost at landing, Half-Life updates run, and what
---- the game did to the speed. Speeds in cm/s.
+--- turned meanwhile, the speed lost at landing, Half-Life updates run, what the game
+--- did to the speed, and the duck's taps, ducks and stand-ups (with the hull's counts
+--- since then: hull.takeStats). Speeds in cm/s.
 function movement.takeStats()
     local result = stats
     stats = newStats()
+    result.hull = hull.takeStats()
     return result
+end
+
+--- Half-Life's duck as the movement has it, and its counts since the mod loaded, for the
+--- report.
+function movement.duckStatus()
+    local d = st.duck
+    return {
+        state = d and d.state, timer = d and d.timer, view = d and d.view, drop = d and d.drop,
+        held = d and d.held, wiped = d and d.wiped, notch = d and d.notch, tapHad = d and d.tapHad,
+        jumpWas = d and d.jumpWas, taps = st.counts.taps, tapLandings = st.counts.tapLandings,
+        groundDucks = st.counts.groundDucks, airDucks = st.counts.airDucks, groundStands = st.counts.groundStands,
+        airStands = st.counts.airStands, runInPresses = st.counts.runInPresses,
+        tapLinesLeft = math.max(0, MAX_TAP_LINES - st.tapLines), duckLinesLeft = math.max(0, MAX_DUCK_LINES -
+            st.duckLines),
+    }
 end
 
 --- What the movement side is doing, for the diagnostics report.
@@ -1986,6 +2507,7 @@ function movement.status()
         slopeLost = st.slopeLost,
         sliding = st.slide ~= nil,
         gameMaxWalkSpeed = st.cmc and overrides:saved(st.cmc, "MaxWalkSpeed"),
+        gameMaxWalkSpeedCrouched = st.cmc and overrides:saved(st.cmc, "MaxWalkSpeedCrouched"),
         counts = st.counts,
         hops = st.hops,
         hopLinesLeft = math.max(0, MAX_HOP_LINES - st.hopLines),

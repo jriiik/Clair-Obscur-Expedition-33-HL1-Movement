@@ -293,3 +293,53 @@ docs written last. The figures are in `docs/MEASUREMENTS.md`.
   a slide, the 2005 version at 80 fps, `docs/TESTING.md` step 5 changing two settings at once, a test comment naming
   a review folder, and the measurement behind "about every second landing" down a hill.
 - Not changed: see "Seen and not changed" in `CLAUDE.md`'s "Status".
+
+## 0.4.0: ducking, +ducktap, the wheel and the keys
+
+The owner asked for Half-Life's ducking with the keys he plays with (Ctrl and the wheel down to duck, Space and the
+wheel up to jump, Shift for OpenAG's +ducktap, all changeable), the keys taken from the game only while the mod moves
+the character, and `PhysicsRate` 250. Specs of Half-Life's duck and of OpenAG's +ducktap were written from published
+descriptions (nobody on the work opened the Half-Life SDK or OpenAG's source), three designs were drawn up and judged,
+merged into one, attacked by two reviewers (as Half-Life and as the game: 18 problems, all held, all fixed in the
+design), and built in lanes: the rate change first (`PhysicsRate` 250 and the docs' figures measured again), the
+fake game's extension points, then the physics (`duck.lua`, `physics.simulate`), the keys (`settings.lua`'s key
+rule, `input.lua`, `keys.lua`), the hull (`hull.lua`, the journal's `field` and `context`, `Overrides:adopt`) and
+the eye (`camera.lua`) side by side, then the wiring (`movement.lua`, `main.lua`, `view.lua`), the report and the
+docs. Every rule a lane built has a test shown to fail on a broken variant of it.
+
+- Changed for all movement, from Half-Life's order: a horizontal speed under 1 u/s after an update's friction and
+  ground acceleration becomes 0 on every ground update that doesn't jump, with or without a wish (two of the owner's
+  demo's updates need it); and running into an upward slope is decided per update after the update's ground move,
+  never on an update that jumps or lifts. 0.3.1 decided it at the hook from the velocity before the update's
+  friction and started the slide on the frame's first update, so a +ducktap press on a ramp was lifted where
+  Half-Life slides; the run-in speeds of the slope boosting table moved up by about 1.6 % (on 30° 420 to 427 u/s).
+- The jump is decided per update with Half-Life's "jump is down" mark (AutoHop stays Bunnymod XT's autojump).
+- `PhysicsRate` 250 by default: at 250 landings on even hills, gentle tilts and rough ground keep the speed at
+  running and strafing speeds (Half-Life at fps_max 250 does the same), a leap down a slope needs 2.5 times the speed
+  (never at a run), slope boosting nearly always starts in the hop after a set-down landing, and air strafing gains
+  a sixth more than at 100 with A and D. The docs' figures were measured again (`docs/MEASUREMENTS.md`).
+- Decided on the way, against the design: ducked landings on slopes copy Valve's maps (`duck.restGap`, 17 units on
+  the owner's 17.7° ramp, not the exact 18: his ducked hop on the spot there is clipped to 90.47 u/s in his log, and
+  is in the mod at `PhysicsRate` 100); a duck notch at a hook with no update waits for its update, also under a
+  ducktap key (OpenAG keeps it); a frame with no update doesn't jump where its first update would lift. While
+  wiring, a duck tap's landing on a slope was found never decided ("can't tell" every time): the landing rule now
+  follows Half-Life's path past the frame's end for a flight with a hull of its own (95 of 95 tap landings as a model
+  of Half-Life's updates has them).
+- The report gained the ducking and keys lines (163 lines in the fake game, 145 before).
+- Tests: 422 to 622, then 631 with the final review's fixes.
+- The final review of the candidate (the physics, the game side, the keys, the tests, the docs; each medium finding
+  checked by a second reviewer, 8 confirmed, none refuted) and its fixes: a walk-off now forgets the last flight's lift,
+  ducked take-off and hull change (after any duck tap, walk-offs onto a slope were decided 2.83 units off, about a
+  quarter of them the wrong kind); `bCrouchMaintainsBaseLocation`, written true for the update that changes the hull
+  and leaves the ground, is written false at the next hook in the air (Unreal sets it only at mode changes, so a later
+  duck in that flight kept the feet, 45 cm low); the hand-back guard keeps a run the game ends (a key it kept, Shift
+  held since a take-over or a gamepad's trigger, let go first: the run was left on with no key held) and doesn't count
+  paused frames in its 10 s; at a hook with no update a jump notch in the air waits for the next update, and the jump
+  waits where that update stands up from the full duck; after a UE4SS mods restart in mid-duck the old copy's crouch is
+  the mod's, not the game's; no lift in nav-mesh walking. The docs: the jump keys taken from the game also keep its
+  ledge grab on a jump press and its double jump from working (README, TESTING step 7); in D6 a wheel notch in the air
+  isn't seen below about 125 fps, and the report part to read for the wheel; D4b without F6; D7's strafes 6 s, to fit
+  the 30 tap lines; D13's `Keys: given back` reasons; the README on when the keys are the game's; `AirSpeedCap`'s
+  slow-turn figures. Tests added for two limits of the brake-back, the drop window and the lift's 10 cm. Left: a ground
+  stand-up on slopes of 23.6° or more stays on the ground (CLAUDE.md, "Ducking"); a held jump key in the air at a hook
+  with no update is judged at once, as in 0.3.1; `WALK_GAP` and `HOTKEY_REPEAT` have no test.

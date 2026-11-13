@@ -34,9 +34,9 @@ local st = {
     missing = {}, -- "object address/function" -> true for functions the game doesn't have
 }
 
---- Forgets everything about the last character, for example after a level change.
-function view.reset()
-    st.pawnAddr = nil
+-- Forgets the character's cameras (a new character: the game's dialogue and cinematic
+-- systems are the controller's, and stay as they were asked).
+local function resetCameras()
     st.cameras = {}
     st.index = nil
     st.mainCamera = nil
@@ -44,6 +44,12 @@ function view.reset()
     st.exploration = {}
     st.findCamera = true
     st.nextScan = 0
+end
+
+--- Forgets everything about the last character, for example after a level change.
+function view.reset()
+    st.pawnAddr = nil
+    resetCameras()
     st.nextAsk = 0
     st.dialogue = false
     st.cinematic = false
@@ -146,11 +152,27 @@ local function pickChanged()
     return shown ~= nil and (not ue.valid(shown) or not isActive(shown))
 end
 
---- Keeps track of the character's cameras and the game's state. Called every frame.
+--- Asks the game's dialogue and cinematic systems whether they are on, every 0.25 s
+--- (on other frames nothing is asked). Called on every frame the mod acts, first person on
+--- or off (the mod's keys are the game's while a dialogue or a cinematic shows), and from
+--- view.update.
+function view.watchGame(pc, now)
+    if now >= st.nextAsk then
+        st.nextAsk = now + ASK_EVERY
+        local dialogue = ue.object(pc, "BP_DialogueSystemComponent")
+        st.dialogue = dialogue ~= nil and ask(dialogue, "IsInDialogue") == true
+        local cinematic = ue.object(pc, "BP_CinematicSystem")
+        st.cinematic = cinematic ~= nil and (ue.bool(cinematic, "IsPlayingCinematic") == true
+            or ask(cinematic, "IsInCinematicTransition") == true)
+    end
+end
+
+--- Keeps track of the character's cameras and the game's state. Called every frame
+--- first person may be on.
 function view.update(pc, pawn, cfg, now)
     local pawnAddr = ue.address(pawn)
     if pawnAddr ~= st.pawnAddr then
-        view.reset()
+        resetCameras()
         st.pawnAddr = pawnAddr
     end
     local due = now >= st.nextScan
@@ -169,14 +191,7 @@ function view.update(pc, pawn, cfg, now)
         end
         scan(pawn, cfg)
     end
-    if now >= st.nextAsk then
-        st.nextAsk = now + ASK_EVERY
-        local dialogue = ue.object(pc, "BP_DialogueSystemComponent")
-        st.dialogue = dialogue ~= nil and ask(dialogue, "IsInDialogue") == true
-        local cinematic = ue.object(pc, "BP_CinematicSystem")
-        st.cinematic = cinematic ~= nil and (ue.bool(cinematic, "IsPlayingCinematic") == true
-            or ask(cinematic, "IsInCinematicTransition") == true)
-    end
+    view.watchGame(pc, now)
 end
 
 --- Called when first person starts, whose refreshes start then: the next scan
@@ -196,9 +211,10 @@ function view.camera()
     return nil
 end
 
---- Why first person has to wait: a short key and the text for the log, or nil if it
---- may be on. viewTarget is what the camera manager shows.
-function view.blocker(pawn, viewTarget)
+--- What the game shows instead of the character: "view-target" (another view target),
+--- "cinematic" or "dialogue" (as view.watchGame last asked), each with the text for the log;
+--- or nil. viewTarget is what the camera manager shows.
+function view.gameBlock(pawn, viewTarget)
     if ue.address(viewTarget) ~= ue.address(pawn) then
         return "view-target", function()
             return "waiting (the game shows the view of " .. ue.describe(viewTarget) .. ", not your character)"
@@ -207,6 +223,16 @@ function view.blocker(pawn, viewTarget)
         return "cinematic", "waiting (a cinematic is playing)"
     elseif st.dialogue then
         return "dialogue", "waiting (dialogue)"
+    end
+    return nil
+end
+
+--- Why first person has to wait: a short key and the text for the log, or nil if it
+--- may be on. viewTarget is what the camera manager shows.
+function view.blocker(pawn, viewTarget)
+    local key, text = view.gameBlock(pawn, viewTarget)
+    if key then
+        return key, text
     elseif not st.findCamera then
         return nil -- the engine shows the character's eyes, whatever its cameras do
     end

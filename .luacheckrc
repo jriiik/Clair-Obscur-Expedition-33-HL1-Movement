@@ -16,6 +16,7 @@ read_globals = {
     "FName",
     "FText",
     "Key",
+    "ModifierKey", -- (the hotkeys' Ctrl and Shift; keys.lua reads it with rawget, as older UE4SS lack it)
 }
 
 files["tests/"] = {
@@ -30,6 +31,7 @@ files["tests/"] = {
         "FName",
         "FText",
         "Key",
+        "ModifierKey",
         "ModRef",
         "TEST_ROOT",
         "print",

@@ -364,7 +364,7 @@ t.test("with a fast grounded turn rate (40), a landing doesn't kick the body pas
     noErrors(g)
 end)
 
--- Third person at a steady frame rate (PhysicsRate 100 unless given): hops for 8
+-- Third person at a steady frame rate (the default PhysicsRate unless given): hops for 8
 -- seconds while holding D and turning right at 180 degrees a second, which get faster
 -- all the time (to over 800 u/s). Returns what the frames in the air showed after the
 -- first second. While slower than `slow` u/s: slowStep, the biggest turn of the body's
@@ -415,7 +415,9 @@ end
 
 t.test("at 144 fps, with frames that run no Half-Life update, the body's target turns as evenly as the hop direction "
     .. "and the body keeps up", function()
-    local g, m = strafeHopsAt(144, 700)
+    -- At PhysicsRate 100, 0.3.1's default: at 250, the default since 0.4.0, only frame
+    -- rates above 250 have frames that run no update.
+    local g, m = strafeHopsAt(144, 700, 100)
     t.truthy(m.slowFrames > 600 and m.fastFrames > 200, m.slowFrames .. " and " .. m.fastFrames .. " frames in the air")
     -- About every third frame runs no update: the hop direction stays, and in the next
     -- frame it turns as far as the view did in that update's 10 ms, 1.8 degrees. The
@@ -435,10 +437,13 @@ end)
 
 t.test("with one and two Half-Life updates a frame in turn (60 fps, and 80 fps with PhysicsRate 144), the body turns "
     .. "evenly near the hop direction, and its target turns with the hop direction, slow or fast", function()
-    for _, case in ipairs({ { fps = 60, slow = 580 }, { fps = 80, slow = 540, physicsRate = 144 } }) do
+    -- (60 fps at PhysicsRate 100, 0.3.1's default: at 250, the default since 0.4.0, a
+    -- frame at 60 fps runs four or five updates.)
+    local cases = { { fps = 60, slow = 580, physicsRate = 100 }, { fps = 80, slow = 540, physicsRate = 144 } }
+    for _, case in ipairs(cases) do
         local g, m = strafeHopsAt(case.fps, case.slow, case.physicsRate)
         local at = string.format("at %d fps: ", case.fps)
-        local perUpdate = 180 / (case.physicsRate or 100) -- the view's turn in one update
+        local perUpdate = 180 / case.physicsRate -- the view's turn in one update
         t.truthy(m.slowFrames > 100 and m.fastFrames > 150, at .. m.slowFrames .. " and " .. m.fastFrames
             .. " frames in the air")
         -- Each update has the view of its own time, so the hop direction turns as far
@@ -462,11 +467,12 @@ end)
 t.test("changing between A and D twice a hop, the body is back on the hop direction within moments", function()
     -- As a player strafes, at 80 fps: D while the view turns right, A while it turns
     -- left, changing at each take-off and at the top of each hop. How far off the body
-    -- gets depends on the number of 1/60 s frames before the hops, and repeats every
-    -- three (5.2, 5.8 and 6.3 degrees at most): so the hops are played after 0, 1 and 2
-    -- more, and the limit is for the worst of the three.
+    -- gets depends on the number of 1/60 s frames before the hops, and repeats every six
+    -- at 250 updates a second, the default (4.1 to 5.5 degrees at most; every three at
+    -- 100: 5.2, 5.8 and 6.3): so the hops are played after 0 to 5 more, and the limit is
+    -- for the worst of them.
     local most = 0
-    for extra = 0, 2 do
+    for extra = 0, 5 do
         local g = running()
         g.frames(extra)
         g.press(F6)
@@ -715,11 +721,12 @@ t.test("a new run of hops starts its lead from nothing, not from the turn rate o
     -- and only if the last run ended while its heading still turned. So the view turns
     -- until the landing, and the new hop is at 144 fps with Half-Life's updates shifted
     -- against the frames by 0 to 8 ms: at least one of those has a frame without an update
-    -- right after the jump frame, whatever phase the hop starts at.
+    -- right after the jump frame, whatever phase the hop starts at. (At PhysicsRate 100,
+    -- 0.3.1's default: at 250, the default since 0.4.0, every frame at 144 fps runs one.)
     local dt = 1 / 144
     for shift = 0, 8, 2 do
         local at = string.format("updates %d ms later: ", shift)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.press(F6)
         runTo(g, MAX_SPEED)
         g.keys.W = false

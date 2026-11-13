@@ -103,6 +103,37 @@ function Overrides:set(obj, name, value, verify)
     return gameWrote
 end
 
+--- Takes reading, what obj[name] reads now, for the mod's own write, and putBack for the
+--- value to put back. For a value the engine copies from another the mod set: at a crouch
+--- Unreal writes the mod's CrouchedEyeHeight into BaseEyeHeight, which set would take for the
+--- game's own and so put back after a release under something low; the game's own
+--- CrouchedEyeHeight is what belongs there then. The object's full name is checked, as at a
+--- first write. Returns false if obj isn't a usable object.
+function Overrides:adopt(obj, name, reading, putBack)
+    local address = ue.address(obj)
+    local fullName = address and ue.fullName(obj)
+    if not fullName then
+        return false
+    end
+    local entry = self.entries[address]
+    if not entry or entry.fullName ~= fullName then
+        if entry then
+            forgetEntry(entry)
+        end
+        entry = { obj = obj, fullName = fullName, saved = {}, order = {} }
+        self.entries[address] = entry
+    end
+    local slot = entry.saved[name]
+    if not slot then
+        slot = {}
+        entry.saved[name] = slot
+        entry.order[#entry.order + 1] = name
+    end
+    slot.value, slot.written = putBack, reading
+    journal.note("prop", fullName, name, putBack)
+    return true
+end
+
 --- The value to put back for obj[name] (the game's latest), or nil if the mod
 --- hasn't changed it.
 function Overrides:saved(obj, name)

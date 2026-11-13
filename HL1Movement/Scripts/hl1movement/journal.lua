@@ -67,10 +67,12 @@ local function parse(line)
 end
 
 --- Notes a change the mod must put back. kind is "prop" (id: the property name),
---- "hide" (id: "owner" or "hidden"), "tick", "curve" (value: the curve's full name),
---- "style" (value: the camera style name), "attach" (a camera moved to the eyes;
---- value: see journal.attachValue) or "widget" (a widget the mod put on the screen,
---- taken off); value is what to put back.
+--- "field" (id: "<struct property>.<field>", one field of a struct property, such as
+--- "NavAgentProps.bCanCrouch"), "hide" (id: "owner" or "hidden"), "tick", "curve" (value:
+--- the curve's full name), "style" (value: the camera style name), "attach" (a camera
+--- moved to the eyes; value: see journal.attachValue), "widget" (a widget the mod put on
+--- the screen, taken off), or a kind a module registered with journal.restorer; value is
+--- what to put back.
 function journal.note(kind, fullName, id, value)
     if type(fullName) ~= "string" or fullName:find("[\t\n]") then
         return
@@ -170,6 +172,14 @@ local restorers = {
     prop = function(obj, id, value)
         obj[id] = value
     end,
+    field = function(obj, id, value)
+        local struct, field = id:match("^([^.]+)%.(.+)$")
+        if not struct then
+            error("not a field of a struct property: " .. id)
+        end
+        -- A table written to a struct property sets the fields it names, and only those.
+        obj[struct] = { [field] = value }
+    end,
     hide = function(obj, id, value)
         if id == "owner" then
             obj:SetOwnerNoSee(value)
@@ -218,9 +228,26 @@ local restorers = {
     end,
 }
 
+local builtIn = {}
+for kind in pairs(restorers) do
+    builtIn[kind] = true
+end
+
+--- Registers how a new copy of the mod puts back a kind of change of a module's own (one the
+--- journal doesn't know, such as keys.lua's "context"): fn(obj, id, value), run on the game
+--- thread with the object found again by its full name; an error leaves that change not put
+--- back. The kinds above can't be replaced.
+function journal.restorer(kind, fn)
+    assert(type(kind) == "string" and kind ~= "" and not kind:find("[\t\n]"), "a kind is a name without tabs")
+    assert(type(fn) == "function", "a restorer is a function")
+    assert(not builtIn[kind], "the journal's own kind " .. kind .. " can't be replaced")
+    restorers[kind] = fn
+end
+
 --- Puts back what a previous copy of the mod left changed. Must run on the game
---- thread. Returns how many changes were put back, and how many there were.
-function journal.restorePending()
+--- thread. Returns how many changes were put back, and how many there were. seen, if
+--- given, is called with the kind, full name and id of each change put back.
+function journal.restorePending(seen)
     local list = pending
     pending = nil
     if not list then
@@ -233,6 +260,9 @@ function journal.restorePending()
         local obj = restore and ue.findByFullName(fullName)
         if obj and pcall(restore, obj, id, decode(encoded)) then
             restored = restored + 1
+            if seen then
+                seen(kind, fullName, id)
+            end
         end
         local key = keyOf(kind, fullName, id)
         if lines[key] == line then

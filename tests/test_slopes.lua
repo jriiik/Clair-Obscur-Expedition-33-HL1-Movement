@@ -512,9 +512,10 @@ t.test("running fast down a slope without jumping flies as in Half-Life: one upd
     -- only one with friction in its flight, which takes 0.04 of the speed (sv_friction 4
     -- over 0.01 s). Below, it stays on the ground and brakes on every update. (The
     -- reference model of Half-Life's movement takes off at 700, 672, 645, 619 and 595 u/s
-    -- here, 0.64 s apart.)
+    -- here, 0.64 s apart.) At PhysicsRate 100, where these speeds were measured: at 250,
+    -- the default, an update moves 0.4 as far, and the same leaps need 2.5 times the speed.
     local function downhill(speed, fps, angle, w)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.terrain = plane(g, -(angle or 20))
         g.frame(1 / fps)
         fake.props(g.cmc).Velocity.X = speed * SCALE
@@ -622,9 +623,10 @@ end)
 t.test("a slide starts where the ground clip's rise stays over 180 u/s until the next update (184 at the clip), and "
     .. "under 360 u/s the floor isn't even read", function()
     -- One frame on a slope of `angle` degrees at `speed` u/s: the game, and how often
-    -- the mod read the floor in that frame.
+    -- the mod read the floor in that frame. (At PhysicsRate 100: at 250 half an update of
+    -- gravity is 1.6 u/s, and a slide starts from a rise over 181.6.)
     local function at(angle, speed)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.frames(200) -- after the automatic report, which reads the floor too
         t.contains(g.log, "diagnostics (automatic", "the automatic report, which reads the floor too, came first")
         g.terrain = ramp(angle, 300, 30000)
@@ -637,24 +639,28 @@ t.test("a slide starts where the ground clip's rise stays over 180 u/s until the
         g.frame()
         return g, reads
     end
-    -- On 30 degrees the clip rises at sin 30 cos 30 = 0.433 of the speed: 186.2 u/s at
-    -- 430 u/s, and 181.9 at 420, which Half-Life's next ground check has on the ground.
-    local g, reads = at(30, 430)
-    t.contains(g.log, "Slope: ran into a 30 degree slope at 430 u/s: sliding up it, rising 186 u/s")
+    -- On 30 degrees the clip rises at sin 30 cos 30 = 0.433 of the speed the update's
+    -- ground move runs into the slope with, after its friction (Half-Life's order: friction,
+    -- then the move; 4 % of the speed at 100 updates a second): from 445 u/s at 427.2, rising
+    -- 185.0, and from 440 at 422.4, rising 182.9, which Half-Life's next ground check has on
+    -- the ground. (So it slides from 442.6 u/s; 0.3.1, which clipped the speed before the
+    -- update's friction, from 425.)
+    local g, reads = at(30, 445)
+    t.contains(g.log, "Slope: ran into a 30 degree slope at 427 u/s: sliding up it, rising 185 u/s")
     t.eq(reads, 1)
     noErrors(g)
-    g, reads = at(30, 420)
+    g, reads = at(30, 440)
     t.absent(g.log, "Slope:")
     t.eq(reads, 1, "fast enough for a steeper slope, so the floor is read")
     noErrors(g)
     -- The steepest slope Unreal walks (44.77 degrees) rises at just under half the speed,
     -- so nothing slower than 360 u/s can rise at 180: there the floor isn't read at all.
-    -- (On 44 degrees: 185.9 u/s at 372 u/s, 182.4 at 365.)
-    g, reads = at(44, 372)
-    t.contains(g.log, "Slope: ran into a 44 degree slope at 372 u/s: sliding up it, rising 186 u/s")
+    -- (On 44 degrees, after the update's friction: 185.4 u/s from 386 u/s, 182.5 from 380.)
+    g, reads = at(44, 386)
+    t.contains(g.log, "Slope: ran into a 44 degree slope at 371 u/s: sliding up it, rising 185 u/s")
     t.eq(reads, 1)
     noErrors(g)
-    g, reads = at(44, 365)
+    g, reads = at(44, 380)
     t.absent(g.log, "Slope:")
     t.eq(reads, 1, "over 360 u/s the floor is read")
     noErrors(g)
@@ -679,11 +685,16 @@ t.test("a slide ends once its rise is down to 180 u/s half an update of gravity 
         local speed, rise = line:match("ended at (%d+) u/s %(rising (%d+) u/s, not more than 180 at Half%-Life's next "
             .. "ground check%)")
         t.truthy(speed and rise, line)
-        -- The line gives the rise its last clip left: at most 184 u/s (4 u/s are half an
-        -- update's gravity), and over 177, since an update takes 7 u/s off it on 20
-        -- degrees. There the rise is the horizontal speed times tan 20: 184 u/s at 506 u/s.
-        t.truthy(tonumber(rise) >= 177 and tonumber(rise) <= 184, line)
-        t.truthy(tonumber(speed) >= 486 and tonumber(speed) <= 506, line)
+        -- The line gives the rise its last clip left: at most 180 u/s and half an update's
+        -- gravity (1.6 u/s at 250 updates a second, the default; 4 at 100), and over that
+        -- less what an update takes off it on 20 degrees (gravity times cos squared over the
+        -- rate: 2.8 u/s at 250, 7 at 100). There the rise is the horizontal speed times tan
+        -- 20: 181.6 u/s at 499 u/s (184 at 506 at 100).
+        local rate, tan = settings.DEFAULTS.PhysicsRate, math.tan(math.rad(20))
+        local most = 180 + 800 / (2 * rate)
+        local least = most - 800 * math.cos(math.rad(20)) ^ 2 / rate
+        t.truthy(tonumber(rise) >= math.floor(least) and tonumber(rise) <= math.ceil(most), line)
+        t.truthy(tonumber(speed) >= math.floor(least / tan) and tonumber(speed) <= math.ceil(most / tan), line)
         t.eq(g.mode(), 1, "it walks on")
         noErrors(g)
     end)
@@ -710,15 +721,18 @@ end)
 -- with a = 268.33 - v tan(angle) its rise from the plane at the take-off (u/s), and
 -- a t - 400 t^2 units above where it took off t seconds after it. A player rests 1/32
 -- unit off the floor's plane (0.03 units above it, straight up), and the heights in the
--- log are above that plane. The updates count from the take-off, PhysicsRate (100) a
--- second.
+-- log are above that plane. The updates count from the take-off, PhysicsRate a second:
+-- these tests, and the others below that give a landing's numbers, set PhysicsRate 100,
+-- 0.3.1's default, at which those numbers were worked out. The rules are the same at 250,
+-- the default since 0.4.0, where the updates are 2.5 times closer together (the test
+-- "each landing on a slope is decided as Half-Life's updates decide it ..." has both).
 
 t.test("a landing that runs into a downward slope turns some of the fall into speed down it", function()
     -- Down 20 degrees from 576 u/s: a = 477.98, in the air 1.19495 s. The update that
     -- ends at 1.19 s leaves it 2.38 units above the slope's plane, out of the ground
     -- check's reach, so the next one runs into it: with that update's fall,
     -- 268.33 - 800 x 1.195 = 687.67 u/s (Half-Life moves with the speed half an update on).
-    local g = running()
+    local g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, -20)
     local landed = hopAlong(g, 576, 2)
     t.eq(landed[1].kind, "hit", landed[1].line)
@@ -740,7 +754,7 @@ t.test("a landing that runs into an upward slope costs speed", function()
     -- Up 5 degrees from 282 u/s: a = 243.66, in the air 0.6091 s, and 2.23 units above
     -- the slope's plane at 0.60 s: the next update runs into it, falling
     -- 268.33 - 800 x 0.605 = 215.67 u/s.
-    local g = running()
+    local g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, 5)
     fake.props(g.cmc).Velocity.X = 282 * SCALE
     jump(g)
@@ -768,7 +782,7 @@ t.test("Half-Life's player rests 1/32 unit off the floor: a move that ends betwe
         -- units up at 0.58 s. The third, from 349.85 u/s, is set down from 1.05 units.
         -- (With the heights taken from where the character stands, the first hop ran into
         -- the slope: so it was before the mod knew of the 1/32 unit.)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.terrain = plane(g, 5)
         local landed = hopAlong(g, 370, 3)
         t.eq(landed[1].kind, "caught", landed[1].line)
@@ -788,7 +802,7 @@ t.test("a landing an update ends within 2 units above keeps its speed, as Half-L
         -- the slope at 0.45 s: the ground check puts the player on the slope there, with
         -- its velocity as it is, and the held jump starts at once. 0.3.0 clipped this
         -- landing too and took 50 u/s.
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.terrain = plane(g, 15)
         local landed = hopAlong(g, 320, 3)
         for i = 1, 3 do
@@ -820,7 +834,7 @@ t.test("a height within 0.05 units of the ground check's 2 reads to 0.01, cut: u
                 .. "within the ground check's reach of 2" },
         }
         for _, case in ipairs(cases) do
-            local g = running()
+            local g = running({ PhysicsRate = 100 })
             g.terrain = plane(g, 10)
             fake.props(g.cmc).Velocity.X = case[1] * SCALE
             g.keys.SpaceBar = true
@@ -917,7 +931,11 @@ t.test("PhysicsRate 0 with frames of two lengths in turn: a landing is decided w
         local what = string.format("%d degrees from %d u/s, frames of 1/%d and 1/%d s", angle, speed, a, b)
         local model = halfLifeHops(angle, speed, length, 1)[1]
         t.eq(model.kind, "hit", what .. ": the model")
-        local g = running({ PhysicsRate = 0 })
+        -- (TakeKeys = false, as in 0.3: the hop starts from a speed set between two frames with
+        -- Space pressed on the next, down a slope. The game's own jump press, which the mod
+        -- hides from the game when it takes the keys, held its leave down the slope back at
+        -- that frame's start, which takes the speed set for the one its last update left.)
+        local g = running({ PhysicsRate = 0, TakeKeys = false })
         g.terrain = plane(g, angle)
         g.frame(length(0))
         local landed = hopAlong(g, speed, 1, length)[1]
@@ -946,7 +964,7 @@ t.test("the ground check's 2 units are Half-Life units: with another UnitScale t
     function()
         local kinds = {}
         for _, scale in ipairs({ 1, 2.5, 4 }) do
-            local g = running({ UnitScale = scale })
+            local g = running({ UnitScale = scale, PhysicsRate = 100 })
             g.terrain = plane(g, -20)
             fake.props(g.cmc).Velocity.X = 576 * scale
             g.keys.W, g.keys.SpaceBar = true, true
@@ -969,8 +987,8 @@ t.test("the ground check's 2 units are Half-Life units: with another UnitScale t
 t.test("a hop from level ground that runs into an upward slope fast slides up it instead of landing", function()
     -- The slope begins 290 cm ahead of the jump: the hop meets it while still rising, and
     -- the update before ends 2.9 units above it. (Begun 300 cm ahead, an update ends 1.7
-    -- units above it: see the next test.)
-    local g = running()
+    -- units above it: see the next test.) At PhysicsRate 100, as the landings above.
+    local g = running({ PhysicsRate = 100 })
     runTo(g, MAX_SPEED)
     local x = g.position.X
     g.terrain = ramp(25, x + 290, x + 20000)
@@ -995,10 +1013,13 @@ t.test("set down on a steep slope at speed, nothing slides at the landing: the n
     function()
         -- The same hop with the slope 300 cm ahead: an update ends 1.7 units above it, so
         -- Half-Life's ground check puts the player on it with 800 u/s. Then its ground
-        -- move runs into the slope (Space let go), or its jump does (Space held): the
-        -- slide starts one frame later. 0.3.0 clipped at the landing.
+        -- move runs into the slope (Space let go): the first update on the ground, after its
+        -- friction (800 to 768 u/s at 100 updates a second), and the slide starts on the
+        -- update after it, in the landing's frame. Or its jump does (Space held): the slide
+        -- starts one frame later. 0.3.0 clipped at the landing; 0.3.1 ran into the slope a
+        -- frame later, from 800 u/s.
         local function land(held)
-            local g = running()
+            local g = running({ PhysicsRate = 100 })
             runTo(g, MAX_SPEED)
             g.keys.W = false
             local x = g.position.X
@@ -1010,18 +1031,17 @@ t.test("set down on a steep slope at speed, nothing slides at the landing: the n
             g.frame()
             t.contains(g.log, "Slope: landed on a 25 degree slope at 800 u/s: the speed stays. A Half-Life update "
                 .. "ended 1.7 units above the slope")
-            t.absent(g.log, "sliding up it")
             return g
         end
-        -- Space let go: a frame of friction on the ground, then the slide.
+        -- Space let go: an update of friction on the ground, then the slide, in that frame.
         local g = land(false)
+        t.contains(g.log, "Slope: ran into a 25 degree slope at 768 u/s: sliding up it, rising 294 u/s")
         t.eq(g.mode(), 1)
-        g.frame()
-        t.contains(g.log, "Slope: ran into a 25 degree slope at ")
         noErrors(g)
         -- Space held: the jump, which runs into the slope within its own update, rising
         -- 264 u/s (the jump's 268 less half an update of gravity).
         g = land(true)
+        t.absent(g.log, "sliding up it")
         g.frame()
         t.contains(g.log, "Slope: landed on a 25 degree slope at 800 u/s, rising 264 u/s: sliding up it at ")
         t.absent(g.log, "Slope: ran into")
@@ -1035,9 +1055,10 @@ t.test("a hop onto a steep slope with jump held: set down, the jump runs into th
     -- down with its 600 u/s, and it jumps: the jump's own update runs into the slope,
     -- rising 264 u/s, and the slide starts at 564 u/s, rising 326. With the foot 344.7
     -- units ahead the landing runs into the slope, falling 224 u/s: the slide starts at
-    -- 353 u/s, rising 204. Both end at 319 u/s. (0.3.0 clipped both at the landing.)
+    -- 353 u/s, rising 204. Both end at 319 u/s. (0.3.0 clipped both at the landing.) At
+    -- PhysicsRate 100, as the landings above.
     local function hopOnto(distance)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         local foot = g.position.X + distance * SCALE
         g.terrain = ramp(30, foot, foot + 1e6)
         fake.props(g.cmc).Velocity.X = 600 * SCALE
@@ -1117,10 +1138,13 @@ t.test("a hop the game lands while it still rises away from the slope stays in t
     g.frames(2)
     t.eq(g.mode(), 3, "in the air again")
     -- (Two frames of gravity in the hop; in the frame Unreal walked it, the gravity of the
-    -- one or two Half-Life updates the mod ran, since Half-Life has it in the air there
-    -- too; and Unreal's in the frame it flies off. A new jump would rise 67 cm/s faster.)
+    -- Half-Life updates the mod ran, four or five at 250 a second (one or two at 100),
+    -- since Half-Life has it in the air there too; and Unreal's in the frame it flies off.
+    -- A new jump would rise 67 cm/s faster.)
     local rise = velocityZ(g) - (JUMP_SPEED - 3 * GRAVITY / 60)
-    t.truthy(rise <= -GRAVITY / 100 + 1e-6 and rise >= -2 * GRAVITY / 100 - 1e-6,
+    local rate = settings.DEFAULTS.PhysicsRate
+    t.truthy(rise <= -math.floor(rate / 60) * GRAVITY / rate + 1e-6
+        and rise >= -math.ceil(rate / 60) * GRAVITY / rate - 1e-6,
         "still the first jump's rise, not a new jump: " .. velocityZ(g))
     t.contains(g.log, "Slope: the game landed you on a 10 degree slope at 320 u/s while still rising 2")
     t.absent(g.log, "sliding up it")
@@ -1130,8 +1154,9 @@ end)
 
 t.test("SlopeLandings = false: a landing on a slope keeps Unreal's speed, and a fast one still slides up it", function()
     -- Up 5 degrees from 282 u/s, a landing that runs into the slope (see above): with
-    -- SlopeLandings it leaves 261.13 u/s; here only a frame of friction is taken.
-    local g = running({ SlopeLandings = false })
+    -- SlopeLandings it leaves 261.13 u/s; here only a frame of friction is taken. (At
+    -- PhysicsRate 100, as the landings above.)
+    local g = running({ SlopeLandings = false, PhysicsRate = 100 })
     g.terrain = plane(g, 5)
     fake.props(g.cmc).Velocity.X = 282 * SCALE
     jump(g)
@@ -1143,7 +1168,7 @@ t.test("SlopeLandings = false: a landing on a slope keeps Unreal's speed, and a 
     t.contains(g.log, "  slopes (SlopeLandings=false, SlopeBoosts=true): landings on one 0, slides up one 0,")
 
     -- (The slope 290 cm ahead: the hop runs into it, see above.)
-    g = running({ SlopeLandings = false })
+    g = running({ SlopeLandings = false, PhysicsRate = 100 })
     runTo(g, MAX_SPEED)
     local x = g.position.X
     g.terrain = ramp(25, x + 290, x + 20000)
@@ -1157,8 +1182,8 @@ end)
 
 t.test("SlopeBoosts = false: a fast landing that runs into an upward slope lands with the slope's speed, without a "
     .. "slide", function()
-    -- (The slope 290 cm ahead: the hop runs into it, see above.)
-    local g = running({ SlopeBoosts = false })
+    -- (The slope 290 cm ahead: the hop runs into it, see above, at PhysicsRate 100.)
+    local g = running({ SlopeBoosts = false, PhysicsRate = 100 })
     runTo(g, MAX_SPEED)
     local x = g.position.X
     g.terrain = ramp(25, x + 290, x + 20000)
@@ -1229,29 +1254,55 @@ end
 t.test("the slope boosting speeds in docs/TESTING.md are the mod's: running into a slope, a hop onto one, and where a "
     .. "slide ends", function()
     local rows = boostTable()
-    t.eq(#rows, 5, 'the rows of the table, written like "| 20 degrees | 675 u/s | 600 u/s | 573 u/s | 505 u/s |" '
+    t.eq(#rows, 5, 'the rows of the table, written like "| 20 degrees | 675 u/s | 625 u/s | 575 u/s | 499 u/s |" '
         .. "for 10, 15, 20, 25 and 30 degrees")
     local FPS = 80 -- the table says it is for 80 frames a second
     local jumpSpeed = JUMP_SPEED / SCALE
+    local rate = settings.DEFAULTS.PhysicsRate -- the table is for the default: 250 since 0.4.0
     -- On paper. A clip against a slope leaves a rise of the speed times sin cos (less the
-    -- fall times sin squared, at a landing), and a slide needs a rise over 184 u/s: 180
-    -- half an update of gravity later. It ends once the rise, then the speed times tan, is
-    -- down to that. A landing that runs into the slope can slide from the speed of a hop
-    -- that took off at the slope's foot up to that of one that falls at the full 268 u/s.
+    -- fall times sin squared, at a landing), and a slide needs a rise over 180 u/s half an
+    -- update of gravity later: over 181.6 at the clip at 250 updates a second (184 at 100).
+    -- Running into the slope, the clip comes after the update's friction (Half-Life's order:
+    -- 1.6 % of the speed at 250, 4 % at 100), so from need / (sin cos (1 - Friction / rate)).
+    -- It ends once the rise, then the speed times tan, is down to that. A landing runs into
+    -- the slope only where the update before it can end out of the ground check's 2 units,
+    -- so where it closes in on the slope by more than 2 units an update: with the full
+    -- 268 u/s of fall, from (2 x rate - 268) / tan (at 100 updates a second at any speed in
+    -- the table, at 250 hardly any below the speeds that slide anyway). Then it can slide
+    -- from the speed of a hop that took off at the slope's foot up to that of one that
+    -- falls at the full 268 u/s. A landing the ground check sets down jumps again at once,
+    -- and that hop slides where it comes back to the slope still rising faster than
+    -- 180 u/s at its last ground check: from about (180 + 268 - g / rate) / (2 tan). At 250
+    -- updates a second those are nearly all the slides at these speeds, so on 10 and 15
+    -- degrees some hops slide only from where every hop does.
+    local need = 180 + 800 / (2 * rate)
+    local friction = 1 - settings.DEFAULTS.Friction / rate
+    local paper = {}
     for _, row in ipairs(rows) do
         local a = math.rad(row.angle)
         local s, c, tan = math.sin(a), math.cos(a), math.tan(a)
         local name = row.angle .. " degrees: "
-        t.near(row.runIn, 184 / (s * c), 1.5, name .. "running into it")
-        t.near(row.ends, 184 / tan, 6, name .. "where a slide ends")
-        local lowest = (184 + jumpSpeed * s * s) / (s * c + 2 * tan * s * s)
-        local highest = (184 + jumpSpeed * s * s) / (s * c)
-        t.truthy(row.some >= lowest - 5 and row.some <= highest + 5, string.format("%ssome hops slide from %d u/s, "
-            .. "between %.0f and %.0f on paper", name, row.some, lowest, highest))
+        t.near(row.runIn, need / (s * c * friction), 1.5, name .. "running into it")
+        t.near(row.ends, need / tan, 6, name .. "where a slide ends")
+        local lowest = (need + jumpSpeed * s * s) / (s * c + 2 * tan * s * s)
+        local highest = (need + jumpSpeed * s * s) / (s * c)
+        local canRunIn = (2 * rate - jumpSpeed) / tan
+        local setDown = (180 + jumpSpeed - 800 / rate) / (2 * tan)
+        paper[row.angle] = { s = s, c = c, tan = tan, highest = highest, setDown = setDown }
+        -- (The table's 25 u/s steps and the updates' phases put the "some" speed above the
+        -- lowest that slides by up to 35 u/s.)
+        local low, high = math.min(lowest, setDown) - 15, math.min(math.max(highest, canRunIn), setDown) + 35
+        t.truthy(row.some >= low and row.some <= high, string.format("%ssome hops slide from %d u/s, between %.0f "
+            .. "and %.0f on paper", name, row.some, low, high))
         t.truthy(row.always >= row.some and row.always >= row.runIn - 5, name .. "every hop from a higher speed")
-        -- Every hop: also the one whose landing falls at the full 268 u/s just past the foot.
-        t.truthy(row.always >= highest, string.format("%severy hop slides from %d u/s, not below the %.0f u/s on "
-            .. "paper of a landing that falls at the full 268 u/s", name, row.always, highest))
+        t.truthy(row.always >= setDown - 10, string.format("%severy hop slides from %d u/s, not below the %.0f u/s "
+            .. "on paper from which the hop after a landing that is set down slides", name, row.always, setDown))
+        -- Every hop: also the one whose landing falls at the full 268 u/s just past the foot,
+        -- wherever that landing can run into the slope below the speed it slides from.
+        if highest > canRunIn then
+            t.truthy(row.always >= highest, string.format("%severy hop slides from %d u/s, not below the %.0f u/s on "
+                .. "paper of a landing that falls at the full 268 u/s", name, row.always, highest))
+        end
     end
     -- In the fake game, every row. Each game settles in frames of 0.1 s, the longest the
     -- mod counts, instead of the other tests' 190 frames of 1/60 s: a hop's updates are
@@ -1324,17 +1375,26 @@ t.test("the slope boosting speeds in docs/TESTING.md are the mod's: running into
             -- 4 u/s from one hop speed to another.)
             t.near(ended, row.ends, 4.5, name .. "the speed its slide ends with")
         end
-        -- ... and at the table's step of 25 u/s less, not everywhere (the end of a hop first).
+        -- ... and at the table's step of 25 u/s less, not everywhere: at one of these places
+        -- (the end of a hop first), or on paper, where a landing that falls at the full
+        -- 268 u/s can run into the slope and its clip leaves too little rise for a slide and
+        -- too little speed for the hop after it. (At 250 updates a second such a landing
+        -- runs into the slope from only a few per cent of the updates' phases, which these
+        -- places needn't meet: at 650 u/s on 20 degrees from 1 %, at 575 on 25 from 7 %.)
+        local slower, p = row.always - 25, paper[row.angle]
+        local clipped = slower - (slower * p.s + jumpSpeed * p.c) * p.s
+        local onPaper = jumpSpeed + slower * p.tan > 2 * rate and slower < p.highest and clipped < p.setDown
         local all = true
         for i = #PLACES, 1, -1 do
-            if not hopOnto(row.angle, row.always - 25, PLACES[i]) then
+            if not hopOnto(row.angle, slower, PLACES[i]) then
                 all = false
                 break
             end
         end
-        t.falsy(all, string.format("%sat %d u/s some hop onto it doesn't slide", name, row.always - 25))
+        t.falsy(all and not onPaper, string.format("%sat %d u/s some hop onto it doesn't slide", name, slower))
         -- At the "some hops" speed, one approach of 200 slides: near that speed only a few
-        -- narrow places along the hop do (at 750 u/s on 15 degrees, 2 of 200)...
+        -- narrow places along the hop may (at 750 u/s on 15 degrees at 100 updates a
+        -- second, 2 of 200)...
         local some = false
         for k = 0, 199 do
             if hopOnto(row.angle, row.some, k / 200) then
@@ -1344,7 +1404,8 @@ t.test("the slope boosting speeds in docs/TESTING.md are the mod's: running into
         end
         t.truthy(some, string.format("%sat %d u/s some hop onto it slides", name, row.some))
         -- ... and 25 u/s slower, none of 50. (A "some hops" speed set 25 u/s too high is
-        -- caught where one of these 50 slides at the right speed: in 0.3.1 in every row.)
+        -- caught where one of these 50 slides at the right speed: in every row, at 100
+        -- updates a second as at 250.)
         for k = 0, 49 do
             t.falsy(hopOnto(row.angle, row.some - 25, k / 50), string.format("%sat %d u/s a hop with the foot %.2f "
                 .. "of a hop ahead doesn't slide", name, row.some - 25, k / 50))
@@ -1369,26 +1430,30 @@ t.test("the slope boosting speeds in docs/TESTING.md are the mod's: running into
     end
 end)
 
-t.test("what config.lua, the README and docs/TESTING.md say PhysicsRate adds to air strafing is the mod's: their "
-    .. "figures with A and D and the view swinging, a few per cent with D held and a slow turn", function()
+t.test("what config.lua, the README and docs/TESTING.md say a lower PhysicsRate takes from air strafing is the mod's: "
+    .. "their figures with A and D and the view swinging, a few per cent with D held and a slow turn", function()
     -- Where the turn limits it the speed grows by w (cap - w v / 2R) a second (w: the turn
-    -- in radians a second, R: PhysicsRate), so more updates only shrink the second part:
-    -- the docs' figures hold where w v is large, and a slow turn leaves a few per cent.
+    -- in radians a second, R: PhysicsRate), so fewer updates only grow the second part:
+    -- the docs' figures hold where w v is large, and a slow turn loses a few per cent.
+    -- (Against 250, the default since 0.4.0; 0.3.1's docs gave what 144, 200 and 250 add
+    -- to 100.)
     local function flat(path)
         return (readFile(path):gsub("\n%s*%-%-", " "):gsub("%s+", " "))
     end
+    t.eq(settings.DEFAULTS.PhysicsRate, 250, "the docs' figures are against the default")
     local configText = flat("HL1Movement/Scripts/config.lua")
-    local figures = { configText:match("144, 200 or 250 gain about (%d+), (%d+) or (%d+) %% more speed per hop when "
+    local figures = { configText:match("100, 144 or 200 gain about (%d+), (%d+) or (%d+) %% less speed per hop when "
         .. "air strafing with A and D in turn and the view swinging about 150 to 180 degrees a second") }
     t.eq(#figures, 3, "config.lua gives its figures for A and D with the view swinging 150 to 180 degrees a second")
     t.truthy(configText:find("with one key and a slow turn only a few per cent", 1, true),
-        "and what a slow turn leaves")
-    local low, high = flat("README.md"):match("`144` to `250` gain a little more when air strafing %(about (%d+) to "
-        .. "(%d+) %% with A and D in turn and the view swinging about 150 to 180 degrees a second, only a few per cent "
-        .. "with one key and a slow turn%)")
-    t.truthy(low == figures[1] and high == figures[3], "the README gives config.lua's figures, for the same strafing")
-    t.truthy(figures[1] == "10" and flat("docs/TESTING.md"):find("with the view swinging about 150 to 180 degrees a "
-        .. "second, `PhysicsRate = 144` adds about a tenth per hop", 1, true), "docs/TESTING.md gives the same for 144")
+        "and what a slow turn loses")
+    local low, high = flat("README.md"):match("`200` to `100` gain a little less when air strafing %(about (%d+) to "
+        .. "(%d+) %% less with A and D in turn and the view swinging about 150 to 180 degrees a second, only a few per "
+        .. "cent with one key and a slow turn%)")
+    t.truthy(low == figures[3] and high == figures[1], "the README gives config.lua's figures, for the same strafing")
+    t.truthy(figures[1] == "16" and flat("docs/TESTING.md"):find("with the view swinging about 150 to 180 degrees a "
+        .. "second, `PhysicsRate = 100` gains about a sixth less per hop", 1, true),
+        "docs/TESTING.md gives the same for 100")
     -- At 80 fps on level ground: a run, three hops straight, then 11 strafing hops with the
     -- view turning `rate` deg/s, swinging back every 0.335 s (two turns a hop) with A and D
     -- in step, or with D held and the view turning right. Returns the gain per hop in u/s.
@@ -1420,15 +1485,18 @@ t.test("what config.lua, the README and docs/TESTING.md say PhysicsRate adds to 
         noErrors(g)
         return (g.speed() / SCALE - from) / hops
     end
+    -- (The figures move with where the reversals fall between the updates, which the
+    -- frames before the hops decide: over twelve such phases 100 loses 14.7 to 16.2 %,
+    -- 144 7.9 to 9.0 % and 200 1.4 to 4.7 %, within 3 points of the docs' 16, 8 and 3.)
     local swinging, slow = strafe({}, 165), strafe({}, 60, true)
-    for i, R in ipairs({ 144, 200, 250 }) do
-        local more = (strafe({ PhysicsRate = R }, 165) / swinging - 1) * 100
-        t.near(more, tonumber(figures[i]), 3, string.format("PhysicsRate %d with the view swinging 165 degrees a "
-            .. "second, in per cent more per hop", R))
+    for i, R in ipairs({ 100, 144, 200 }) do
+        local less = (1 - strafe({ PhysicsRate = R }, 165) / swinging) * 100
+        t.near(less, tonumber(figures[i]), 3, string.format("PhysicsRate %d with the view swinging 165 degrees a "
+            .. "second, in per cent less per hop than at 250", R))
     end
-    t.truthy(strafe({ PhysicsRate = 144 }, 60, true) / slow < 1.05, "D held turning 60 degrees a second: 144 adds "
-        .. "under 5 %")
-    t.truthy(strafe({ PhysicsRate = 250 }, 60, true) / slow < 1.08, "and 250 under 8 %")
+    t.truthy(strafe({ PhysicsRate = 100 }, 60, true) / slow > 0.94, "D held turning 60 degrees a second: 100 loses "
+        .. "under 6 %")
+    t.truthy(strafe({ PhysicsRate = 144 }, 60, true) / slow > 0.96, "and 144 under 4 %")
 end)
 
 -- Jumping -------------------------------------------------------------------------
@@ -1498,10 +1566,13 @@ t.test("a jump that Unreal lands again within its own frame, where the floor ris
             noErrors(g)
         end
 
-        -- With the defaults: one such jump, then the slide. It has no hop line either.
+        -- With the defaults: one such jump, then the slide. It has no hop line either. (On the
+        -- slope at a walk, then 800 u/s with Space at one hook: the jump comes first, before
+        -- that update's ground move would run into the slope.)
         local g = running()
         g.terrain = ramp(30, 300, 20000)
-        runFastTo(g, 2000, 300)
+        runFastTo(g, MAX_SPEED, 320)
+        fake.props(g.cmc).Velocity.X = 2000
         g.keys.SpaceBar = true
         g.frame()
         t.eq(g.mode(), 1, "the jump at the foot of the slope landed again at once")
@@ -1541,23 +1612,41 @@ t.test("sliding up a slope, a held jump waits until the slide ends, as in Half-L
     noErrors(g)
 end)
 
-t.test("holding jump as you run into a slope jumps: Half-Life jumps before its ground move", function()
-    local g = running()
+t.test("holding jump as you run into a slope jumps: Half-Life jumps before its ground move; a press after the update "
+    .. "that ran into the slope finds the player in the air", function()
     -- (15 degrees: at 2000 cm/s a steeper slope rises faster than the jump, and Unreal
-    -- would land it again at once.)
+    -- would land it again at once.) Walking up the slope at 320 u/s nothing runs into it
+    -- (a rise of 80 u/s); then 800 u/s with Space pressed at one hook: that frame's first
+    -- update jumps, before its ground move would have run into the slope.
+    local g = running()
     g.terrain = ramp(15, 300, 20000)
-    runFastTo(g, 2000, 300)
+    runFastTo(g, MAX_SPEED, 320)
+    fake.props(g.cmc).Velocity.X = 2000
     g.keys.SpaceBar = true
     g.frame()
     t.eq(g.mode(), 3, "jumped")
     t.absent(g.log, "Slope: ran into")
     t.near(velocityZ(g), JUMP_SPEED - GRAVITY / 60, 1)
     noErrors(g)
+    -- Running onto the slope at 800 u/s, Unreal walks the character onto it after a hook:
+    -- the last update before ran into it, with the speed it left (after its friction).
+    -- Space pressed on the next frame finds Half-Life's player sliding, in the air: no jump.
+    -- (0.3.1 jumped: it took the run-in for the next frame's first update.)
+    g = running()
+    g.terrain = ramp(15, 300, 20000)
+    runFastTo(g, 2000, 300)
+    g.keys.SpaceBar = true
+    g.frame()
+    t.eq(g.mode(), 1, "sliding: Unreal walks the character up the slope")
+    t.contains(g.log, "Slope: ran into a 15 degree slope at ")
+    noErrors(g)
 end)
 
 t.test("tapping jump while sliding: the game's own jump is held back, as Half-Life doesn't jump in the air",
     function()
-        local g = running()
+        -- (TakeKeys = false here and in the next tests, about the game's own jump: with the
+        -- keys taken the game's jump action never sees Space while the mod moves you.)
+        local g = running({ TakeKeys = false })
         g.terrain = ramp(15, 300, 2000)
         runFastTo(g, 2000, 300)
         g.frames(3)
@@ -1580,7 +1669,7 @@ t.test("a game that presses its jump on every frame the key is held: holding it 
         -- (ALS's JumpAction calls Jump() on every jump event while the character is on the
         -- ground, and some input set-ups send the event on every frame the key is held.)
         for _, case in ipairs({ { 30000, "the slide up the slope ended at " }, { 900, "flew off the slope at " } }) do
-            local g = running(nil, { jumpEventEveryFrame = true })
+            local g = running({ TakeKeys = false }, { jumpEventEveryFrame = true })
             g.terrain = ramp(20, 300, case[1])
             runFastTo(g, 2000, 300)
             g.frame()
@@ -1608,7 +1697,7 @@ t.test("a game that presses its jump on every frame the key is held: holding it 
         end
 
         -- Hops on flat ground with such a game: the mod's jump still comes first.
-        local g = running(nil, { jumpEventEveryFrame = true })
+        local g = running({ TakeKeys = false }, { jumpEventEveryFrame = true })
         runTo(g, MAX_SPEED)
         g.keys.SpaceBar = true
         g.frames(180)
@@ -1653,7 +1742,7 @@ t.test("AutoHop = false: a jump key held since the last jump doesn't stop a slid
 end)
 
 t.test("if the mod can't see the game's jump press, the game's jump while sliding counts as a jump", function()
-    local g = running(nil, { noPressedJump = true })
+    local g = running({ TakeKeys = false }, { noPressedJump = true })
     g.terrain = ramp(15, 300, 2000)
     runFastTo(g, 2000, 300)
     g.frames(3)
@@ -1806,7 +1895,11 @@ t.test("a bumpy slope slid up at 800 u/s doesn't launch off its bumps, from 60 t
     -- launch goes by the rise after the frame's gravity, so it comes a little sooner at a
     -- higher frame rate. Faster, or over bigger bumps, the character does fly off them.)
     -- Where a slide's rise is down to 180 u/s just past a bump, Half-Life's path can be
-    -- out of the ground check's reach: then it flies on for a few hundredths of a second.
+    -- out of the ground check's reach: then it flies on for a few hundredths of a second
+    -- (in the fake game at most 0.05 s at 100 updates a second and 0.07 s at 250, at every
+    -- frame phase tried), or for less than a frame (at 60 fps at 250 updates a second one
+    -- such slide ends 2.2 units up, and Unreal lands it in the frame it begins in, which
+    -- shows no mode change).
     local x0, heights = 300, { [0] = 0 }
     local function angle(i)
         return math.rad(25 + (i % 2 == 0 and 4 or -4))
@@ -1825,8 +1918,15 @@ t.test("a bumpy slope slid up at 800 u/s doesn't launch off its bumps, from 60 t
                 math.cos(angle(i))
         end
         runFastTo(g, 2000, x0, 1 / fps)
-        local changes, last = 0, g.mode()
+        local changes, last, instant, seen = 0, g.mode(), 0, #g.log
         g.frames(4 * fps, 1 / fps, function()
+            -- (Before each frame: a flight the last frame's hook began, back on the ground.)
+            for k = seen + 1, #g.log do
+                if g.log[k]:find("Slope: flew off the slope at ", 1, true) and g.mode() == 1 then
+                    instant = instant + 1
+                end
+            end
+            seen = #g.log
             if g.mode() ~= last then
                 changes, last = changes + 1, g.mode()
             end
@@ -1839,9 +1939,9 @@ t.test("a bumpy slope slid up at 800 u/s doesn't launch off its bumps, from 60 t
             fps .. " fps: the slide's end is logged")
         for _, line in ipairs(g.log) do
             local time = line:match("Slope: landed ([%d%.]+) s after flying off the slope")
-            t.truthy(not time or tonumber(time) <= 0.05, fps .. " fps: a short flight: " .. line)
+            t.truthy(not time or tonumber(time) <= 0.08, fps .. " fps: a short flight: " .. line)
         end
-        t.eq(changes, 2 * flights, fps .. " fps: no other launches and landings on the way up")
+        t.eq(changes, 2 * (flights - instant), fps .. " fps: no other launches and landings on the way up")
         t.eq(g.landings, flights, fps .. " fps")
         noErrors(g)
     end
@@ -2180,8 +2280,9 @@ t.test("a landing in a frame longer than Unreal's MaxSimulationTimeStep is decid
     -- fall is the same parabola, so where the Half-Life updates fell is worked out as in
     -- any frame. Down 20 degrees from 576 u/s the hop runs into the slope, falling 688
     -- u/s (see above), also if its last frame is 0.06 s long. 0.3.0, which took the fall
-    -- from the end of the landing frame, left such landings alone.
-    local g = running()
+    -- from the end of the landing frame, left such landings alone. (At PhysicsRate 100, as
+    -- the landings above.)
+    local g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, -20)
     landInLongFrame(g, 576, 0.06)
     g.frame()
@@ -2189,7 +2290,7 @@ t.test("a landing in a frame longer than Unreal's MaxSimulationTimeStep is decid
         .. "slope: the Half-Life update before it ended 2.4 units above the slope")
     noErrors(g)
     -- And one the ground check sets down (up 15 degrees from 320 u/s, see above).
-    g = running()
+    g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, 15)
     landInLongFrame(g, 320, 0.06)
     g.frame()
@@ -2301,8 +2402,9 @@ t.test("a landing the mod can't place keeps its speed and says why: a frame over
 
 t.test("a pause in the middle of a hop doesn't shift Half-Life's updates: the landings are decided as without it",
     function()
-        -- Down 20 degrees from 576 u/s: a hit, a hit, then set down (see above).
-        local g = running()
+        -- Down 20 degrees from 576 u/s: a hit, a hit, then set down (see above, at
+        -- PhysicsRate 100).
+        local g = running({ PhysicsRate = 100 })
         g.terrain = plane(g, -20)
         fake.props(g.cmc).Velocity.X = 576 * SCALE
         g.keys.W, g.keys.SpaceBar = true, true
@@ -2332,9 +2434,11 @@ t.test("a stutter in the middle of a hop doesn't shift Half-Life's updates: they
     -- 1/100 s apart through all of it. Down 20 degrees from 576 u/s: a hit, a hit, then
     -- set down, as without the stutter. (Counted with the 0.1 s, the first landing is
     -- set down, wherever in the hop's first 0.7 s the stutter comes.) The speeds are the
-    -- model's to 0.1 u/s: the braking added back in the long frame is that of 0.1 s.
+    -- model's to 0.1 u/s: the braking added back in the long frame is that of 0.1 s. (At
+    -- PhysicsRate 100, as the landings above.)
     local model = halfLifeHops(-20, 576, 100, 3)
-    local g = running()
+    -- (TakeKeys = false, as in 0.3: see "PhysicsRate 0 with frames of two lengths ...")
+    local g = running({ PhysicsRate = 100, TakeKeys = false })
     g.terrain = plane(g, -20)
     g.frame()
     local landed = hopAlong(g, 576, 3, function(frame)
@@ -2356,12 +2460,12 @@ t.test("Unreal's walking gap doesn't change how a landing is decided, also when 
     -- it touches the floor itself: 0.9 units lower than where it took off, a few
     -- milliseconds later, and at a high frame rate in a later frame. The floor Half-Life's
     -- player would stand on is where the character walks, so the hops land as in the
-    -- model.
+    -- model. (At PhysicsRate 100, as the landings above.)
     for _, fps in ipairs({ 60, 240 }) do
         for _, hop in ipairs({ { -20, 576 }, { 5, 370 }, { 15, 320 } }) do
             local what = string.format("%d degrees from %d u/s at %d fps", hop[1], hop[2], fps)
             local model = halfLifeHops(hop[1], hop[2], 100, 4)
-            local g = running()
+            local g = running({ PhysicsRate = 100 })
             g.terrain = plane(g, hop[1])
             g.frame(1 / fps)
             t.near(g.position.Z, fake.FLOOR_DIST, 1e-9, "walking at its gap above the floor")
@@ -2395,13 +2499,14 @@ t.test("a walking height that differs between the take-off and the landing doesn
     --   (-36 u/s). Taken 0.1 units off, either way, it would be set down.
     --   Up 5 degrees from 370 u/s it is set down 0.006 units above the plane (see above).
     --   Taken 0.1 units lower it would run into the slope.
+    -- (At PhysicsRate 100, as the landings above.)
     for _, gap in ipairs({ 1.9, 2.4 }) do
         for _, hop in ipairs({ { 10, 320, "hit" }, { 5, 370, "caught" } }) do
             local what = string.format("%d degrees from %d u/s, taking off %.1f cm above the floor", hop[1], hop[2],
                 gap)
             local model = halfLifeHops(hop[1], hop[2], 100, 2)
             t.eq(model[1].kind, hop[3], what .. ": the model")
-            local g = running()
+            local g = running({ PhysicsRate = 100 })
             g.terrain = plane(g, hop[1])
             g.frame()
             standAt(g, gap)
@@ -2421,9 +2526,10 @@ t.test("a FloorDist that can't be Unreal's walking gap (negative, huge, not a nu
     -- cm is taken for the gap Unreal walks the character at: anything else would put the
     -- floor's plane far off, or make the height not a number. Read at each landing (and so
     -- at the take-off in the same frame), down 20 degrees from 576 u/s: a hit, a hit, then
-    -- set down, as the model has it.
+    -- set down, as the model has it (at PhysicsRate 100, as the landings above).
     local model = halfLifeHops(-20, 576, 100, 3)
-    local g = running()
+    -- (TakeKeys = false, as in 0.3: see "PhysicsRate 0 with frames of two lengths ...")
+    local g = running({ PhysicsRate = 100, TakeKeys = false })
     g.terrain = plane(g, -20)
     g.frame()
     local floor, readings, landings, before = fake.props(g.cmc).CurrentFloor, { 0 / 0, 1e9, -5 }, 0, g.mode()
@@ -2487,13 +2593,15 @@ end)
 
 t.test("a rise of 180 to 184 u/s against a slope starts no slide: Half-Life's next ground check has the player on "
     .. "the ground", function()
-    -- Running into a 20 degree slope, the clip leaves a rise of the speed times 0.3214.
-    -- Half-Life is in the air at the end of that update if it is over 180 u/s, but at the
-    -- start of the next, half an update of gravity later (4 u/s), on the ground again
+    -- Running into a 20 degree slope, the clip leaves a rise of 0.3214 times the speed the
+    -- update's ground move runs into it with, after its friction (4 % at 100 updates a
+    -- second). Half-Life is in the air at the end of that update if it is over 180 u/s, but
+    -- at the start of the next, half an update of gravity later (4 u/s), on the ground again
     -- unless it is still over 180: friction every update, and it may jump. So a slide
     -- starts from a rise over 184 u/s. (0.3.0 began one at 180, and ended it a frame later.)
+    -- At PhysicsRate 100: at 250 half an update of gravity is 1.6 u/s.
     local function runInto(speed)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.terrain = ramp(20, 300, 20000)
         runFastTo(g, speed * SCALE, 300)
         fake.props(g.cmc).Velocity.X = speed * SCALE
@@ -2502,19 +2610,19 @@ t.test("a rise of 180 to 184 u/s against a slope starts no slide: Half-Life's ne
         noErrors(g)
         return g
     end
-    local g = runInto(566) -- rising 181.9 u/s
+    local g = runInto(590) -- 566.4 u/s after the friction, rising 182.0
     t.absent(g.log, "Slope:")
     g.frames(20)
     t.absent(g.log, "Slope:")
-    g = runInto(580) -- rising 186.4 u/s
-    t.contains(g.log, "Slope: ran into a 20 degree slope at 580 u/s: sliding up it, rising 186 u/s")
+    g = runInto(600) -- 576 u/s, rising 185.1
+    t.contains(g.log, "Slope: ran into a 20 degree slope at 576 u/s: sliding up it, rising 185 u/s")
 
     -- The same at a landing that runs into a slope: a hop from level ground at 550 u/s onto
     -- 25 degrees. With the foot 225 units ahead it hits falling 152 u/s and the clip leaves
     -- a rise of 183.5 u/s: no slide. With the foot 216 units ahead it hits falling 144 u/s,
     -- and the rise of 184.9 u/s slides.
     local function hopOnto(distance)
-        g = running()
+        g = running({ PhysicsRate = 100 })
         local foot = g.position.X + distance * SCALE
         g.terrain = ramp(25, foot, foot + 1e6)
         fake.props(g.cmc).Velocity.X = 550 * SCALE
@@ -2630,7 +2738,8 @@ t.test("on a moving platform with a sloped floor, landings are decided as on sti
     -- the slope the platform moves the floor 1.8 cm up or down under the character in a
     -- frame: taken where it is at the frame's end, all three landings would be set down.
     -- At 150 cm/s they would keep their kinds, and only the heights would move, by 0.1 to
-    -- 0.4 units; with the velocity not taken relative to the platform, the same.)
+    -- 0.4 units; with the velocity not taken relative to the platform, the same.) At
+    -- PhysicsRate 100, as the landings above.
     local cases = {
         { name = "sideways and along the slope", platform = { X = 300, Y = 160, Z = 0 } },
         { name = "rising too", platform = { X = -120, Y = 0, Z = 60 } },
@@ -2646,7 +2755,7 @@ t.test("on a moving platform with a sloped floor, landings are decided as on sti
     end
     local onStillGround
     do
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         g.terrain = plane(g, -20)
         g.frames(3)
         onStillGround = kindsAndHeights(hopAlong(g, 576, 3))
@@ -2654,7 +2763,7 @@ t.test("on a moving platform with a sloped floor, landings are decided as on sti
         noErrors(g)
     end
     for _, case in ipairs(cases) do
-        local g = running(nil, { stayBasedInAir = case.stay })
+        local g = running({ PhysicsRate = 100 }, { stayBasedInAir = case.stay })
         local platform, still, began = case.platform, plane(g, -20), g.worldTime
         g.baseVelocity = platform
         g.terrain = function(x, y)
@@ -2680,8 +2789,9 @@ t.test("the landing of the game's own jump is decided like the mod's, and a cap 
     .. "change it", function()
     -- The game's jump (an input the mod doesn't read) starts in Unreal's update, on the
     -- frame's hook: the Half-Life updates count from there. (No friction, so that the
-    -- frame on the ground before it leaves the 576 u/s.)
-    local g = running({ Friction = 0 })
+    -- frame on the ground before it leaves the 576 u/s. At PhysicsRate 100, as the
+    -- landings above.)
+    local g = running({ Friction = 0, PhysicsRate = 100 })
     g.terrain = plane(g, -20)
     g.frame()
     -- First a hop of the mod's on the spot, from a walking height far from the one a
@@ -2705,7 +2815,7 @@ t.test("the landing of the game's own jump is decided like the mod's, and a cap 
     -- A listener of the landing's mode change that caps the speed inside the move (the
     -- game's speed limiter may be one): the character walks less far along the slope,
     -- but still on its plane. KeepSpeed undoes the cut first.
-    g = running(nil, { landingListenerClamps = true, maxSpeedIgnoresWalkSpeed = true })
+    g = running({ PhysicsRate = 100 }, { landingListenerClamps = true, maxSpeedIgnoresWalkSpeed = true })
     g.terrain = plane(g, -20)
     local landed = hopAlong(g, 576, 1)
     t.eq(g.landingClamps, 1, "the game capped the speed at the landing")
@@ -2724,7 +2834,8 @@ t.test("walking off a ledge onto a slope: Half-Life's updates count from where t
     -- on, from 0: the first hook the mod sees it in the air is where the updates count
     -- from. (The game's own jump starts a frame earlier, at the hook before the one that
     -- first sees it.) The model: a point that starts `height` units above the plane
-    -- below, moving level.
+    -- below, moving level. (At PhysicsRate 100, as the landings above: at 250 the fall
+    -- starts at -1.6 u/s.)
     local function halfLifeDrop(angle, speed, height)
         local tan, nx, nz = math.tan(math.rad(angle)), -math.sin(math.rad(angle)), math.cos(math.rad(angle))
         local dt = 1 / 100
@@ -2748,7 +2859,7 @@ t.test("walking off a ledge onto a slope: Half-Life's updates count from where t
     local kinds = { caught = 0, hit = 0 }
     for drop = 98, 106 do
         local what = "a drop of " .. drop .. " cm"
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         runTo(g, MAX_SPEED)
         local edge = g.position.X + 30
         local function below(x) -- a slope about 1 m under the ledge, falling away at 10 degrees
@@ -2862,7 +2973,7 @@ end)
 t.test("KeepSpeed: the game's landing cut is undone before the slope's clip, and a slide brings no cut lines",
     function()
         local options = { limiterWakesOnModeChange = true, maxSpeedIgnoresWalkSpeed = true }
-        local g = running(nil, options)
+        local g = running({ PhysicsRate = 100 }, options) -- (the landing above, at PhysicsRate 100)
         g.terrain = plane(g, 5)
         fake.props(g.cmc).Velocity.X = 282 * SCALE
         jump(g)
@@ -2932,9 +3043,10 @@ end)
 
 t.test("a pause right after a landing on a slope: the landing is handled after it, without the slope's clip", function()
     -- A hop from level ground at 320 u/s onto a 10 degree slope that begins 200 cm ahead
-    -- runs into it: the update before ends 2.5 units above it, and the clip takes 44 u/s.
+    -- runs into it: the update before ends 2.5 units above it, and the clip takes 44 u/s
+    -- (at PhysicsRate 100, as the landings above).
     local function land(pause)
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         runTo(g, MAX_SPEED)
         g.keys.W = false
         local x = g.position.X
@@ -3028,7 +3140,8 @@ t.test("so do the other flights the mod starts off a slope, going down it and at
     -- On a platform moving sideways, across the slope, so that it changes nothing under
     -- the character: over the ground its 200 u/s are in the take-off speed. (The frame
     -- the mod lands it in is the next flight's down a slope, so the lines are counted
-    -- before it.)
+    -- before it. The leap at PhysicsRate 100: at 250 a run at 700 u/s down 20 degrees
+    -- stays on the ground.)
     local function flight(g, what, text)
         t.truthy(untilMode(g, 3, 240), what .. ": flew off")
         local over = g.speed() / SCALE
@@ -3043,7 +3156,7 @@ t.test("so do the other flights the mod starts off a slope, going down it and at
         t.near(launch + tonumber(change), tonumber(landing), 1, what .. ": the landing's change is from it: " .. line)
         noErrors(g)
     end
-    local g = running()
+    local g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, -20)
     g.baseVelocity = { X = 0, Y = 200 * SCALE, Z = 0 }
     g.frame()
@@ -3111,8 +3224,9 @@ end)
 
 t.test("the hop line says what a landing on a slope did to the speed, and which kind of landing it was", function()
     -- Up 5 degrees from 282 u/s the first landing runs into the slope (see above). The
-    -- second, from 261.13 u/s, has an update end 0.9 units above the slope: set down.
-    local g = running()
+    -- second, from 261.13 u/s, has an update end 0.9 units above the slope: set down. (At
+    -- PhysicsRate 100, as the landings above.)
+    local g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, 5)
     local landed = hopAlong(g, 282, 2)
     t.truthy(landed[1].line:find("Hop 1 (", 1, true), landed[1].line)
@@ -3141,15 +3255,16 @@ local function slopeTotals(g)
 end
 
 t.test("hopping on the spot on a slope stays on the spot: eight seconds on 10 degrees move nothing and no landing "
-    .. "runs into the slope, at PhysicsRate 100 and 144", function()
+    .. "runs into the slope, at PhysicsRate 100, 144 and 250", function()
     -- Half-Life's hop on the spot takes 67 updates at 100 a second and ends 0.22 units
     -- above where it started, within the ground check's reach, on any slope: the player
     -- doesn't move sideways, so the floor under it doesn't change. (Measured in Half-Life
     -- itself on a 17.7 degree ramp: 67 updates, 0.220 units, speed 0 before and after,
-    -- hop after hop.) At 144 updates a second: 96 updates, 1.11 units. The heights in the
-    -- log are above the slope's plane, 0.03 units more. (0.3.0 ran every landing into the
-    -- slope: 49 m downhill in these 8 seconds.)
-    for _, case in ipairs({ { 100, 67, 0.2198, "0.3" }, { 144, 96, 1.1077, "1.1" } }) do
+    -- hop after hop.) At 144 updates a second: 96 updates, 1.11 units; at 250, the
+    -- default since 0.4.0: 166 updates, 1.81 units. The heights in the log are above the
+    -- slope's plane, 0.03 units more. (0.3.0 ran every landing into the slope: 49 m
+    -- downhill in these 8 seconds.)
+    for _, case in ipairs({ { 100, 67, 0.2198, "0.3" }, { 144, 96, 1.1077, "1.1" }, { 250, 166, 1.8115, "1.8" } }) do
         local rate = case[1]
         local model = halfLifeHops(10, 0, rate, 3)
         for i = 1, 3 do
@@ -3187,8 +3302,9 @@ t.test("hopping on the spot on a slope stays on the spot: eight seconds on 10 de
     -- The first hop from a walking height 0.75 cm below the one a landing leaves (more
     -- than Unreal's 0.5 cm of play): the floor's distance is read at both ends, so this
     -- hop too is set down. Taken for the same height, it would end 0.05 units behind
-    -- the slope's plane and run into it.
-    local g = running()
+    -- the slope's plane and run into it. (At PhysicsRate 100: at 250 the hop's last update
+    -- ends 1.8 units up, and 0.3 units lower is still within reach.)
+    local g = running({ PhysicsRate = 100 })
     g.terrain = plane(g, 10)
     g.frame()
     standAt(g, 1.4)
@@ -3366,9 +3482,13 @@ end)
 t.test("a slide up a rough slope after two boosts is logged to its end, and so is the next one after F7",
     function()
         -- As docs/TESTING.md step 9 has it: a boost off a ramp, the same with a tap of
-        -- Space, then a slide up a rough slope (20 +-6 degrees in 1 m segments) at 1200
+        -- Space, then (F7) a slide up a rough slope (20 +-6 degrees in 1 m segments) at 900
         -- u/s. In 0.3.0 the log had room for 10 such lines in a session, so the rough
-        -- slope got the last 4 of them, and a second try none.
+        -- slope got the last 4 of them, and a second try none. (0.3.1 took it at 1200 u/s
+        -- after the boosts without F7. Since the run into a slope comes after the update's
+        -- friction, Half-Life's order, a landing the ground check sets down runs into the
+        -- steeper segments in its own frame, with more speed, so the slide flies off and
+        -- lands again more often: from 900 u/s up to 24 lines, from 1200 u/s up to 30.)
         local NOTE = "(further slides and flights aren't logged)"
         local g = running()
         local function over(terrain, speed, frames, tap)
@@ -3407,7 +3527,8 @@ t.test("a slide up a rough slope after two boosts is logged to its end, and so i
         end
         t.eq(over(smooth, 2000, 120), 3, "a boost: ran into, flew off, landed")
         t.eq(over(smooth, 2000, 120, true), 3, "the same with a tap of Space")
-        local first = over(rough, 3000, 300)
+        g.press(F7)
+        local first = over(rough, 2250, 300)
         t.truthy(first >= 10, first .. " lines for the slide up the rough slope")
         -- (It ends on the slope, or where a bump left Half-Life's path out of the ground
         -- check's reach, in a short flight.)
@@ -3415,7 +3536,7 @@ t.test("a slide up a rough slope after two boosts is logged to its end, and so i
             "the slide's end is logged")
         t.absent(g.log, NOTE)
         g.press(F7)
-        local second = over(rough, 3000, 300)
+        local second = over(rough, 2250, 300)
         t.truthy(second >= 10, second .. " lines for the same slide after F7")
         t.truthy(6 + first + second > 30, "more lines than one count has room for: " .. 6 + first + second)
         t.absent(g.log, NOTE)

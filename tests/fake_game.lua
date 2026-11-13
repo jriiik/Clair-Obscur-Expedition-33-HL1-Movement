@@ -20,6 +20,9 @@
 -- MaxSimulationTimeStep is moved in one step. The camera follows Unreal's rule: the
 -- view target's first active camera component, in the order the components are
 -- listed, or the eyes with the FirstPerson style.
+--
+-- Other files add to the fake without changing this one (the Enhanced Input subsystem,
+-- a capsule that crouches): see "Extensions" below.
 
 local fake = {}
 
@@ -341,6 +344,18 @@ objectMeta.__newindex = function(self, key, value)
     end
 end
 
+-- A game function's object made with spec.call can be called, as UE4SS's UFunction objects
+-- can: obj(context, ...) runs spec.call(obj, context, ...) (a fake.ufunction counts it and
+-- checks the parameters). Any other object can't, as before.
+objectMeta.__call = function(self, ...)
+    local d = data[self]
+    if not (d and d.call) then
+        error("attempt to call a userdata value", 2)
+    end
+    live(self, "(a call)")
+    return d.call(self, ...)
+end
+
 local classes = {}
 
 function fake.object(spec)
@@ -368,6 +383,7 @@ function fake.object(spec)
         declared = declared,
         bytes = bytes,
         methods = spec.methods or {},
+        call = spec.call,
         world = spec.world,
         alive = true,
         address = spec.address or nextAddress,
@@ -439,7 +455,8 @@ function fake.copy(obj)
         props[key] = value
     end
     local copy = fake.object({ className = d.className, name = d.name .. "_Copy", chain = d.chain,
-        typeName = d.typeName, props = props, getters = d.getters, methods = d.methods, world = d.world })
+        typeName = d.typeName, props = props, getters = d.getters, methods = d.methods, call = d.call,
+        world = d.world })
     data[copy].declared, data[copy].bytes = d.declared, d.bytes
     return copy
 end
@@ -516,6 +533,127 @@ local function attachChild(parent, child)
     children[#children + 1] = child
 end
 
+-- Extensions -----------------------------------------------------------------
+--
+-- An extension is a table of functions the fake calls at fixed points of a game, each
+-- with the game first; every point is optional, and other fields are the extension's
+-- own. fake.extensions holds the modules named in fake.EXTENSION_MODULES that require can
+-- find (tests/fake_input.lua, tests/fake_hull.lua), loaded at the first fake.newGame of a
+-- run (so that they can require fake_game); one that is there but fails to load fails
+-- every game. Each game installs them, then the tables in options.extensions, in order
+-- (with options.noExtensionModules, only those); g.extensions lists them. An error in a
+-- point is raised where it happens and kept in g.extensionError, which the end of g.frame
+-- raises again, so one inside a game function the mod calls under pcall still fails the
+-- test. The points, in the order a game meets them (input is after the world's clock):
+--   install(g): once, at the end of fake.newGame, the game complete (g.pc, g.statics,
+--     g.c, every g.* function), the mod not loaded yet.
+--   character(g, c): for each character g.buildCharacter makes (c is what it returns):
+--     the first one after every install (g.c is c then), later ones before it returns.
+--   construct(g, className, outer): StaticConstructObject of a class the fake doesn't
+--     make itself: an object; nil (not this extension's: the next is asked); or false
+--     (StaticConstructObject raises, as when the engine can't make it).
+--   input(g, dt, paused): first in every frame's input phase, before the game's keys are
+--     read, the jump hook and the controller's tick; paused: Unreal runs the frame paused.
+--   gameKey(g, name, down) -> boolean: whether the game's own input sees the key held,
+--     each time the fake reads one (W, A, S, D, g.gameJumpKeys); down is what g.keys and
+--     the extensions before gave. The mod's polls don't ask it.
+--   gameJump(g) -> boolean: false keeps a press of the game's jump (the jump hook has
+--     run) from calling Unreal's Jump(); every extension is asked.
+--   poll(g, how, name, value) -> value: what the mod's poll of a key gives: how is "down"
+--     (IsInputKeyDown, a boolean), "pressed" (WasInputKeyJustPressed, a boolean) or
+--     "analog" (GetInputAnalogKeyState, a number); value is what g.keys, g.justPressed
+--     or g.analog and the extensions before gave (options.keyPollingBroken wins).
+--   beforeMove(g, dt, rootMotion): Unreal's UpdateCharacterStateBeforeMovement, in
+--     g.moveTick after the game's jump and before the move, which then takes the movement
+--     mode and the velocity as they are; with root motion (the fake moves nothing)
+--     right before afterMove. Not in movement mode None, nor in a frame run paused.
+--   moveShare(g, dt, share) -> number: the share of the frame's horizontal move that
+--     happens; share is g.moveShare's (or 1), then the extensions before's.
+--   afterMove(g, dt, rootMotion): Unreal's UpdateCharacterStateAfterMovement: after the
+--     move and a landing, before ALS's speed write, the speed limiter and g.afterMove.
+--   modeChanged(g, cmc, pawn, was, mode): after each movement mode change the fake makes:
+--     SetMovementMode (also one that keeps the mode), the game's jump, walking off a
+--     ledge (g.changeMode, all three), a landing.
+--   heightOffset(g, c) -> number: cm by which character c's actor location, and with it
+--     its eyes and the cameras on it, lies above g.position (the capsule's lowest
+--     point) beyond the standing capsule's; the extensions' numbers are added up.
+--   canWalkOff(g) -> boolean: where a walking move on g.terrain finds no floor within
+--     reach, whether Unreal's walking may leave the ledge (its CanWalkOffLedges); every
+--     extension is asked, and any false keeps the character on the ledge: the move is
+--     taken back and the horizontal velocity, worked out from the distance moved, is 0.
+-- Points read and write with fake.props, not through the objects, whose reads and calls
+-- count as the mod's (fake.counts). What else extensions build with: fake.object (with
+-- spec.call for a game function's object the mod calls), fake.ufunction, fake.set,
+-- fake.method, g.statics (StaticFindObject's), g.actorLocation, g.changeMode, g.setFloor.
+
+local POINTS = { "install", "character", "construct", "input", "gameKey", "gameJump", "poll", "beforeMove",
+    "moveShare", "afterMove", "modeChanged", "heightOffset", "canWalkOff" }
+fake.EXTENSION_POINTS = POINTS
+fake.EXTENSION_MODULES = { "fake_input", "fake_hull" }
+fake.extensions = nil -- the modules' tables, from the first fake.newGame of a run (nil: look again)
+
+local function checkExtension(ext, what)
+    if type(ext) ~= "table" then
+        error(what .. " is not a table of extension points", 0)
+    end
+    for _, name in ipairs(POINTS) do
+        if ext[name] ~= nil and type(ext[name]) ~= "function" then
+            error(string.format("%s: its %s is a %s, not a function", what, name, type(ext[name])), 0)
+        end
+    end
+    return ext
+end
+
+local function moduleExtensions()
+    if not fake.extensions then
+        local found = {}
+        for _, name in ipairs(fake.EXTENSION_MODULES) do
+            -- A module require can find (a file on package.path, or package.preload's), loaded
+            -- without pcall: an error in one that is there must not leave the games without it.
+            if package.preload[name] or package.searchpath(name, package.path) then
+                found[#found + 1] = checkExtension(require(name), name)
+            end
+        end
+        fake.extensions = found
+    end
+    return fake.extensions
+end
+
+local function noPoints()
+    local points = {}
+    for _, name in ipairs(POINTS) do
+        points[name] = {}
+    end
+    return points
+end
+
+-- Runs one extension point's function (see above).
+local function runPoint(g, fn, ...)
+    local ok, result = xpcall(fn, debug.traceback, g, ...)
+    if not ok then
+        g.extensionError = g.extensionError or tostring(result)
+        error(result, 0)
+    end
+    return result
+end
+
+-- What a point that gives a value gave, if it is of the kind wanted.
+local function pointValue(g, point, kind, value)
+    if type(value) ~= kind then
+        local message = string.format("the extension point %s gave a %s, not a %s", point, type(value), kind)
+        g.extensionError = g.extensionError or message
+        error(message, 0)
+    end
+    return value
+end
+
+-- Runs every extension's function of a point that gives nothing back.
+local function runPoints(g, list, ...)
+    for i = 1, #list do
+        runPoint(g, list[i], ...)
+    end
+end
+
 -- The game -------------------------------------------------------------------
 
 local CHARACTER = "/Game/jRPGTemplate/Blueprints/Basics/BP_jRPG_Character_World.BP_jRPG_Character_World_C"
@@ -589,7 +727,44 @@ function fake.newGame(options)
         tickPath = CONTROLLER .. ":ReceiveTick",
         characterTickPath = CHARACTER .. ":ReceiveTick",
         jumpPath = CHARACTER .. ":JumpAction",
+        gameJumpKeys = { "SpaceBar" }, -- the keys of the game's jump action that the fake reads
+        points = noPoints(), -- each extension point's functions, filled at the end of fake.newGame
     }
+
+    -- The extension points the fake asks for a value (see "Extensions").
+    local function polled(how, name, value)
+        local list = g.points.poll
+        for i = 1, #list do
+            value = pointValue(g, "poll", how == "analog" and "number" or "boolean",
+                runPoint(g, list[i], how, name, value))
+        end
+        return value
+    end
+    local function gameHeld(name, down)
+        local list = g.points.gameKey
+        for i = 1, #list do
+            down = pointValue(g, "gameKey", "boolean", runPoint(g, list[i], name, down))
+        end
+        return down
+    end
+    local function jumpCalled()
+        local list, called = g.points.gameJump, true
+        for i = 1, #list do
+            if not pointValue(g, "gameJump", "boolean", runPoint(g, list[i])) then
+                called = false
+            end
+        end
+        return called
+    end
+    local function walkOffAllowed()
+        local list, allowed = g.points.canWalkOff, true
+        for i = 1, #list do
+            if not pointValue(g, "canWalkOff", "boolean", runPoint(g, list[i])) then
+                allowed = false
+            end
+        end
+        return allowed
+    end
 
     -- UE4SS's globals
     _G.print = function(text)
@@ -880,6 +1055,14 @@ function fake.newGame(options)
         elseif d.name == "TextBlock" or d.name == "CommonNumericTextBlock" then
             return makeText(d.name, outer)
         end
+        for _, construct in ipairs(g.points.construct) do
+            local made = runPoint(g, construct, d.name, outer)
+            if made == false then
+                error("StaticConstructObject couldn't make a " .. tostring(d.name), 2)
+            elseif made ~= nil then
+                return made
+            end
+        end
         error("the fake can't make a " .. tostring(d.name))
     end
     if not options.noWidgetLibrary then
@@ -982,13 +1165,16 @@ function fake.newGame(options)
                 out.HasOverride = g.viewTarget ~= nil
             end),
             IsInputKeyDown = ufunction("IsInputKeyDown", 1, function(_, key)
-                return not options.keyPollingBroken and g.keys[keyName(key)] == true
+                local name = keyName(key)
+                return not options.keyPollingBroken and polled("down", name, g.keys[name] == true)
             end),
             WasInputKeyJustPressed = ufunction("WasInputKeyJustPressed", 1, function(_, key)
-                return not options.keyPollingBroken and g.justPressed[keyName(key)] == true
+                local name = keyName(key)
+                return not options.keyPollingBroken and polled("pressed", name, g.justPressed[name] == true)
             end),
             GetInputAnalogKeyState = ufunction("GetInputAnalogKeyState", 1, function(_, key)
-                return g.analog[keyName(key)] or 0
+                local name = keyName(key)
+                return polled("analog", name, g.analog[name] or 0)
             end),
             ClientSetCameraMode = ufunction("ClientSetCameraMode", 1, function(_, name)
                 g.cameraStyle = assert(fake.nameOf(name), "ClientSetCameraMode needs an FName")
@@ -1048,6 +1234,20 @@ function fake.newGame(options)
             return g.terrain(x, y)
         end
         return 0, 0, 0, 1
+    end
+
+    --- Where character c's actor is (default g.c), as a new table: at g.position, the
+    --- lowest point of its capsule, raised by what the extensions' heightOffset add.
+    function g.actorLocation(c)
+        local pos, list = g.position, g.points.heightOffset
+        if #list == 0 then
+            return { X = pos.X, Y = pos.Y, Z = pos.Z }
+        end
+        local offset = 0
+        for i = 1, #list do
+            offset = offset + pointValue(g, "heightOffset", "number", runPoint(g, list[i], c or g.c))
+        end
+        return { X = pos.X, Y = pos.Y, Z = pos.Z + offset }
     end
 
     -- The movement component's CurrentFloor: the floor under the character while it
@@ -1113,7 +1313,11 @@ function fake.newGame(options)
                 v.X, v.Y = v.X / s * 650, v.Y / s * 650
             end
         end
+        runPoints(g, g.points.modeChanged, cmc, pawn, was, mode)
     end
+    --- The movement mode change SetMovementMode makes, without counting a call:
+    --- g.changeMode(cmc, mode, pawn).
+    g.changeMode = changeMode
 
     -- The character, its parts and its movement component
     function g.buildCharacter()
@@ -1196,7 +1400,7 @@ function fake.newGame(options)
         -- Where a camera is in the world: on the spring arm, behind the character;
         -- attached to the capsule, at the capsule plus its relative location.
         function c.cameraAt(cam)
-            local pos = g.position
+            local pos = g.actorLocation(c)
             local link = c.attach[cam]
             local relative = fake.props(cam).RelativeLocation
             if link and same(link.parent, c.capsule) then
@@ -1524,7 +1728,7 @@ function fake.newGame(options)
                     g.stoppedJumps = g.stoppedJumps + 1
                 end),
                 K2_GetActorLocation = ufunction("K2_GetActorLocation", 0, function()
-                    return copyVector(g.position)
+                    return g.actorLocation(c)
                 end),
                 K2_GetActorRotation = ufunction("K2_GetActorRotation", 0, function()
                     return { Pitch = 0, Yaw = g.actorYaw or 0, Roll = 0 }
@@ -1554,6 +1758,7 @@ function fake.newGame(options)
                     return INVALID
                 end),
             } })
+        runPoints(g, g.points.character, c) -- (none yet for the first character: see the end of fake.newGame)
         return c
     end
 
@@ -1623,8 +1828,9 @@ function fake.newGame(options)
 
     --- The character's eyes, where a first-person camera should be.
     function g.eyes()
-        local pos = g.position
-        return { X = pos.X, Y = pos.Y, Z = pos.Z + fake.props(g.pawn).BaseEyeHeight }
+        local at = g.actorLocation()
+        at.Z = at.Z + fake.props(g.pawn).BaseEyeHeight
+        return at
     end
 
     local function wake()
@@ -1639,7 +1845,14 @@ function fake.newGame(options)
         local input = g.pending
         g.pending = { X = 0, Y = 0, Z = 0 }
         local mode = p.MovementMode
-        if mode == 0 or g.rootMotion then
+        if mode == 0 then
+            return
+        end
+        if g.rootMotion then
+            -- Unreal's update moves the character by its animation (the fake doesn't), between
+            -- its steps before and after the movement.
+            runPoints(g, g.points.beforeMove, dt, true)
+            runPoints(g, g.points.afterMove, dt, true)
             return
         end
         local v = p.Velocity
@@ -1659,6 +1872,10 @@ function fake.newGame(options)
                     als.InAirRotation.Yaw = als.Speed > 100 and als.LastVelocityRotation.Yaw or (g.actorYaw or 0)
                 end
             end
+        end
+        if #g.points.beforeMove > 0 then
+            runPoints(g, g.points.beforeMove, dt, false)
+            mode, v = p.MovementMode, p.Velocity -- as the extensions left them
         end
         local walking = mode == 1 or mode == 2
         local hasCurve = p.CurrentMovementSettings.MovementCurve ~= nil
@@ -1717,6 +1934,9 @@ function fake.newGame(options)
         end
         local pos = g.position
         local share = g.moveShare or 1
+        for _, fn in ipairs(g.points.moveShare) do
+            share = pointValue(g, "moveShare", "number", runPoint(g, fn, dt, share))
+        end
         local startZ = pos.Z
         -- Walking, Unreal moves along the line of the floor the move starts on
         -- (MoveAlongFloor) for the whole frame, also where that floor ends. (The terrain
@@ -1729,7 +1949,8 @@ function fake.newGame(options)
                 rise = -(nx * v.X + ny * v.Y) * dt * share / nz
             end
         end
-        pos.X, pos.Y, pos.Z = pos.X + v.X * dt * share, pos.Y + v.Y * dt * share, pos.Z + moveZ * dt
+        local ownX, ownY = v.X * dt * share, v.Y * dt * share
+        pos.X, pos.Y, pos.Z = pos.X + ownX, pos.Y + ownY, pos.Z + moveZ * dt
         local platform = g.baseVelocity
         if platform and (walking or p.bStayBasedInAir) then
             -- Unreal moves a character on a moving platform along with it, apart from
@@ -1766,6 +1987,12 @@ function fake.newGame(options)
                     pos.Z = ground
                     setFloor(g.cmc, nil)
                 end
+            elseif not walkOffAllowed() then
+                -- A ledge Unreal's walking may not leave (a crouched character, unless
+                -- bCanWalkOffLedgesWhenCrouching): it takes the move back, the platform's part
+                -- apart, and the velocity worked out from the distance moved is none.
+                pos.X, pos.Y, pos.Z = pos.X - ownX, pos.Y - ownY, startZ
+                v.X, v.Y = 0, 0
             else
                 -- No floor within reach: walking off a ledge, from where the floor's line led.
                 pos.Z = pos.Z + rise
@@ -1800,9 +2027,14 @@ function fake.newGame(options)
             -- ALS raises the braking friction for a moment after landing.
             p.BrakingFrictionFactor = inputLength > 0 and 0.5 or 3
             wake()
+            runPoints(g, g.points.modeChanged, g.cmc, g.pawn, 3, 1)
         end
         if p.MovementMode == 1 then
             v.Z = 0
+        end
+        if #g.points.afterMove > 0 then
+            runPoints(g, g.points.afterMove, dt, false)
+            v = p.Velocity -- as the extensions left it
         end
         -- ALS sets the walking speed for its gait when asked to.
         if p.bRequestMovementSettingsChange ~= 0 then
@@ -1947,9 +2179,13 @@ function fake.newGame(options)
         if not worldPaused then
             g.worldTime = g.worldTime + dt
         end
+        runPoints(g, g.points.input, dt, not not worldPaused)
+        local function held(name) -- 1 if the game's own input sees the key held, else 0
+            return gameHeld(name, g.keys[name] and true or false) and 1 or 0
+        end
         local function keyDirection()
-            local f = (g.keys.W and 1 or 0) - (g.keys.S and 1 or 0)
-            local r = (g.keys.D and 1 or 0) - (g.keys.A and 1 or 0)
+            local f = held("W") - held("S")
+            local r = held("D") - held("A")
             local yaw = math.rad(g.rotation.Yaw)
             return math.cos(yaw) * f - math.sin(yaw) * r, math.sin(yaw) * f + math.cos(yaw) * r
         end
@@ -1958,7 +2194,12 @@ function fake.newGame(options)
             g.pending.X = g.pending.X + x
             g.pending.Y = g.pending.Y + y
         end
-        local jumpDown = g.keys.SpaceBar == true
+        local jumpDown = false
+        for _, name in ipairs(g.gameJumpKeys) do
+            if gameHeld(name, g.keys[name] == true) then
+                jumpDown = true
+            end
+        end
         local jumpHook = g.hooks[g.jumpPath]
         local function callJumpHook(pressed)
             g.inHook = true
@@ -1975,7 +2216,7 @@ function fake.newGame(options)
             -- the ground (its MovementState is Grounded while Unreal walks it), so
             -- bPressedJump is set again on every frame the key is held there.
             local mode = fake.props(g.cmc).MovementMode
-            if jumpDown and (not g.jumpWasDown or mode == 1 or mode == 2) then
+            if jumpDown and (not g.jumpWasDown or mode == 1 or mode == 2) and jumpCalled() then
                 g.pressedJump = true
             end
             g.jumpWasDown = jumpDown
@@ -1984,7 +2225,7 @@ function fake.newGame(options)
             if jumpHook then
                 callJumpHook(jumpDown)
             end
-            if jumpDown then
+            if jumpDown and jumpCalled() then
                 g.pressedJump = true
             end
         end
@@ -2019,6 +2260,9 @@ function fake.newGame(options)
         end
         g.justPressed = {}
         g.time = g.time + dt
+        if g.extensionError then
+            error("an extension point failed: " .. g.extensionError, 0)
+        end
     end
 
     function g.frames(count, dt, each)
@@ -2029,6 +2273,27 @@ function fake.newGame(options)
             g.frame(dt)
         end
     end
+
+    -- The extensions (see "Extensions"): the files', then the game's own; then each one's
+    -- install, then the first character for them.
+    g.extensions = {}
+    if not options.noExtensionModules then
+        for _, ext in ipairs(moduleExtensions()) do
+            g.extensions[#g.extensions + 1] = ext
+        end
+    end
+    for i, ext in ipairs(options.extensions or {}) do
+        g.extensions[#g.extensions + 1] = checkExtension(ext, "options.extensions[" .. i .. "]")
+    end
+    for _, ext in ipairs(g.extensions) do
+        for _, name in ipairs(POINTS) do
+            if ext[name] then
+                table.insert(g.points[name], ext[name])
+            end
+        end
+    end
+    runPoints(g, g.points.install)
+    runPoints(g, g.points.character, g.c)
 
     return g
 end

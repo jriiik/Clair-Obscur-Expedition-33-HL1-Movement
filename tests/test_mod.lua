@@ -151,7 +151,7 @@ end
 
 t.test("loads, binds its keys and waits for a save", function()
     local g = start()
-    t.contains(g.log, "Version 0.3.1 loaded")
+    t.contains(g.log, "Version 0.4.0 loaded")
     t.contains(g.log, "F9 shows the speedometer")
     for _, code in ipairs({ F5, F6, F7, F8, F9 }) do
         t.truthy(g.keybinds[code], "key bind " .. code)
@@ -248,7 +248,7 @@ t.test("hotkeys work before a save is loaded", function()
         searched = true
     end
     g.keybinds[F8]()
-    t.contains(g.log, "HL1Movement 0.3.1 diagnostics")
+    t.contains(g.log, "HL1Movement 0.4.0 diagnostics")
     t.contains(g.log, "No player controller yet. Load a save, then press the report key again.")
     t.falsy(searched, "no search of the game's objects, which can crash it while it loads")
 end)
@@ -976,7 +976,7 @@ end)
 t.test("with updates at 100 a second, friction is Half-Life's whatever the frame rate", function()
     local speeds = {}
     for _, dt in ipairs({ 1 / 30, 1 / 100 }) do
-        local g = running()
+        local g = running({ PhysicsRate = 100 })
         runTo(g, MAX_SPEED)
         g.keys.W = false
         g.frames(math.floor(0.2 / dt + 0.5), dt)
@@ -1044,7 +1044,8 @@ t.test("without auto hop, holding jump doesn't hop again", function()
 end)
 
 t.test("a scroll-wheel press counts as a jump", function()
-    local g = running({ AutoHop = false, JumpKeys = { "MouseScrollDown" } })
+    -- (DuckKeys = {}: the wheel down is a duck key by default, a duck tap by hand.)
+    local g = running({ AutoHop = false, JumpKeys = { "MouseScrollDown" }, DuckKeys = {} })
     g.justPressed.MouseScrollDown = true
     g.frame()
     t.eq(g.mode(), 3)
@@ -2140,7 +2141,7 @@ t.test("F7 reloads the settings, and the log says what that changed", function()
     fake.useConfig({ BodyFollowsHop = false, PhysicsRate = 144 })
     g.press(F7)
     t.contains(g.log, "Changed: BodyFollowsHop = false (was true), FieldOfView = 100 (was 110), "
-        .. "PhysicsRate = 144 (was 100).")
+        .. "PhysicsRate = 144 (was 250).")
     noErrors(g)
 end)
 
@@ -2193,7 +2194,7 @@ end)
 t.test("F8 writes a diagnostics report", function()
     local g = running()
     g.press(F8)
-    t.contains(g.log, "HL1Movement 0.3.1 diagnostics")
+    t.contains(g.log, "HL1Movement 0.4.0 diagnostics")
     t.contains(g.log, "Movement component:")
     t.contains(g.log, "Camera manager:")
     t.contains(g.log, "BP_VelocityControllerComponent_C")
@@ -2446,7 +2447,9 @@ t.test("if the curve can't be taken out, its braking is cancelled out instead", 
 end)
 
 t.test("if the keys can't be read, the game's input and jump event are used", function()
-    local g = running(nil, { keyPollingBroken = true })
+    -- (TakeKeys = false: with the keys taken, the game's jump action never sees Space, so its
+    -- event can't stand in for the keys; 0.3's path, which TakeKeys = false keeps.)
+    local g = running({ TakeKeys = false }, { keyPollingBroken = true })
     g.keys.W = true
     g.frames(30)
     t.near(g.speed(), MAX_SPEED, 1, "direction from the game's movement input")
@@ -3110,12 +3113,15 @@ t.test("the log takes 200 state lines in all, and F7 makes room for 200 more", f
     local log = require("hl1movement.log") -- the copy main.lua loaded
     local NOTE = "(Further changes of state aren't logged.)"
     -- The state lines from log line `from` on: the mod's own, and this test's. (Not a
-    -- report's lines, two of which begin like one.)
+    -- report's lines, two of which begin like one, nor the keys' line about the game's
+    -- actions at the first take, which begins like a state line of the keys.)
     local function stateLines(from)
         local n = 0
+        local topics = { "First person", "Half-Life movement", "Character", "Keys", "Ducking", "A part" }
         for i = from, #g.log do
-            for _, topic in ipairs({ "First person", "Half-Life movement", "Character", "A part" }) do
-                if g.log[i]:find("] " .. topic .. ": ", 1, true) and not inReport(g.log, i) then
+            for _, topic in ipairs(topics) do
+                if g.log[i]:find("] " .. topic .. ": ", 1, true) and not inReport(g.log, i)
+                    and not g.log[i]:find("] Keys: while the mod moves you", 1, true) then
                     n = n + 1
                 end
             end
@@ -3205,8 +3211,8 @@ t.test("a word in config.lua that Lua doesn't know (a misspelt false, a name wit
     t.contains(since, "WARNING: config.lua has a word Lua doesn't know: False (line 3). It counts as \"not set\"")
     t.eq(count(since, "Lua doesn't know"), 1, "only the slip")
     -- The reload's own line names what did change: not the setting with the slip.
-    t.contains(since, 'Changed: BodySounds = false (was true), JumpKeys = { "SpaceBar", "Gamepad_FaceButton_Bottom" } '
-        .. "(was {  }), PhysicsRate = 100 (was 144).")
+    t.contains(since, 'Changed: BodySounds = false (was true), JumpKeys = { "SpaceBar", "MouseScrollUp", '
+        .. '"Gamepad_FaceButton_Bottom" } (was {  }), PhysicsRate = 250 (was 144).')
     t.contains(since, "(BodySounds=false)", "the word that is right was read")
     t.contains(since, "SlopeBoosts=true", "the other kept its default")
     -- A file without slips: nothing.
